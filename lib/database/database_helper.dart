@@ -31,10 +31,17 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: 2,
         onCreate: _createDB,
+        onUpgrade: _upgradeDB,
       ),
     );
+  }
+
+  Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('ALTER TABLE owners ADD COLUMN iban TEXT;');
+    }
   }
 
   Future _createDB(Database db, int version) async {
@@ -157,6 +164,7 @@ class DatabaseHelper {
         name TEXT NOT NULL,
         identity_number TEXT,
         mobile TEXT,
+        iban TEXT,
         account_id INTEGER,
         commission_rate REAL,
         FOREIGN KEY (account_id) REFERENCES accounts (id)
@@ -541,25 +549,7 @@ class DatabaseHelper {
         final debit = line['debit'] ?? 0.0;
         final credit = line['credit'] ?? 0.0;
 
-        // Fetch account type to determine balance update logic
-        final accountResult = await txn.query('accounts', where: 'id = ?', whereArgs: [accountId]);
-        if (accountResult.isNotEmpty) {
-          final accountType = accountResult.first['account_type'] as String?;
-          double currentBalance = (accountResult.first['balance'] as num?)?.toDouble() ?? 0.0;
-
-          if (accountType == 'Asset' || accountType == 'Expense') {
-             currentBalance += (debit - credit);
-          } else if (accountType == 'Liability' || accountType == 'Revenue') {
-             currentBalance += (credit - debit);
-          }
-
-          await txn.update(
-            'accounts',
-            {'balance': currentBalance},
-            where: 'id = ?',
-            whereArgs: [accountId],
-          );
-        }
+        await _updateBalanceTx(txn, accountId, debit, credit);
       }
     });
   }
@@ -660,6 +650,96 @@ class DatabaseHelper {
           break;
         }
      }
+  }
+
+  // --- Owner & Property Operations ---
+
+  Future<void> insertOwnerWithAccount(Map<String, dynamic> owner) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Find the parent account for Owners (code: '2101')
+      final parentResult = await txn.query('accounts', where: 'code = ?', whereArgs: ['2101']);
+      if (parentResult.isEmpty) throw Exception('حساب الملاك الرئيسي غير موجود (2101)');
+
+      final parentId = parentResult.first['id'] as int;
+      final parentCode = parentResult.first['code'] as String;
+
+      // 2. Generate Account Code for the new owner
+      final childrenResult = await txn.query(
+        'accounts',
+        where: 'parent_id = ?',
+        whereArgs: [parentId],
+        orderBy: 'code DESC',
+        limit: 1,
+      );
+
+      String newCode;
+      if (childrenResult.isEmpty) {
+        newCode = '${parentCode}01';
+      } else {
+        final lastChildCode = childrenResult.first['code'] as String;
+        final sequenceStr = lastChildCode.substring(parentCode.length);
+        int sequence = int.tryParse(sequenceStr) ?? 0;
+        sequence++;
+        newCode = '$parentCode${sequence.toString().padLeft(2, '0')}';
+      }
+
+      // 3. Create the sub-account
+      final newAccount = {
+        'code': newCode,
+        'name': owner['name'],
+        'parent_id': parentId,
+        'account_type': 'Liability', // Since '2101' is a liability
+        'balance': 0.0,
+      };
+
+      final accountId = await txn.insert('accounts', newAccount);
+
+      // 4. Insert Owner linked to the new account
+      owner['account_id'] = accountId;
+      await txn.insert('owners', owner);
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getAllOwners() async {
+    final db = await instance.database;
+    return await db.query('owners');
+  }
+
+  Future<int> insertProperty(Map<String, dynamic> property) async {
+    final db = await instance.database;
+    return await db.insert('properties', property);
+  }
+
+  Future<List<Map<String, dynamic>>> getProperties() async {
+    final db = await instance.database;
+    // Basic join could be done here, but let's fetch plain properties for now
+    return await db.query('properties');
+  }
+
+  Future<int> insertUnit(Map<String, dynamic> unit) async {
+    final db = await instance.database;
+    return await db.insert('units', unit);
+  }
+
+  Future<List<Map<String, dynamic>>> getUnitsForProperty(int propertyId) async {
+    final db = await instance.database;
+    return await db.query('units', where: 'property_id = ?', whereArgs: [propertyId]);
+  }
+
+  Future<void> updateUnit(Map<String, dynamic> unit) async {
+    final db = await instance.database;
+    await db.update(
+      'units',
+      unit,
+      where: 'id = ?',
+      whereArgs: [unit['id']],
+    );
+  }
+
+  Future<void> deleteUnit(int id) async {
+    final db = await instance.database;
+    await db.delete('units', where: 'id = ?', whereArgs: [id]);
   }
 
   Future close() async {

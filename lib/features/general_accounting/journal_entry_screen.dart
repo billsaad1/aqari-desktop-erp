@@ -34,6 +34,17 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
   double get difference => totalDebit - totalCredit;
   bool get isValidEntry => totalDebit == totalCredit && totalDebit > 0 && _formKey.currentState?.validate() == true;
 
+  @override
+  void dispose() {
+    for (var line in lines) {
+      line.debitController.dispose();
+      line.creditController.dispose();
+    }
+    _dateController.dispose();
+    _descController.dispose();
+    super.dispose();
+  }
+
   void _addLine() {
     setState(() {
       lines.add(JournalLine());
@@ -232,13 +243,16 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
           Expanded(
             flex: 1,
             child: TextFormField(
-              initialValue: line.debit?.toString() ?? '',
+              controller: line.debitController,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(labelText: 'مدين', isDense: true, border: OutlineInputBorder()),
               onChanged: (val) {
                 setState(() {
                   line.debit = double.tryParse(val);
-                  if (line.debit != null && line.debit! > 0) line.credit = 0; // mutually exclusive logic can be applied if needed
+                  if (line.debit != null && line.debit! > 0) {
+                     line.credit = 0;
+                     line.creditController.text = '';
+                  }
                 });
               },
             ),
@@ -247,13 +261,16 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
           Expanded(
             flex: 1,
             child: TextFormField(
-              initialValue: line.credit?.toString() ?? '',
+              controller: line.creditController,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(labelText: 'دائن', isDense: true, border: OutlineInputBorder()),
               onChanged: (val) {
                 setState(() {
                   line.credit = double.tryParse(val);
-                  if (line.credit != null && line.credit! > 0) line.debit = 0;
+                  if (line.credit != null && line.credit! > 0) {
+                     line.debit = 0;
+                     line.debitController.text = '';
+                  }
                 });
               },
             ),
@@ -295,6 +312,8 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
 }
 
 class JournalLine {
+  final TextEditingController debitController = TextEditingController();
+  final TextEditingController creditController = TextEditingController();
   int? accountId;
   double? debit;
   double? credit;
