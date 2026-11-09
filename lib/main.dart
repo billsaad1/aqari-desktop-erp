@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'database/database_helper.dart';
+import 'providers/auth_provider.dart';
+import 'providers/navigation_provider.dart';
+import 'features/auth/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -12,8 +15,8 @@ void main() async {
   runApp(
     MultiProvider(
       providers: [
-        // Add providers here later for state management
-        Provider<DatabaseHelper>.value(value: DatabaseHelper.instance),
+        ChangeNotifierProvider(create: (_) => AuthProvider()),
+        ChangeNotifierProvider(create: (_) => NavigationProvider()),
       ],
       child: const ERPApp(),
     ),
@@ -42,38 +45,7 @@ class ERPApp extends StatelessWidget {
         Locale('ar', 'SA'), // Arabic
       ],
       locale: const Locale('ar', 'SA'),
-      home: const InitialScreen(),
-    );
-  }
-}
-
-class InitialScreen extends StatelessWidget {
-  const InitialScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('تهيئة النظام'),
-      ),
-      body: Center(
-        child: FutureBuilder(
-          future: DatabaseHelper.instance.database,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const CircularProgressIndicator();
-            } else if (snapshot.hasError) {
-              return Text('خطأ في تهيئة قاعدة البيانات: \${snapshot.error}');
-            } else {
-              return const Text(
-                'تم تهيئة قاعدة البيانات وإنشاء الجداول بنجاح!\nمرحباً بك في نظام مؤسسة عبدالله النقيب التجارية.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 18),
-              );
-            }
-          },
-        ),
-      ),
+      home: const LoginScreen(),
     );
   }
 }

@@ -374,6 +374,110 @@ class DatabaseHelper {
     }
   }
 
+  // --- CRUD Operations for Authentication and Users ---
+
+  Future<Map<String, dynamic>?> getUserByUsername(String username) async {
+    final db = await instance.database;
+    final result = await db.query(
+      'users',
+      where: 'username = ?',
+      whereArgs: [username],
+    );
+    if (result.isNotEmpty) {
+      return result.first;
+    }
+    return null;
+  }
+
+  Future<List<Map<String, dynamic>>> getAllUsers() async {
+    final db = await instance.database;
+    return await db.query('users');
+  }
+
+  Future<int> insertUser(Map<String, dynamic> user) async {
+    final db = await instance.database;
+    return await db.insert('users', user);
+  }
+
+  Future<int> updateUser(Map<String, dynamic> user) async {
+    final db = await instance.database;
+    return await db.update(
+      'users',
+      user,
+      where: 'id = ?',
+      whereArgs: [user['id']],
+    );
+  }
+
+  Future<int> deleteUser(int id) async {
+    final db = await instance.database;
+    return await db.delete(
+      'users',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  // --- CRUD Operations for Audit Logs ---
+
+  Future<int> insertAuditLog(Map<String, dynamic> log) async {
+    final db = await instance.database;
+    return await db.insert('audit_logs', log);
+  }
+
+  // --- CRUD Operations for Company Info ---
+
+  Future<Map<String, dynamic>?> getCompanyInfo() async {
+    final db = await instance.database;
+    final result = await db.query('company_info');
+    if (result.isNotEmpty) {
+      return result.first;
+    }
+    return null;
+  }
+
+  Future<int> updateCompanyInfo(Map<String, dynamic> info) async {
+    final db = await instance.database;
+    // Assuming there's only one company info record with id = 1
+    return await db.update(
+      'company_info',
+      info,
+      where: 'id = ?',
+      whereArgs: [1],
+    );
+  }
+
+  // --- Generic CRUD Operations for Lookups ---
+
+  Future<List<Map<String, dynamic>>> getLookupData(String tableName) async {
+    final db = await instance.database;
+    return await db.query(tableName);
+  }
+
+  Future<int> insertLookupData(String tableName, Map<String, dynamic> data) async {
+    final db = await instance.database;
+    return await db.insert(tableName, data);
+  }
+
+  Future<int> updateLookupData(String tableName, Map<String, dynamic> data) async {
+    final db = await instance.database;
+    return await db.update(
+      tableName,
+      data,
+      where: 'id = ?',
+      whereArgs: [data['id']],
+    );
+  }
+
+  Future<int> deleteLookupData(String tableName, int id) async {
+    final db = await instance.database;
+    return await db.delete(
+      tableName,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future close() async {
     final db = await instance.database;
     db.close();
