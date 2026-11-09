@@ -87,19 +87,37 @@ class AppSidebar extends StatelessWidget {
           ),
           const SizedBox(height: 32),
           Expanded(
-            child: ListView(
-              children: [
-                _buildNavItem(context, 'الرئيسية', Icons.dashboard, 0, navProvider),
-                _buildNavItem(context, 'إعدادات النظام', Icons.settings, 1, navProvider),
-                _buildNavItem(context, 'الإضافات', Icons.list_alt, 2, navProvider),
-                _buildNavItem(context, 'العقار والملاك', Icons.location_city, 3, navProvider),
-                _buildNavItem(context, 'المستأجرين', Icons.people, 4, navProvider),
-                _buildNavItem(context, 'عمليات المستأجرين', Icons.monetization_on, 5, navProvider),
-                _buildNavItem(context, 'الحسابات', Icons.account_balance_wallet, 6, navProvider),
-                _buildNavItem(context, 'التقارير', Icons.bar_chart, 7, navProvider),
-                _buildNavItem(context, 'الرسائل النصية', Icons.message, 8, navProvider),
-                _buildNavItem(context, 'خدمات البرنامج', Icons.build, 9, navProvider),
-              ],
+            child: Consumer<AuthProvider>(
+              builder: (context, auth, _) {
+                final role = auth.currentUser?.role ?? '';
+                final isSuperOrAdmin = role == 'SuperAdmin' || role == 'Admin';
+                final isAccountant = role == 'Accountant';
+                final isDataEntry = role == 'DataEntry';
+
+                return ListView(
+                  children: [
+                    _buildNavItem(context, 'الرئيسية', Icons.dashboard, 0, navProvider),
+                    if (isSuperOrAdmin)
+                      _buildNavItem(context, 'إعدادات النظام', Icons.settings, 1, navProvider),
+                    if (isSuperOrAdmin || isDataEntry)
+                      _buildNavItem(context, 'الإضافات', Icons.list_alt, 2, navProvider),
+                    if (isSuperOrAdmin || isDataEntry)
+                      _buildNavItem(context, 'العقار والملاك', Icons.location_city, 3, navProvider),
+                    if (isSuperOrAdmin || isAccountant || isDataEntry)
+                      _buildNavItem(context, 'المستأجرين', Icons.people, 4, navProvider), // All can see, functionality depends on screen inner RBAC, but DataEntry & Accountant need it
+                    if (isSuperOrAdmin || isAccountant)
+                      _buildNavItem(context, 'عمليات المستأجرين', Icons.monetization_on, 5, navProvider),
+                    if (isSuperOrAdmin || isAccountant)
+                      _buildNavItem(context, 'الحسابات', Icons.account_balance_wallet, 6, navProvider),
+                    if (isSuperOrAdmin || isAccountant)
+                      _buildNavItem(context, 'التقارير', Icons.bar_chart, 7, navProvider),
+                    if (isSuperOrAdmin || isAccountant)
+                      _buildNavItem(context, 'الرسائل النصية', Icons.message, 8, navProvider),
+                    if (isSuperOrAdmin)
+                      _buildNavItem(context, 'خدمات البرنامج', Icons.build, 9, navProvider),
+                  ],
+                );
+              },
             ),
           ),
           const Divider(color: Colors.white54),

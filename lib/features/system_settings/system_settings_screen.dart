@@ -230,67 +230,91 @@ class _UsersTabState extends State<UsersTab> {
     final fullNameController = TextEditingController();
     final usernameController = TextEditingController();
     final passwordController = TextEditingController();
-    final roleController = TextEditingController();
-    roleController.text = 'User';
+    String selectedRole = 'DataEntry';
+
+    final List<String> roles = ['SuperAdmin', 'Admin', 'Accountant', 'DataEntry'];
+    final Map<String, String> roleLabels = {
+      'SuperAdmin': 'SuperAdmin (مدير نظام)',
+      'Admin': 'Admin (مدير)',
+      'Accountant': 'Accountant (محاسب)',
+      'DataEntry': 'DataEntry (مدخل بيانات)',
+    };
 
     showDialog(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: const Text('إضافة مستخدم جديد'),
-          content: Form(
-            key: formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  controller: fullNameController,
-                  decoration: const InputDecoration(labelText: 'الاسم الكامل'),
-                  validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('إضافة مستخدم جديد'),
+              content: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: fullNameController,
+                      decoration: const InputDecoration(labelText: 'الاسم الكامل'),
+                      validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+                    ),
+                    TextFormField(
+                      controller: usernameController,
+                      decoration: const InputDecoration(labelText: 'اسم المستخدم'),
+                      validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+                    ),
+                    TextFormField(
+                      controller: passwordController,
+                      decoration: const InputDecoration(labelText: 'كلمة المرور'),
+                      obscureText: true,
+                      validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+                    ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      value: selectedRole,
+                      decoration: const InputDecoration(labelText: 'الدور'),
+                      items: roles.map((role) {
+                        return DropdownMenuItem<String>(
+                          value: role,
+                          child: Text(roleLabels[role]!),
+                        );
+                      }).toList(),
+                      onChanged: (String? newValue) {
+                        if (newValue != null) {
+                          setDialogState(() {
+                            selectedRole = newValue;
+                          });
+                        }
+                      },
+                    ),
+                  ],
                 ),
-                TextFormField(
-                  controller: usernameController,
-                  decoration: const InputDecoration(labelText: 'اسم المستخدم'),
-                  validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('إلغاء'),
                 ),
-                TextFormField(
-                  controller: passwordController,
-                  decoration: const InputDecoration(labelText: 'كلمة المرور'),
-                  obscureText: true,
-                  validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                ),
-                TextFormField(
-                  controller: roleController,
-                  decoration: const InputDecoration(labelText: 'الدور (مثال: Admin, User)'),
-                  validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+                ElevatedButton(
+                  onPressed: () async {
+                    if (formKey.currentState!.validate()) {
+                      final hashedPassword = CryptoUtils.hashPassword(passwordController.text);
+                      await DatabaseHelper.instance.insertUser({
+                        'full_name': fullNameController.text,
+                        'username': usernameController.text,
+                        'password_hash': hashedPassword,
+                        'role': selectedRole,
+                      });
+                      if (context.mounted) {
+                        Navigator.pop(context);
+                        _loadUsers();
+                      }
+                    }
+                  },
+                  child: const Text('حفظ'),
                 ),
               ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('إلغاء'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                if (formKey.currentState!.validate()) {
-                  final hashedPassword = CryptoUtils.hashPassword(passwordController.text);
-                  await DatabaseHelper.instance.insertUser({
-                    'full_name': fullNameController.text,
-                    'username': usernameController.text,
-                    'password_hash': hashedPassword,
-                    'role': roleController.text,
-                  });
-                  if (context.mounted) {
-                    Navigator.pop(context);
-                    _loadUsers();
-                  }
-                }
-              },
-              child: const Text('حفظ'),
-            ),
-          ],
+            );
+          }
         );
       },
     );
