@@ -1,8 +1,4 @@
-1. **Fix Database Migration:** Increment database version to 5 in `lib/database/database_helper.dart`. In the `_upgradeDB` method, add the necessary `ALTER TABLE` statements to add `logo_path` and `terms_conditions` to the `company_info` table for users migrating from version 4.
-2. **Add Arabic Fonts:**
-   - Download the 'Cairo' font family (Regular and Bold) or download a standard Arabic font.
-   - Create an `assets/fonts` directory.
-   - Move the downloaded `.ttf` files to `assets/fonts`.
-   - Update `pubspec.yaml` to declare the font assets.
-3. **Execute Pre-commit instructions:** Run `flutter analyze` and `flutter test`. Ensure font loading and DB upgrades are handled.
-4. **Submit changes.**
+1. **Fix Downloaded Font Assets**: Re-download the actual binary TTF fonts using correct URLs from Google Fonts (e.g. `https://fonts.gstatic.com/s/cairo/v28/SLXVc1nY6HkvalvT.ttf` for regular, etc.) or reliable raw github links, and replace the corrupted HTML files in `assets/fonts/`.
+2. **Fix Database Migration**: Add the missing `ALTER TABLE company_info ADD COLUMN logo_path TEXT;` to the version 5 upgrade block in `lib/database/database_helper.dart`. Note that `logo_path` was added in a previous commit's `_createDB`, but existing DBs running older schemas (like version 4) need it added via migration.
+3. **Execute Pre-commit instructions**: Run `flutter analyze` and `flutter test`. Ensure fonts are valid binaries.
+4. **Submit changes**.

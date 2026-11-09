@@ -54,6 +54,11 @@ class DatabaseHelper {
     }
     if (oldVersion < 5) {
       try {
+        await db.execute('ALTER TABLE company_info ADD COLUMN logo_path TEXT;');
+      } catch (e) {
+        // Ignored if already exists
+      }
+      try {
         await db.execute('ALTER TABLE company_info ADD COLUMN terms_conditions TEXT;');
       } catch (e) {
         // Ignored if already exists
