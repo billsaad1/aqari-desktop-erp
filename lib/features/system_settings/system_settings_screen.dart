@@ -19,7 +19,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> with Single
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
   }
 
   @override
@@ -39,6 +39,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> with Single
           tabs: const [
             Tab(text: 'بيانات المنشأة'),
             Tab(text: 'المستخدمين والصلاحيات'),
+            Tab(text: 'الصيانة والنسخ الاحتياطي'),
           ],
         ),
         Expanded(
@@ -47,6 +48,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> with Single
             children: const [
               CompanyInfoTab(),
               UsersTab(),
+              MaintenanceTab(),
             ],
           ),
         ),
