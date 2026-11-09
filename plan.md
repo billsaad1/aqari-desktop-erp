@@ -1,12 +1,8 @@
-1. **Update `company_info` table and model:**
-   - Add `terms_conditions` TEXT column in `database_helper.dart` to `company_info` table.
-   - Update `lib/models/company_info_model.dart` to include `termsConditions` field.
-2. **Update `SystemSettingsScreen`:**
-   - Add input fields for `logoPath` (String input for file path) and `termsConditions` (multiline text field) in `_CompanyInfoTabState`.
-3. **Update `contracts_screen.dart` and add PDF generation:**
-   - Import `pdf` and `printing` packages.
-   - Add a Print button (`Icons.print`) to the "إدارة العقود الحالية" list.
-   - Implement `_printContract(contract)` function that queries contract details, tenant info, property/unit info, generated installments, and `company_info`.
-   - Generate a PDF using `pw.Document()` that displays the company logo (from `logoPath` if exists), terms and conditions, contract details, and installments table.
-4. **Execute Pre-commit Instructions:** Run `flutter analyze` and `flutter test`. Skip playwright since it's a desktop app.
-5. **Submit changes.**
+1. **Fix Database Migration:** Increment database version to 5 in `lib/database/database_helper.dart`. In the `_upgradeDB` method, add the necessary `ALTER TABLE` statements to add `logo_path` and `terms_conditions` to the `company_info` table for users migrating from version 4.
+2. **Add Arabic Fonts:**
+   - Download the 'Cairo' font family (Regular and Bold) or download a standard Arabic font.
+   - Create an `assets/fonts` directory.
+   - Move the downloaded `.ttf` files to `assets/fonts`.
+   - Update `pubspec.yaml` to declare the font assets.
+3. **Execute Pre-commit instructions:** Run `flutter analyze` and `flutter test`. Ensure font loading and DB upgrades are handled.
+4. **Submit changes.**

@@ -31,7 +31,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 4,
+        version: 5,
         onCreate: _createDB,
         onUpgrade: _upgradeDB,
       ),
@@ -51,6 +51,13 @@ class DatabaseHelper {
     if (oldVersion < 4) {
       await db.execute('ALTER TABLE sms_settings ADD COLUMN reminder_template TEXT;');
       await db.execute('ALTER TABLE sms_settings ADD COLUMN receipt_template TEXT;');
+    }
+    if (oldVersion < 5) {
+      try {
+        await db.execute('ALTER TABLE company_info ADD COLUMN terms_conditions TEXT;');
+      } catch (e) {
+        // Ignored if already exists
+      }
     }
   }
 
