@@ -6,6 +6,7 @@ import '../auth/login_screen.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../system_settings/system_settings_screen.dart';
 import '../master_data/lookups_screen.dart';
+import '../general_accounting/accounting_main_screen.dart';
 
 class MainShellScreen extends StatelessWidget {
   const MainShellScreen({super.key});
@@ -43,7 +44,7 @@ class MainShellScreen extends StatelessWidget {
       case 4:
         return const Center(child: Text('المستأجرين')); // Placeholder
       case 5:
-        return const Center(child: Text('الحسابات')); // Placeholder
+        return const AccountingMainScreen();
       case 6:
         return const Center(child: Text('التقارير')); // Placeholder
       case 7:

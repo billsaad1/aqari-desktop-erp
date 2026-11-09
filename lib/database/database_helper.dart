@@ -285,6 +285,7 @@ class DatabaseHelper {
         debit REAL DEFAULT 0.0,
         credit REAL DEFAULT 0.0,
         cost_center_id INTEGER,
+        description TEXT,
         FOREIGN KEY (journal_entry_id) REFERENCES journal_entries (id),
         FOREIGN KEY (account_id) REFERENCES accounts (id),
         FOREIGN KEY (cost_center_id) REFERENCES cost_centers (id)
@@ -476,6 +477,189 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  // --- Accounting Operations ---
+
+  Future<List<Map<String, dynamic>>> getAllAccounts() async {
+    final db = await instance.database;
+    return await db.query('accounts');
+  }
+
+  Future<Map<String, dynamic>?> getAccountById(int id) async {
+    final db = await instance.database;
+    final result = await db.query('accounts', where: 'id = ?', whereArgs: [id]);
+    if (result.isNotEmpty) return result.first;
+    return null;
+  }
+
+  Future<String> generateAccountCode(int parentId) async {
+    final db = await instance.database;
+    final parentResult = await db.query('accounts', where: 'id = ?', whereArgs: [parentId]);
+    if (parentResult.isEmpty) throw Exception('Parent account not found');
+
+    final parentCode = parentResult.first['code'] as String;
+
+    final childrenResult = await db.query(
+      'accounts',
+      where: 'parent_id = ?',
+      whereArgs: [parentId],
+      orderBy: 'code DESC',
+      limit: 1,
+    );
+
+    if (childrenResult.isEmpty) {
+      return '${parentCode}01';
+    } else {
+      final lastChildCode = childrenResult.first['code'] as String;
+      final sequenceStr = lastChildCode.substring(parentCode.length);
+      int sequence = int.tryParse(sequenceStr) ?? 0;
+      sequence++;
+      return '$parentCode${sequence.toString().padLeft(2, '0')}';
+  }
+    }
+
+  Future<int> insertAccount(Map<String, dynamic> account) async {
+    final db = await instance.database;
+    return await db.insert('accounts', account);
+  }
+
+  // Journal Entries with Transactions
+  Future<void> insertJournalEntryWithLines(Map<String, dynamic> header, List<Map<String, dynamic>> lines) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Insert header
+      final journalId = await txn.insert('journal_entries', header);
+
+      // 2. Insert lines
+      for (var line in lines) {
+        line['journal_entry_id'] = journalId;
+        await txn.insert('journal_lines', line);
+
+        // 3. Update account balances
+        final accountId = line['account_id'];
+        final debit = line['debit'] ?? 0.0;
+        final credit = line['credit'] ?? 0.0;
+
+        // Fetch account type to determine balance update logic
+        final accountResult = await txn.query('accounts', where: 'id = ?', whereArgs: [accountId]);
+        if (accountResult.isNotEmpty) {
+          final accountType = accountResult.first['account_type'] as String?;
+          double currentBalance = (accountResult.first['balance'] as num?)?.toDouble() ?? 0.0;
+
+          if (accountType == 'Asset' || accountType == 'Expense') {
+             currentBalance += (debit - credit);
+          } else if (accountType == 'Liability' || accountType == 'Revenue') {
+             currentBalance += (credit - debit);
+          }
+
+          await txn.update(
+            'accounts',
+            {'balance': currentBalance},
+            where: 'id = ?',
+            whereArgs: [accountId],
+          );
+        }
+      }
+    });
+  }
+
+  // General Vouchers (Receipts/Payments) with Auto-Posting
+  Future<void> insertGeneralVoucher(Map<String, dynamic> voucher, int cashAccountId, int oppositeAccountId, int? costCenterId, String voucherType) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+
+      final amount = (voucher['amount'] as num).toDouble();
+      final date = voucher['voucher_date'];
+      final description = "سند $voucherType رقم آلي";
+
+      // 1. Insert Journal Entry Header
+      final journalHeader = {
+        'entry_date': date,
+        'description': description,
+        'is_posted': 1
+      };
+      final journalId = await txn.insert('journal_entries', journalHeader);
+
+      // 2. Insert Journal Lines
+      Map<String, dynamic> line1 = {
+        'journal_entry_id': journalId,
+      };
+      Map<String, dynamic> line2 = {
+        'journal_entry_id': journalId,
+      };
+
+      if (voucherType == 'قبض عام') {
+        // Cash Account (Debit)
+        line1['account_id'] = cashAccountId;
+        line1['debit'] = amount;
+        line1['credit'] = 0.0;
+        line1['description'] = description;
+
+        // Revenue/Opposite Account (Credit)
+        line2['account_id'] = oppositeAccountId;
+        line2['debit'] = 0.0;
+        line2['credit'] = amount;
+        line2['description'] = description;
+        line2['cost_center_id'] = costCenterId;
+      } else if (voucherType == 'صرف عام') {
+        // Expense/Opposite Account (Debit)
+        line1['account_id'] = oppositeAccountId;
+        line1['debit'] = amount;
+        line1['credit'] = 0.0;
+        line1['description'] = description;
+        line1['cost_center_id'] = costCenterId;
+
+        // Cash Account (Credit)
+        line2['account_id'] = cashAccountId;
+        line2['debit'] = 0.0;
+        line2['credit'] = amount;
+        line2['description'] = description;
+      }
+
+      await txn.insert('journal_lines', line1);
+      await txn.insert('journal_lines', line2);
+
+      // Update balances (simplified logic here for brevity, in production we might use a trigger or shared function)
+      // Debit line
+      await _updateBalanceTx(txn, line1['account_id'], line1['debit'], line1['credit']);
+      // Credit line
+      await _updateBalanceTx(txn, line2['account_id'], line2['debit'], line2['credit']);
+
+      // 3. Insert Voucher
+      voucher['journal_entry_id'] = journalId;
+      await txn.insert('vouchers', voucher);
+    });
+  }
+
+  Future<void> _updateBalanceTx(Transaction txn, int accountId, double debit, double credit) async {
+     int? currentAccountId = accountId;
+
+     while (currentAccountId != null) {
+        final accountResult = await txn.query('accounts', where: 'id = ?', whereArgs: [currentAccountId]);
+        if (accountResult.isNotEmpty) {
+          final accountMap = accountResult.first;
+          final accountType = accountMap['account_type'] as String?;
+          double currentBalance = (accountMap['balance'] as num?)?.toDouble() ?? 0.0;
+
+          if (accountType == 'Asset' || accountType == 'Expense') {
+             currentBalance += (debit - credit);
+          } else if (accountType == 'Liability' || accountType == 'Revenue' || accountType == 'Equity') {
+             currentBalance += (credit - debit);
+          }
+
+          await txn.update(
+            'accounts',
+            {'balance': currentBalance},
+            where: 'id = ?',
+            whereArgs: [currentAccountId],
+          );
+
+          currentAccountId = accountMap['parent_id'] as int?;
+        } else {
+          break;
+        }
+     }
   }
 
   Future close() async {
