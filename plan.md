@@ -1,12 +1,11 @@
-1. **Create Utility for Printing Vouchers**:
-   - Instead of duplicating code in both `tenant_receipt_screen.dart` and `tenant_payment_screen.dart`, create a helper method `PrintUtils.printVoucher(...)` in a new file `lib/core/print_utils.dart` that handles fetching company info, loading Arabic fonts, and generating the PDF layout for a voucher (supporting both Receipt and Payment). Include `logoPath` handling.
-2. **Update `TenantReceiptScreen`**:
-   - Make `DatabaseHelper.instance.insertTenantReceiptVoucher` return the `voucherId` so we know the voucher number to print. (Modify `database_helper.dart` as well).
-   - In `_processReceipt()`, after successful save, immediately call `PrintUtils.printVoucher(...)` passing the details (voucher no, date, tenant name, amount, description/type).
-3. **Update `TenantPaymentScreen`**:
-   - Make `DatabaseHelper.instance.insertTenantPaymentVoucher` return the `voucherId`.
-   - In `_processPayment()`, call `PrintUtils.printVoucher(...)` similarly.
-4. **Update `AccountStatementScreen` and `OccupancyReportScreen` and `TaxInvoiceScreen`**:
-   - Update their PDF generation logic to dynamically fetch `company_info` (name, address, tax number, logo_path) to construct the unified letterhead, similar to what was done for contracts.
-5. **Execute Pre-commit instructions**: Run `flutter analyze` and `flutter test`. Skip playwright.
-6. **Submit changes**.
+1. **Fix Installment Math & Enable Manual Edit**:
+   - In `contracts_screen.dart`, fix `_generateInstallments()` logic and add a "دفعة واحدة" (One-time payment) option to `_paymentMethod`.
+   - Update `_generatedInstallments` objects in state to include `TextEditingController` for amount and due date to support manual editing. (Change the type of `_generatedInstallments` to manage these controllers, e.g., a custom class or storing controllers in parallel).
+   - Add `+` and `-` buttons in the UI for manually adding/removing installments.
+2. **Add Installment Total Validation**:
+   - In `_saveContract()`, ensure the sum of `amount` from `_generatedInstallments` strictly equals the `totalRent`. Show a `SnackBar` if it does not match.
+3. **Interactive Contract Cards**:
+   - Wrap the `ListTile` in the "إدارة العقود الحالية" list with an `InkWell`.
+   - On tap, show a `showDialog` with contract details, the print button (`_printContract`), and a table of its installments (fetched dynamically from DB or LeasingProvider).
+4. **Execute Pre-commit instructions**: Run `flutter analyze` and `flutter test`.
+5. **Submit changes**.

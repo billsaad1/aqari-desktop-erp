@@ -29,7 +29,50 @@ class _ContractsScreenState extends State<ContractsScreen> {
   final _totalRentController = TextEditingController();
 
   String _paymentMethod = 'شهري';
+
+  // Custom structure to hold manual edit controllers for each installment
   List<Map<String, dynamic>> _generatedInstallments = [];
+  List<TextEditingController> _instAmountControllers = [];
+  List<TextEditingController> _instDateControllers = [];
+
+  void _disposeInstallmentControllers() {
+    for (var c in _instAmountControllers) { c.dispose(); }
+    for (var c in _instDateControllers) { c.dispose(); }
+    _instAmountControllers.clear();
+    _instDateControllers.clear();
+  }
+
+  @override
+  void dispose() {
+    _startDateController.dispose();
+    _endDateController.dispose();
+    _totalRentController.dispose();
+    _disposeInstallmentControllers();
+    super.dispose();
+  }
+
+  void _addManualInstallment() {
+    setState(() {
+      _generatedInstallments.add({
+        'amount': 0.0,
+        'paid_amount': 0.0,
+        'due_date': _startDateController.text,
+        'status': 'Unpaid',
+      });
+      _instAmountControllers.add(TextEditingController(text: '0.0'));
+      _instDateControllers.add(TextEditingController(text: _startDateController.text));
+    });
+  }
+
+  void _removeManualInstallment(int index) {
+    setState(() {
+      _generatedInstallments.removeAt(index);
+      _instAmountControllers[index].dispose();
+      _instDateControllers[index].dispose();
+      _instAmountControllers.removeAt(index);
+      _instDateControllers.removeAt(index);
+    });
+  }
 
   void _generateInstallments() {
     if (_totalRentController.text.isEmpty) return;
@@ -53,10 +96,12 @@ class _ContractsScreenState extends State<ContractsScreen> {
         break;
       case 'ربع سنوي':
         numInstallments = (monthsDifference / 3).ceil();
+        if (numInstallments == 0) numInstallments = 1;
         monthsPerInstallment = 3;
         break;
       case 'نصف سنوي':
         numInstallments = (monthsDifference / 6).ceil();
+        if (numInstallments == 0) numInstallments = 1;
         monthsPerInstallment = 6;
         break;
       case 'سنوي':
@@ -64,19 +109,36 @@ class _ContractsScreenState extends State<ContractsScreen> {
         if (numInstallments == 0) numInstallments = 1;
         monthsPerInstallment = 12;
         break;
+      case 'دفعة واحدة':
+        numInstallments = 1;
+        monthsPerInstallment = monthsDifference;
+        break;
     }
 
-    double amountPerInstallment = totalRent / numInstallments;
+    double amountPerInstallment = double.parse((totalRent / numInstallments).toStringAsFixed(2));
+
+    // Adjust last installment to account for rounding issues
+    double totalCalculated = amountPerInstallment * (numInstallments - 1);
+    double lastInstallmentAmount = double.parse((totalRent - totalCalculated).toStringAsFixed(2));
+
     List<Map<String, dynamic>> newInstallments = [];
+    _disposeInstallmentControllers(); // Clear old controllers
 
     for (int i = 0; i < numInstallments; i++) {
       DateTime dueDate = DateTime(startDate.year, startDate.month + (i * monthsPerInstallment), startDate.day);
+      double currentAmount = (i == numInstallments - 1) ? lastInstallmentAmount : amountPerInstallment;
+
+      String dateStr = DateFormat('yyyy-MM-dd').format(dueDate);
+
       newInstallments.add({
-        'amount': amountPerInstallment,
+        'amount': currentAmount,
         'paid_amount': 0.0,
-        'due_date': DateFormat('yyyy-MM-dd').format(dueDate),
+        'due_date': dateStr,
         'status': 'Unpaid',
       });
+
+      _instAmountControllers.add(TextEditingController(text: currentAmount.toString()));
+      _instDateControllers.add(TextEditingController(text: dateStr));
     }
 
     setState(() {
@@ -88,6 +150,15 @@ class _ContractsScreenState extends State<ContractsScreen> {
     if (_formKey.currentState!.validate() && _selectedTenantId != null && _selectedUnitId != null) {
       if (_generatedInstallments.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الرجاء توليد الأقساط أولاً')));
+        return;
+      }
+
+      double totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
+      double sumInstallments = _generatedInstallments.fold(0.0, (sum, item) => sum + (item['amount'] as double));
+
+      // Allow minor floating point rounding differences (e.g., 0.01)
+      if ((totalRent - sumInstallments).abs() > 0.1) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('إجمالي مبلغ الأقساط (${sumInstallments.toStringAsFixed(2)}) لا يتطابق مع القيمة الإجمالية للعقد (${totalRent.toStringAsFixed(2)})')));
         return;
       }
 
@@ -206,7 +277,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         const SizedBox(height: 16),
                         DropdownButtonFormField<String>(
                           value: _paymentMethod,
-                          items: ['شهري', 'ربع سنوي', 'نصف سنوي', 'سنوي'].map((m) => DropdownMenuItem(
+                          items: ['شهري', 'ربع سنوي', 'نصف سنوي', 'سنوي', 'دفعة واحدة'].map((m) => DropdownMenuItem(
                             value: m,
                             child: Text(m),
                           )).toList(),
@@ -230,7 +301,18 @@ class _ContractsScreenState extends State<ContractsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Text('جدول الدفعات (الأقساط)', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('جدول الدفعات (الأقساط)', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                        if (_generatedInstallments.isNotEmpty)
+                          IconButton(
+                            icon: const Icon(Icons.add_circle, color: Colors.blue),
+                            tooltip: 'إضافة دفعة جديدة يدوياً',
+                            onPressed: _addManualInstallment,
+                          ),
+                      ],
+                    ),
                     const SizedBox(height: 16),
                     Expanded(
                       child: Container(
@@ -240,11 +322,38 @@ class _ContractsScreenState extends State<ContractsScreen> {
                             : ListView.builder(
                                 itemCount: _generatedInstallments.length,
                                 itemBuilder: (context, index) {
-                                  final inst = _generatedInstallments[index];
-                                  return ListTile(
-                                    leading: CircleAvatar(child: Text('${index + 1}')),
-                                    title: Text('تاريخ الاستحقاق: ${inst['due_date']}'),
-                                    trailing: Text('${inst['amount'].toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                  return Card(
+                                    margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(8.0),
+                                      child: Row(
+                                        children: [
+                                          CircleAvatar(child: Text('${index + 1}')),
+                                          const SizedBox(width: 16),
+                                          Expanded(
+                                            child: TextFormField(
+                                              controller: _instDateControllers[index],
+                                              decoration: const InputDecoration(labelText: 'تاريخ الاستحقاق', isDense: true),
+                                              onChanged: (val) => _generatedInstallments[index]['due_date'] = val,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 16),
+                                          Expanded(
+                                            child: TextFormField(
+                                              controller: _instAmountControllers[index],
+                                              keyboardType: TextInputType.number,
+                                              decoration: const InputDecoration(labelText: 'المبلغ', isDense: true),
+                                              onChanged: (val) => _generatedInstallments[index]['amount'] = double.tryParse(val) ?? 0.0,
+                                            ),
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(Icons.remove_circle, color: Colors.red),
+                                            tooltip: 'حذف',
+                                            onPressed: () => _removeManualInstallment(index),
+                                          )
+                                        ],
+                                      ),
+                                    ),
                                   );
                                 },
                               ),
@@ -269,24 +378,29 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         itemBuilder: (context, index) {
                           final contract = leasingProv.contracts[index];
                           final tenantName = leasingProv.tenants.firstWhere((t) => t['id'] == contract['tenant_id'], orElse: () => {'name': 'غير معروف'})['name'];
-                          return ListTile(
-                            title: Text('عقد رقم: ${contract['id']} - المستأجر: $tenantName'),
-                            subtitle: Text('الحالة: ${contract['status']} | الإجمالي: ${contract['rent_amount']}'),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.print, color: Colors.blue),
-                                  tooltip: 'طباعة العقد (PDF)',
-                                  onPressed: () => _printContract(contract),
+                          return Card(
+                            child: InkWell(
+                              onTap: () => _showContractDetailsDialog(contract, tenantName),
+                              child: ListTile(
+                                title: Text('عقد رقم: ${contract['id']} - المستأجر: $tenantName'),
+                                subtitle: Text('الحالة: ${contract['status']} | الإجمالي: ${contract['rent_amount']}'),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.print, color: Colors.blue),
+                                      tooltip: 'طباعة العقد (PDF)',
+                                      onPressed: () => _printContract(contract),
+                                    ),
+                                    if (contract['status'] == 'Active')
+                                      IconButton(
+                                        icon: const Icon(Icons.cancel, color: Colors.red),
+                                        tooltip: 'إلغاء العقد',
+                                        onPressed: () => _cancelContract(contract['id']),
+                                      ),
+                                  ],
                                 ),
-                                if (contract['status'] == 'Active')
-                                  IconButton(
-                                    icon: const Icon(Icons.cancel, color: Colors.red),
-                                    tooltip: 'إلغاء العقد',
-                                    onPressed: () => _cancelContract(contract['id']),
-                                  ),
-                              ],
+                              ),
                             ),
                           );
                         },
@@ -297,6 +411,65 @@ class _ContractsScreenState extends State<ContractsScreen> {
               ),
             ],
           ),
+        );
+      },
+    );
+  }
+
+  void _showContractDetailsDialog(Map<String, dynamic> contract, String tenantName) async {
+    final db = await DatabaseHelper.instance.database;
+    final installments = await db.query('contract_installments', where: 'contract_id = ?', whereArgs: [contract['id']]);
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('تفاصيل العقد رقم: ${contract['id']}'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('المستأجر: $tenantName', style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text('المدة: من ${contract['start_date']} إلى ${contract['end_date']}'),
+                Text('طريقة الدفع: ${contract['payment_method']}'),
+                Text('الإجمالي: ${contract['rent_amount']} ريال'),
+                const Divider(),
+                const Text('الأقساط:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: installments.length,
+                    itemBuilder: (context, idx) {
+                      final inst = installments[idx];
+                      return ListTile(
+                        leading: CircleAvatar(child: Text('${idx+1}')),
+                        title: Text('تاريخ: ${inst['due_date']}'),
+                        subtitle: Text('الحالة: ${inst['status']} | المدفوع: ${inst['paid_amount']}'),
+                        trailing: Text('${inst['amount']} ريال', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      );
+                    }
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إغلاق'),
+            ),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                _printContract(contract);
+              },
+              icon: const Icon(Icons.print),
+              label: const Text('طباعة العقد PDF'),
+            )
+          ],
         );
       },
     );
