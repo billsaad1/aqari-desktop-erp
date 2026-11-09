@@ -252,6 +252,28 @@ class _ContractsScreenState extends State<ContractsScreen> {
                       ),
                       child: const Text('حفظ العقد واعتماد الأقساط', style: TextStyle(fontSize: 18)),
                     ),
+                    const SizedBox(height: 32),
+                    const Divider(),
+                    const Text('إدارة العقود الحالية', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: leasingProv.contracts.length,
+                        itemBuilder: (context, index) {
+                          final contract = leasingProv.contracts[index];
+                          final tenantName = leasingProv.tenants.firstWhere((t) => t['id'] == contract['tenant_id'], orElse: () => {'name': 'غير معروف'})['name'];
+                          return ListTile(
+                            title: Text('عقد رقم: ${contract['id']} - المستأجر: $tenantName'),
+                            subtitle: Text('الحالة: ${contract['status']} | الإجمالي: ${contract['rent_amount']}'),
+                            trailing: contract['status'] == 'Active' ? IconButton(
+                              icon: const Icon(Icons.cancel, color: Colors.red),
+                              tooltip: 'إلغاء العقد',
+                              onPressed: () => _cancelContract(contract['id']),
+                            ) : null,
+                          );
+                        },
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -260,5 +282,43 @@ class _ContractsScreenState extends State<ContractsScreen> {
         );
       },
     );
+  }
+
+  void _cancelContract(int contractId) async {
+    bool confirm = await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('تأكيد الإلغاء'),
+        content: const Text('هل أنت متأكد من إلغاء هذا العقد؟ إذا كان هناك دفعات مسددة سيرفض النظام الإلغاء.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('تراجع')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('نعم، إلغاء'),
+          ),
+        ],
+      )
+    ) ?? false;
+
+    if (confirm) {
+      try {
+        await Provider.of<LeasingProvider>(context, listen: false).cancelContract(contractId);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إلغاء العقد بنجاح')));
+      } catch (e) {
+        if (mounted) {
+           showDialog(
+             context: context,
+             builder: (context) => AlertDialog(
+               title: const Text('لا يمكن الإلغاء'),
+               content: Text(e.toString()),
+               actions: [
+                 TextButton(onPressed: () => Navigator.pop(context), child: const Text('حسناً'))
+               ]
+             )
+           );
+        }
+      }
+    }
   }
 }

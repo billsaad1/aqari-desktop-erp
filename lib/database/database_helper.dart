@@ -845,6 +845,229 @@ class DatabaseHelper {
     return await db.query('contract_installments', where: 'contract_id = ?', whereArgs: [contractId]);
   }
 
+  // --- Tenant Financial Operations ---
+
+  Future<void> insertTenantReceiptVoucher({
+    required int tenantId,
+    required double amount,
+    required String voucherDate,
+    required int cashAccountId,
+    required List<Map<String, dynamic>> installmentsToUpdate,
+  }) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Fetch Tenant's Account ID
+      final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
+      if (tenantResult.isEmpty) throw Exception('المستأجر غير موجود');
+      final tenantAccountId = tenantResult.first['account_id'] as int;
+
+      // 2. Insert Journal Entry Header
+      final journalHeader = {
+        'entry_date': voucherDate,
+        'description': 'سند قبض مستأجر رقم آلي',
+        'is_posted': 1
+      };
+      final journalId = await txn.insert('journal_entries', journalHeader);
+
+      // 3. Insert Journal Lines (Cash Debit, Tenant Asset Credit)
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': cashAccountId,
+        'debit': amount,
+        'credit': 0.0,
+        'description': 'تحصيل دفعة مستأجر',
+      });
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': tenantAccountId,
+        'debit': 0.0,
+        'credit': amount,
+        'description': 'تحصيل دفعة مستأجر',
+      });
+
+      // 4. Update balances
+      await _updateBalanceTx(txn, cashAccountId, amount, 0.0);
+      await _updateBalanceTx(txn, tenantAccountId, 0.0, amount);
+
+      // 5. Insert Voucher
+      final voucher = {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': voucherDate,
+        'amount': amount,
+        'tenant_id': tenantId,
+        'journal_entry_id': journalId,
+      };
+      await txn.insert('vouchers', voucher);
+
+      // 6. Update Installments
+      for (var inst in installmentsToUpdate) {
+        await txn.update(
+          'contract_installments',
+          {'paid_amount': inst['paid_amount'], 'status': inst['status']},
+          where: 'id = ?',
+          whereArgs: [inst['id']],
+        );
+      }
+    });
+  }
+
+  Future<void> insertTenantPaymentVoucher({
+    required int tenantId,
+    required double amount,
+    required String voucherDate,
+    required int cashAccountId,
+    required String description,
+  }) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Fetch Tenant's Account ID
+      final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
+      if (tenantResult.isEmpty) throw Exception('المستأجر غير موجود');
+      final tenantAccountId = tenantResult.first['account_id'] as int;
+
+      // 2. Insert Journal Entry Header
+      final journalHeader = {
+        'entry_date': voucherDate,
+        'description': description,
+        'is_posted': 1
+      };
+      final journalId = await txn.insert('journal_entries', journalHeader);
+
+      // 3. Insert Journal Lines (Tenant Asset Debit, Cash Credit)
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': tenantAccountId,
+        'debit': amount,
+        'credit': 0.0,
+        'description': description,
+      });
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': cashAccountId,
+        'debit': 0.0,
+        'credit': amount,
+        'description': description,
+      });
+
+      // 4. Update balances
+      await _updateBalanceTx(txn, tenantAccountId, amount, 0.0);
+      await _updateBalanceTx(txn, cashAccountId, 0.0, amount);
+
+      // 5. Insert Voucher
+      final voucher = {
+        'voucher_type': 'صرف مستأجر',
+        'voucher_date': voucherDate,
+        'amount': amount,
+        'tenant_id': tenantId,
+        'journal_entry_id': journalId,
+      };
+      await txn.insert('vouchers', voucher);
+    });
+  }
+
+  Future<void> insertTaxInvoice({
+    required int contractId,
+    required int tenantId,
+    required String invoiceDate,
+    required double totalAmount, // Net Rent
+    required double taxAmount,
+    required int revenueAccountId,
+    required int taxAccountId,
+  }) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Fetch Tenant's Account ID
+      final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
+      if (tenantResult.isEmpty) throw Exception('المستأجر غير موجود');
+      final tenantAccountId = tenantResult.first['account_id'] as int;
+
+      double grossAmount = totalAmount + taxAmount;
+
+      // 2. Insert Journal Entry Header
+      final journalHeader = {
+        'entry_date': invoiceDate,
+        'description': 'إثبات فاتورة ضريبية إيجار',
+        'is_posted': 1
+      };
+      final journalId = await txn.insert('journal_entries', journalHeader);
+
+      // 3. Insert Journal Lines
+      // Debit: Tenant (Asset) for Gross
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': tenantAccountId,
+        'debit': grossAmount,
+        'credit': 0.0,
+        'description': 'استحقاق فاتورة إيجار',
+      });
+      // Credit: Revenue Account for Net
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': revenueAccountId,
+        'debit': 0.0,
+        'credit': totalAmount,
+        'description': 'إيراد إيجار',
+      });
+      // Credit: Tax Account (Liability) for Tax
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': taxAccountId,
+        'debit': 0.0,
+        'credit': taxAmount,
+        'description': 'ضريبة قيمة مضافة',
+      });
+
+      // 4. Update balances
+      await _updateBalanceTx(txn, tenantAccountId, grossAmount, 0.0);
+      await _updateBalanceTx(txn, revenueAccountId, 0.0, totalAmount);
+      await _updateBalanceTx(txn, taxAccountId, 0.0, taxAmount);
+
+      // 5. Insert Tax Invoice
+      await txn.insert('tax_invoices', {
+        'contract_id': contractId,
+        'invoice_date': invoiceDate,
+        'total_amount': grossAmount, // Conventionally gross total is saved, but depends on design
+        'tax_amount': taxAmount,
+      });
+    });
+  }
+
+  Future<void> cancelContract(int contractId) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Check if any installments are paid
+      final installments = await txn.query('contract_installments', where: 'contract_id = ?', whereArgs: [contractId]);
+      bool hasPaid = installments.any((inst) => (inst['paid_amount'] as num) > 0);
+      if (hasPaid) {
+        throw Exception('لا يمكن إلغاء العقد بشكل مباشر. يوجد دفعات مسددة، يتطلب عمل تسوية أو إشعار دائن.');
+      }
+
+      // 2. Get Unit ID before deleting/updating
+      final contractResult = await txn.query('contracts', where: 'id = ?', whereArgs: [contractId]);
+      if (contractResult.isEmpty) throw Exception('العقد غير موجود');
+      final unitId = contractResult.first['unit_id'] as int;
+
+      // 3. Delete unpaid installments
+      await txn.delete('contract_installments', where: 'contract_id = ?', whereArgs: [contractId]);
+
+      // 4. Update Contract Status
+      await txn.update(
+        'contracts',
+        {'status': 'Cancelled'},
+        where: 'id = ?',
+        whereArgs: [contractId],
+      );
+
+      // 5. Update Unit Status back to 'شاغرة'
+      await txn.update(
+        'units',
+        {'status': 'شاغرة'},
+        where: 'id = ?',
+        whereArgs: [unitId],
+      );
+    });
+  }
+
   Future close() async {
     final db = await instance.database;
     db.close();

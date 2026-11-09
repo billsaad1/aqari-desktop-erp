@@ -37,4 +37,9 @@ class LeasingProvider with ChangeNotifier {
     await DatabaseHelper.instance.insertContractWithInstallments(contract, installments);
     await loadInitialData();
   }
+
+  Future<void> cancelContract(int contractId) async {
+    await DatabaseHelper.instance.cancelContract(contractId);
+    await loadInitialData();
+  }
 }

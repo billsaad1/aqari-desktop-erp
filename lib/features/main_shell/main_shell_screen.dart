@@ -9,6 +9,7 @@ import '../master_data/lookups_screen.dart';
 import '../general_accounting/accounting_main_screen.dart';
 import '../properties_owners/property_main_screen.dart';
 import '../tenants_leasing/leasing_main_screen.dart';
+import '../tenant_financial/tenant_financial_main_screen.dart';
 
 class MainShellScreen extends StatelessWidget {
   const MainShellScreen({super.key});
@@ -46,12 +47,14 @@ class MainShellScreen extends StatelessWidget {
       case 4:
         return const LeasingMainScreen();
       case 5:
-        return const AccountingMainScreen();
+        return const TenantFinancialMainScreen();
       case 6:
-        return const Center(child: Text('التقارير')); // Placeholder
+        return const AccountingMainScreen();
       case 7:
-        return const Center(child: Text('الرسائل النصية')); // Placeholder
+        return const Center(child: Text('التقارير')); // Placeholder
       case 8:
+        return const Center(child: Text('الرسائل النصية')); // Placeholder
+      case 9:
         return const Center(child: Text('خدمات البرنامج')); // Placeholder
       default:
         return const DashboardScreen();
@@ -88,10 +91,11 @@ class AppSidebar extends StatelessWidget {
                 _buildNavItem(context, 'الإضافات', Icons.list_alt, 2, navProvider),
                 _buildNavItem(context, 'العقار والملاك', Icons.location_city, 3, navProvider),
                 _buildNavItem(context, 'المستأجرين', Icons.people, 4, navProvider),
-                _buildNavItem(context, 'الحسابات', Icons.account_balance_wallet, 5, navProvider),
-                _buildNavItem(context, 'التقارير', Icons.bar_chart, 6, navProvider),
-                _buildNavItem(context, 'الرسائل النصية', Icons.message, 7, navProvider),
-                _buildNavItem(context, 'خدمات البرنامج', Icons.build, 8, navProvider),
+                _buildNavItem(context, 'عمليات المستأجرين', Icons.monetization_on, 5, navProvider),
+                _buildNavItem(context, 'الحسابات', Icons.account_balance_wallet, 6, navProvider),
+                _buildNavItem(context, 'التقارير', Icons.bar_chart, 7, navProvider),
+                _buildNavItem(context, 'الرسائل النصية', Icons.message, 8, navProvider),
+                _buildNavItem(context, 'خدمات البرنامج', Icons.build, 9, navProvider),
               ],
             ),
           ),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/leasing_provider.dart';
+import '../../providers/property_provider.dart';
 import 'tenants_screen.dart';
 import 'contracts_screen.dart';
 
@@ -20,6 +21,7 @@ class _LeasingMainScreenState extends State<LeasingMainScreen> with SingleTicker
     _tabController = TabController(length: 2, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Provider.of<LeasingProvider>(context, listen: false).loadInitialData();
+      Provider.of<PropertyProvider>(context, listen: false).loadInitialData();
     });
   }
 
