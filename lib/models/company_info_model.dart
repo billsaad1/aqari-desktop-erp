@@ -8,6 +8,7 @@ class CompanyInfo {
   final String? taxNumber;
   final String? commercialRegister;
   final String? logoPath;
+  final String? termsConditions;
 
   CompanyInfo({
     this.id,
@@ -19,6 +20,7 @@ class CompanyInfo {
     this.taxNumber,
     this.commercialRegister,
     this.logoPath,
+    this.termsConditions,
   });
 
   factory CompanyInfo.fromMap(Map<String, dynamic> map) {
@@ -32,6 +34,7 @@ class CompanyInfo {
       taxNumber: map['tax_number'],
       commercialRegister: map['commercial_register'],
       logoPath: map['logo_path'],
+      termsConditions: map['terms_conditions'],
     );
   }
 
@@ -46,6 +49,7 @@ class CompanyInfo {
       'tax_number': taxNumber,
       'commercial_register': commercialRegister,
       'logo_path': logoPath,
+      'terms_conditions': termsConditions,
     };
   }
 }

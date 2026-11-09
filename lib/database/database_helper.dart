@@ -66,7 +66,8 @@ class DatabaseHelper {
         default_currency TEXT,
         tax_number TEXT,
         commercial_register TEXT,
-        logo_path TEXT
+        logo_path TEXT,
+        terms_conditions TEXT
       )
     ''');
 
@@ -347,7 +348,8 @@ class DatabaseHelper {
       'name_en': 'Abdullah Al-Naqeeb Trading Est.',
       'activity': 'إدارة وتطوير العقارات والتأجير',
       'address': 'اليمن',
-      'default_currency': 'ريال يمني (YER)'
+      'default_currency': 'ريال يمني (YER)',
+      'terms_conditions': '1. يلتزم المستأجر بسداد الإيجار في المواعيد المحددة.\n2. لا يحق للمستأجر تأجير العين بالباطن.'
     });
 
     // Seed Admin User (password: 123456 encrypted in SHA-256 in production logic, here we place the pre-hashed string for 123456)

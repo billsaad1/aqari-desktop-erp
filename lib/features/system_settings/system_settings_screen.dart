@@ -69,6 +69,8 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   final _activityController = TextEditingController();
   final _addressController = TextEditingController();
   final _currencyController = TextEditingController();
+  final _logoPathController = TextEditingController();
+  final _termsController = TextEditingController();
 
   @override
   void initState() {
@@ -85,6 +87,8 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       _activityController.text = _companyInfo!.activity ?? '';
       _addressController.text = _companyInfo!.address ?? '';
       _currencyController.text = _companyInfo!.defaultCurrency ?? '';
+      _logoPathController.text = _companyInfo!.logoPath ?? '';
+      _termsController.text = _companyInfo!.termsConditions ?? '';
     }
     setState(() {
       _isLoading = false;
@@ -100,6 +104,8 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
         activity: _activityController.text,
         address: _addressController.text,
         defaultCurrency: _currencyController.text,
+        logoPath: _logoPathController.text,
+        termsConditions: _termsController.text,
       );
 
       await DatabaseHelper.instance.updateCompanyInfo(updatedInfo.toMap());
@@ -118,6 +124,8 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
     _activityController.dispose();
     _addressController.dispose();
     _currencyController.dispose();
+    _logoPathController.dispose();
+    _termsController.dispose();
     super.dispose();
   }
 
@@ -155,6 +163,24 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             TextFormField(
               controller: _currencyController,
               decoration: const InputDecoration(labelText: 'العملة الافتراضية', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _logoPathController,
+              decoration: const InputDecoration(
+                labelText: 'مسار الشعار (Logo Path - مثلاً C:\\images\\logo.png)',
+                border: OutlineInputBorder(),
+                hintText: 'مسار ملف الشعار في الجهاز'
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _termsController,
+              decoration: const InputDecoration(
+                labelText: 'الشروط والأحكام الافتراضية لعقد الإيجار',
+                border: OutlineInputBorder()
+              ),
+              maxLines: 4,
             ),
             const SizedBox(height: 32),
             ElevatedButton(

@@ -1,4 +1,12 @@
-1. **Update `DatabaseHelper.insertLookupData`**: Add logic for automatically generating `cost_centers` codes. Query the `cost_centers` table for the highest `code` value, extract the numeric part, increment it, and generate the new `CCxxx` code. If there are no rows, start with `CC001`.
-2. **Update `lookups_screen.dart`**: Modify the `LookupConfig` and the `_showAddEditDialog` to handle 'cost_centers' gracefully by either excluding `code` from the input fields or making it read-only.
-3. **Execute Pre-commit instructions**: Verify changes with `flutter analyze`, `flutter test`, and run the app manually. Call `frontend_verification_instructions` if UI changed.
-4. **Submit changes**.
+1. **Update `company_info` table and model:**
+   - Add `terms_conditions` TEXT column in `database_helper.dart` to `company_info` table.
+   - Update `lib/models/company_info_model.dart` to include `termsConditions` field.
+2. **Update `SystemSettingsScreen`:**
+   - Add input fields for `logoPath` (String input for file path) and `termsConditions` (multiline text field) in `_CompanyInfoTabState`.
+3. **Update `contracts_screen.dart` and add PDF generation:**
+   - Import `pdf` and `printing` packages.
+   - Add a Print button (`Icons.print`) to the "إدارة العقود الحالية" list.
+   - Implement `_printContract(contract)` function that queries contract details, tenant info, property/unit info, generated installments, and `company_info`.
+   - Generate a PDF using `pw.Document()` that displays the company logo (from `logoPath` if exists), terms and conditions, contract details, and installments table.
+4. **Execute Pre-commit Instructions:** Run `flutter analyze` and `flutter test`. Skip playwright since it's a desktop app.
+5. **Submit changes.**
