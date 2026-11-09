@@ -31,7 +31,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 3,
+        version: 4,
         onCreate: _createDB,
         onUpgrade: _upgradeDB,
       ),
@@ -47,6 +47,10 @@ class DatabaseHelper {
       await db.execute('ALTER TABLE units ADD COLUMN floor TEXT;');
       await db.execute('ALTER TABLE units ADD COLUMN elec_meter TEXT;');
       await db.execute('ALTER TABLE units ADD COLUMN water_meter TEXT;');
+    }
+    if (oldVersion < 4) {
+      await db.execute('ALTER TABLE sms_settings ADD COLUMN reminder_template TEXT;');
+      await db.execute('ALTER TABLE sms_settings ADD COLUMN receipt_template TEXT;');
     }
   }
 
@@ -317,7 +321,9 @@ class DatabaseHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         api_url TEXT,
         api_key TEXT,
-        sender_name TEXT
+        sender_name TEXT,
+        reminder_template TEXT,
+        receipt_template TEXT
       )
     ''');
 
@@ -1162,6 +1168,35 @@ class DatabaseHelper {
       WHERE c.status = 'Active' AND c.end_date <= ?
       ORDER BY c.end_date ASC
     ''', [targetDateStr]);
+  }
+
+  // --- SMS Operations ---
+
+  Future<Map<String, dynamic>?> getSmsSettings() async {
+    final db = await instance.database;
+    final result = await db.query('sms_settings');
+    if (result.isNotEmpty) return result.first;
+    return null;
+  }
+
+  Future<void> saveSmsSettings(Map<String, dynamic> settings) async {
+    final db = await instance.database;
+    final existing = await db.query('sms_settings');
+    if (existing.isEmpty) {
+      await db.insert('sms_settings', settings);
+    } else {
+      await db.update('sms_settings', settings, where: 'id = ?', whereArgs: [existing.first['id']]);
+    }
+  }
+
+  Future<void> insertSmsLog(Map<String, dynamic> log) async {
+    final db = await instance.database;
+    await db.insert('sms_logs', log);
+  }
+
+  Future<List<Map<String, dynamic>>> getAllSmsLogs() async {
+    final db = await instance.database;
+    return await db.query('sms_logs', orderBy: 'sent_at DESC');
   }
 
   Future close() async {
