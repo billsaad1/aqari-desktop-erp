@@ -44,6 +44,8 @@ dependencies:
   printing: ^5.14.3
   flutter_localizations:
     sdk: flutter
+  file_selector: ^1.1.0
+  shared_preferences: ^2.5.6
 
 dev_dependencies:
   flutter_test:

@@ -15,6 +15,22 @@ class DatabaseHelper {
     return _database!;
   }
 
+  Future<String> getDbPath() async {
+    final dbPath = await getApplicationDocumentsDirectory();
+    return join(dbPath.path, 'AbdullahAlNaqeebERP', 'desktop_erp.db');
+  }
+
+  Future<void> factoryReset() async {
+    final path = await getDbPath();
+    if (_database != null) {
+      await _database!.close();
+      _database = null;
+    }
+    await databaseFactory.deleteDatabase(path);
+    // Re-initialize to create schema and seed data
+    _database = await _initDB('desktop_erp.db');
+  }
+
   Future<Database> _initDB(String filePath) async {
     // Initialize FFI for Windows desktop
     if (Platform.isWindows || Platform.isLinux) {

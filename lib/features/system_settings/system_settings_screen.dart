@@ -1,3 +1,6 @@
+import 'dart:io';
+import 'package:file_selector/file_selector.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import '../../database/database_helper.dart';
 import '../../core/crypto_utils.dart';
@@ -331,6 +334,182 @@ class _UsersTabState extends State<UsersTab> {
                 }).toList(),
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+class MaintenanceTab extends StatefulWidget {
+  const MaintenanceTab({super.key});
+
+  @override
+  State<MaintenanceTab> createState() => _MaintenanceTabState();
+}
+
+class _MaintenanceTabState extends State<MaintenanceTab> {
+  String _backupPath = '';
+  final _confirmController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBackupPath();
+  }
+
+  Future<void> _loadBackupPath() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _backupPath = prefs.getString('backup_path') ?? '';
+    });
+  }
+
+  Future<void> _selectBackupFolder() async {
+    String? selectedDirectory = await getDirectoryPath();
+    if (selectedDirectory != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('backup_path', selectedDirectory);
+      setState(() {
+        _backupPath = selectedDirectory;
+      });
+    }
+  }
+
+  Future<void> _performBackup() async {
+    if (_backupPath.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الرجاء اختيار مجلد النسخ الاحتياطي أولاً')));
+      return;
+    }
+
+    try {
+      final dbPath = await DatabaseHelper.instance.getDbPath();
+      final File dbFile = File(dbPath);
+
+      if (!dbFile.existsSync()) throw Exception("ملف قاعدة البيانات غير موجود");
+
+      final String backupFilePath = '$_backupPath${Platform.pathSeparator}aqari_erp_backup.db';
+      await dbFile.copy(backupFilePath);
+
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم النسخ الاحتياطي بنجاح إلى: $backupFilePath')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('فشل النسخ الاحتياطي: $e')));
+    }
+  }
+
+  void _showFactoryResetDialog() {
+    _confirmController.clear();
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text('تحذير خطير: تهيئة النظام', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('هذا الإجراء سيمسح جميع البيانات المدخلة في النظام (عقود، مستأجرين، سندات، الخ) وسيعيده كأنه جديد.'),
+                  const SizedBox(height: 16),
+                  const Text('لتأكيد الحذف، اكتب كلمة "تأكيد" في الحقل أدناه:'),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _confirmController,
+                    decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'تأكيد'),
+                    onChanged: (val) => setStateDialog(() {}),
+                  )
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('إلغاء'),
+                ),
+                ElevatedButton(
+                  onPressed: _confirmController.text == 'تأكيد' ? () async {
+                    Navigator.pop(context);
+                    await _performFactoryReset();
+                  } : null,
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                  child: const Text('مسح البيانات نهائياً', style: TextStyle(color: Colors.white)),
+                ),
+              ],
+            );
+          },
+        );
+      }
+    );
+  }
+
+  Future<void> _performFactoryReset() async {
+    try {
+      await DatabaseHelper.instance.factoryReset();
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('تم بنجاح'),
+            content: const Text('تمت تهيئة النظام بالكامل. يرجى إعادة تشغيل التطبيق.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('حسناً'))
+            ]
+          )
+        );
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('فشل تهيئة النظام: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('النسخ الاحتياطي المستمر', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: TextFormField(
+                  decoration: const InputDecoration(labelText: 'مسار مجلد النسخ الاحتياطي', border: OutlineInputBorder()),
+                  initialValue: _backupPath,
+                  readOnly: true,
+                ),
+              ),
+              const SizedBox(width: 16),
+              ElevatedButton.icon(
+                onPressed: _selectBackupFolder,
+                icon: const Icon(Icons.folder),
+                label: const Text('تحديد المجلد'),
+                style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton.icon(
+            onPressed: _performBackup,
+            icon: const Icon(Icons.backup),
+            label: const Text('نسخ احتياطي الآن'),
+            style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16), backgroundColor: Colors.green),
+          ),
+          const SizedBox(height: 48),
+          const Divider(),
+          const SizedBox(height: 24),
+          const Text('تهيئة وتصفير النظام (Factory Reset)', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.red)),
+          const SizedBox(height: 8),
+          const Text('احذر: هذه العملية ستمسح جميع قواعد البيانات الخاصة بالمؤسسة.'),
+          const SizedBox(height: 16),
+          ElevatedButton.icon(
+            onPressed: _showFactoryResetDialog,
+            icon: const Icon(Icons.warning, color: Colors.white),
+            label: const Text('تصفير النظام بالكامل', style: TextStyle(color: Colors.white)),
+            style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16), backgroundColor: Colors.red),
           ),
         ],
       ),
