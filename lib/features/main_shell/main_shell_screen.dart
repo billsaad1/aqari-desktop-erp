@@ -10,6 +10,8 @@ import '../general_accounting/accounting_main_screen.dart';
 import '../properties_owners/property_main_screen.dart';
 import '../tenants_leasing/leasing_main_screen.dart';
 import '../tenant_financial/tenant_financial_main_screen.dart';
+import '../reports_inquiry/reports_main_screen.dart';
+import '../system_services/system_services_screen.dart';
 
 class MainShellScreen extends StatelessWidget {
   const MainShellScreen({super.key});
@@ -51,11 +53,11 @@ class MainShellScreen extends StatelessWidget {
       case 6:
         return const AccountingMainScreen();
       case 7:
-        return const Center(child: Text('التقارير')); // Placeholder
+        return const ReportsMainScreen();
       case 8:
         return const Center(child: Text('الرسائل النصية')); // Placeholder
       case 9:
-        return const Center(child: Text('خدمات البرنامج')); // Placeholder
+        return const SystemServicesScreen();
       default:
         return const DashboardScreen();
     }

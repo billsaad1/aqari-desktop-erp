@@ -7,6 +7,7 @@ import 'providers/navigation_provider.dart';
 import 'providers/accounting_provider.dart';
 import 'providers/property_provider.dart';
 import 'providers/leasing_provider.dart';
+import 'providers/reports_provider.dart';
 import 'features/auth/login_screen.dart';
 
 void main() async {
@@ -23,6 +24,7 @@ void main() async {
         ChangeNotifierProvider(create: (_) => AccountingProvider()),
         ChangeNotifierProvider(create: (_) => PropertyProvider()),
         ChangeNotifierProvider(create: (_) => LeasingProvider()),
+        ChangeNotifierProvider(create: (_) => ReportsProvider()),
       ],
       child: const ERPApp(),
     ),

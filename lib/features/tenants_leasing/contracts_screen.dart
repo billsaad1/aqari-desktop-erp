@@ -31,7 +31,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
     if (totalRent <= 0) return;
 
     DateTime startDate = DateFormat('yyyy-MM-dd').parse(_startDateController.text);
-    DateTime endDate = DateFormat('yyyy-MM-dd').parse(_endDateController.text);
+    DateTime endDate = DateFormat('yyyy-MM-dd').parse(_endDateController.text).add(const Duration(days: 1));
 
     int monthsDifference = (endDate.year - startDate.year) * 12 + endDate.month - startDate.month;
     if (monthsDifference <= 0) monthsDifference = 12; // fallback

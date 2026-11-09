@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
@@ -54,6 +57,10 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
 
         if (mounted) {
            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إصدار الفاتورة وتوليد القيد الآلي')));
+           final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
+           final tenantName = leasingProv.tenants.firstWhere((t) => t['id'] == _selectedTenantId)['name'];
+           _printInvoice(tenantName, net, tax, net + tax, _dateController.text);
+
            Provider.of<AccountingProvider>(context, listen: false).loadAccounts();
            _netAmountController.clear();
            _taxAmountController.clear();
@@ -66,6 +73,54 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الرجاء تعبئة جميع الحقول المطلوبة')));
     }
   }
+  Future<void> _printInvoice(String tenantName, double net, double tax, double gross, String date) async {
+    final pdf = pw.Document();
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Center(
+                child: pw.Text('مؤسسة عبدالله النقيب التجارية', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold)),
+              ),
+              pw.Center(
+                child: pw.Text('فاتورة ضريبية', style: const pw.TextStyle(fontSize: 20)),
+              ),
+              pw.SizedBox(height: 30),
+              pw.Text('تاريخ الفاتورة: $date'),
+              pw.Text('العميل: $tenantName'),
+              pw.SizedBox(height: 30),
+              pw.TableHelper.fromTextArray(
+                headers: ['الوصف', 'المبلغ'],
+                data: [
+                  ['قيمة الإيجار (الصافي)', net.toStringAsFixed(2)],
+                  ['ضريبة القيمة المضافة (VAT)', tax.toStringAsFixed(2)],
+                  ['الإجمالي', gross.toStringAsFixed(2)],
+                ],
+              ),
+              pw.SizedBox(height: 50),
+              pw.Center(
+                child: pw.BarcodeWidget(
+                  barcode: pw.Barcode.qrCode(),
+                  data: 'Mousasat Abdullah Al-Naqeeb\nTenant: $tenantName\nTotal: $gross\nDate: $date\nVAT: $tax',
+                  width: 100,
+                  height: 100,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    await Printing.layoutPdf(
+      onLayout: (PdfPageFormat format) async => pdf.save(),
+    );
+  }
+
 
   @override
   Widget build(BuildContext context) {

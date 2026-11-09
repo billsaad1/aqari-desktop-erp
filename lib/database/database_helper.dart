@@ -1068,6 +1068,102 @@ class DatabaseHelper {
     });
   }
 
+  // --- Reports & Alerts Queries ---
+
+  Future<List<Map<String, dynamic>>> getAccountStatement(int accountId, String startDate, String endDate) async {
+    final db = await instance.database;
+    return await db.rawQuery('''
+      SELECT
+        je.entry_date as date,
+        je.id as voucher_no,
+        jl.description as description,
+        jl.debit as debit,
+        jl.credit as credit
+      FROM journal_lines jl
+      JOIN journal_entries je ON jl.journal_entry_id = je.id
+      WHERE jl.account_id = ? AND je.entry_date >= ? AND je.entry_date <= ?
+      ORDER BY je.entry_date ASC, je.id ASC
+    ''', [accountId, startDate, endDate]);
+  }
+
+  Future<List<Map<String, dynamic>>> getUnitOccupancyStats() async {
+    final db = await instance.database;
+    return await db.rawQuery('''
+      SELECT
+        p.name as property_name,
+        COUNT(u.id) as total_units,
+        SUM(CASE WHEN u.status = 'مؤجرة' THEN 1 ELSE 0 END) as rented_units,
+        SUM(CASE WHEN u.status = 'شاغرة' THEN 1 ELSE 0 END) as vacant_units
+      FROM properties p
+      LEFT JOIN units u ON p.id = u.property_id
+      GROUP BY p.id, p.name
+    ''');
+  }
+
+  Future<List<Map<String, dynamic>>> searchTenantsAndContracts(String query) async {
+    final db = await instance.database;
+    final searchTerm = '%$query%';
+    return await db.rawQuery('''
+      SELECT
+        t.name as tenant_name,
+        t.mobile as mobile,
+        c.id as contract_id,
+        p.name as property_name,
+        u.unit_number as unit_number,
+        c.status as contract_status,
+        (SELECT SUM(amount) FROM contract_installments WHERE contract_id = c.id) as total_amount,
+        (SELECT SUM(paid_amount) FROM contract_installments WHERE contract_id = c.id) as paid_amount
+      FROM tenants t
+      LEFT JOIN contracts c ON t.id = c.tenant_id
+      LEFT JOIN units u ON c.unit_id = u.id
+      LEFT JOIN properties p ON u.property_id = p.id
+      WHERE t.name LIKE ? OR t.mobile LIKE ? OR u.unit_number LIKE ?
+    ''', [searchTerm, searchTerm, searchTerm]);
+  }
+
+  Future<List<Map<String, dynamic>>> getDueInstallments(int days) async {
+    final db = await instance.database;
+    final targetDate = DateTime.now().add(Duration(days: days));
+    final targetDateStr = targetDate.toIso8601String().substring(0, 10);
+
+    return await db.rawQuery('''
+      SELECT
+        ci.id as installment_id,
+        ci.due_date,
+        ci.amount,
+        ci.paid_amount,
+        ci.status,
+        t.name as tenant_name,
+        t.id as tenant_id
+      FROM contract_installments ci
+      JOIN contracts c ON ci.contract_id = c.id
+      JOIN tenants t ON c.tenant_id = t.id
+      WHERE ci.status != 'Paid' AND ci.due_date <= ?
+      ORDER BY ci.due_date ASC
+    ''', [targetDateStr]);
+  }
+
+  Future<List<Map<String, dynamic>>> getExpiringContracts(int days) async {
+    final db = await instance.database;
+    final targetDate = DateTime.now().add(Duration(days: days));
+    final targetDateStr = targetDate.toIso8601String().substring(0, 10);
+
+    return await db.rawQuery('''
+      SELECT
+        c.id as contract_id,
+        c.end_date,
+        t.name as tenant_name,
+        p.name as property_name,
+        u.unit_number
+      FROM contracts c
+      JOIN tenants t ON c.tenant_id = t.id
+      JOIN units u ON c.unit_id = u.id
+      JOIN properties p ON u.property_id = p.id
+      WHERE c.status = 'Active' AND c.end_date <= ?
+      ORDER BY c.end_date ASC
+    ''', [targetDateStr]);
+  }
+
   Future close() async {
     final db = await instance.database;
     db.close();
