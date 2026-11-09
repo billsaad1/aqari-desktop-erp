@@ -482,6 +482,23 @@ class DatabaseHelper {
 
   Future<int> insertLookupData(String tableName, Map<String, dynamic> data) async {
     final db = await instance.database;
+
+    // Auto-generate code for cost_centers
+    if (tableName == 'cost_centers' && (!data.containsKey('code') || data['code'] == null || data['code'].toString().isEmpty)) {
+      final List<Map<String, dynamic>> maps = await db.rawQuery('SELECT code FROM cost_centers ORDER BY id DESC LIMIT 1');
+      String newCode = 'CC001';
+      if (maps.isNotEmpty && maps.first['code'] != null) {
+        final lastCode = maps.first['code'] as String;
+        if (lastCode.startsWith('CC') && lastCode.length > 2) {
+          final numericPart = int.tryParse(lastCode.substring(2));
+          if (numericPart != null) {
+            newCode = 'CC${(numericPart + 1).toString().padLeft(3, '0')}';
+          }
+        }
+      }
+      data['code'] = newCode;
+    }
+
     return await db.insert(tableName, data);
   }
 

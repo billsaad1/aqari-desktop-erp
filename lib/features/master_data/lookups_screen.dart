@@ -17,7 +17,7 @@ class _LookupsScreenState extends State<LookupsScreen> with SingleTickerProvider
     LookupConfig('البنوك', 'banks', ['name', 'account_id']),
     LookupConfig('أنواع العقارات', 'property_types', ['name']),
     LookupConfig('أنواع العيون', 'unit_types', ['name']),
-    LookupConfig('مراكز التكلفة', 'cost_centers', ['code', 'name']),
+    LookupConfig('مراكز التكلفة', 'cost_centers', ['name']), // Removed 'code' from fields list for input
   ];
 
   @override
@@ -46,7 +46,14 @@ class _LookupsScreenState extends State<LookupsScreen> with SingleTickerProvider
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: lookupConfigs.map((config) => LookupTab(config: config)).toList(),
+            children: lookupConfigs.map((config) {
+               // Determine display fields
+               List<String> displayFields = List.from(config.fields);
+               if (config.tableName == 'cost_centers') {
+                 displayFields.insert(0, 'code'); // Always show 'code' first in the table
+               }
+               return LookupTab(config: config, displayFields: displayFields);
+            }).toList(),
           ),
         ),
       ],
@@ -64,7 +71,8 @@ class LookupConfig {
 
 class LookupTab extends StatefulWidget {
   final LookupConfig config;
-  const LookupTab({super.key, required this.config});
+  final List<String> displayFields;
+  const LookupTab({super.key, required this.config, required this.displayFields});
 
   @override
   State<LookupTab> createState() => _LookupTabState();
@@ -176,14 +184,14 @@ class _LookupTabState extends State<LookupTab> {
               child: DataTable(
                 columns: [
                   const DataColumn(label: Text('المعرف')),
-                  ...widget.config.fields.map((field) => DataColumn(label: Text(field))),
+                  ...widget.displayFields.map((field) => DataColumn(label: Text(field))),
                   const DataColumn(label: Text('الإجراءات')),
                 ],
                 rows: _data.map((row) {
                   return DataRow(
                     cells: [
                       DataCell(Text(row['id'].toString())),
-                      ...widget.config.fields.map((field) => DataCell(Text(row[field]?.toString() ?? ''))),
+                      ...widget.displayFields.map((field) => DataCell(Text(row[field]?.toString() ?? ''))),
                       DataCell(Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
