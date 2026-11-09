@@ -73,9 +73,26 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   final _nameEnController = TextEditingController();
   final _activityController = TextEditingController();
   final _addressController = TextEditingController();
-  final _currencyController = TextEditingController();
+
+  final _activityArController = TextEditingController();
+  final _activityEnController = TextEditingController();
+  final _addressArController = TextEditingController();
+  final _addressEnController = TextEditingController();
+  final _taxNumberController = TextEditingController();
+  final _commercialRegisterController = TextEditingController();
+  final _poBoxController = TextEditingController();
+  final _telephoneController = TextEditingController();
+  final _faxController = TextEditingController();
+  final _mobileController = TextEditingController();
+
+  String? _selectedCurrency = 'ريال سعودي (SAR)';
   final _logoPathController = TextEditingController();
   final _termsController = TextEditingController();
+
+  final List<String> _currencies = [
+    'ريال سعودي (SAR)',
+    'دولار أمريكي (USD)',
+  ];
 
   @override
   void initState() {
@@ -91,9 +108,25 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       _nameEnController.text = _companyInfo!.nameEn ?? '';
       _activityController.text = _companyInfo!.activity ?? '';
       _addressController.text = _companyInfo!.address ?? '';
-      _currencyController.text = _companyInfo!.defaultCurrency ?? '';
       _logoPathController.text = _companyInfo!.logoPath ?? '';
       _termsController.text = _companyInfo!.termsConditions ?? '';
+
+      _activityArController.text = _companyInfo!.activityNameAr ?? '';
+      _activityEnController.text = _companyInfo!.activityNameEn ?? '';
+      _addressArController.text = _companyInfo!.addressAr ?? '';
+      _addressEnController.text = _companyInfo!.addressEn ?? '';
+      _taxNumberController.text = _companyInfo!.taxNumber ?? '';
+      _commercialRegisterController.text = _companyInfo!.commercialRegister ?? '';
+      _poBoxController.text = _companyInfo!.poBox ?? '';
+      _telephoneController.text = _companyInfo!.telephone ?? '';
+      _faxController.text = _companyInfo!.fax ?? '';
+      _mobileController.text = _companyInfo!.mobile ?? '';
+
+      if (_companyInfo!.defaultCurrency != null && _companyInfo!.defaultCurrency!.isNotEmpty) {
+        if (_currencies.contains(_companyInfo!.defaultCurrency)) {
+          _selectedCurrency = _companyInfo!.defaultCurrency;
+        }
+      }
     }
     setState(() {
       _isLoading = false;
@@ -108,9 +141,19 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
         nameEn: _nameEnController.text,
         activity: _activityController.text,
         address: _addressController.text,
-        defaultCurrency: _currencyController.text,
+        defaultCurrency: _selectedCurrency,
         logoPath: _logoPathController.text,
         termsConditions: _termsController.text,
+        activityNameAr: _activityArController.text,
+        activityNameEn: _activityEnController.text,
+        addressAr: _addressArController.text,
+        addressEn: _addressEnController.text,
+        taxNumber: _taxNumberController.text,
+        commercialRegister: _commercialRegisterController.text,
+        poBox: _poBoxController.text,
+        telephone: _telephoneController.text,
+        fax: _faxController.text,
+        mobile: _mobileController.text,
       );
 
       await DatabaseHelper.instance.updateCompanyInfo(updatedInfo.toMap());
@@ -128,9 +171,18 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
     _nameEnController.dispose();
     _activityController.dispose();
     _addressController.dispose();
-    _currencyController.dispose();
     _logoPathController.dispose();
     _termsController.dispose();
+    _activityArController.dispose();
+    _activityEnController.dispose();
+    _addressArController.dispose();
+    _addressEnController.dispose();
+    _taxNumberController.dispose();
+    _commercialRegisterController.dispose();
+    _poBoxController.dispose();
+    _telephoneController.dispose();
+    _faxController.dispose();
+    _mobileController.dispose();
     super.dispose();
   }
 
@@ -155,19 +207,101 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
               decoration: const InputDecoration(labelText: 'اسم المنشأة (إنجليزي)', border: OutlineInputBorder()),
             ),
             const SizedBox(height: 16),
-            TextFormField(
-              controller: _activityController,
-              decoration: const InputDecoration(labelText: 'النشاط', border: OutlineInputBorder()),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _activityArController,
+                    decoration: const InputDecoration(labelText: 'النشاط (عربي)', border: OutlineInputBorder()),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _activityEnController,
+                    decoration: const InputDecoration(labelText: 'النشاط (إنجليزي)', border: OutlineInputBorder()),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
-            TextFormField(
-              controller: _addressController,
-              decoration: const InputDecoration(labelText: 'العنوان', border: OutlineInputBorder()),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _commercialRegisterController,
+                    decoration: const InputDecoration(labelText: 'السجل التجاري (C.R)', border: OutlineInputBorder()),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _taxNumberController,
+                    decoration: const InputDecoration(labelText: 'الرقم الضريبي (VAT)', border: OutlineInputBorder()),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
-            TextFormField(
-              controller: _currencyController,
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _addressArController,
+                    decoration: const InputDecoration(labelText: 'العنوان (عربي)', border: OutlineInputBorder()),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _addressEnController,
+                    decoration: const InputDecoration(labelText: 'العنوان (إنجليزي)', border: OutlineInputBorder()),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _poBoxController,
+                    decoration: const InputDecoration(labelText: 'ص.ب (P.O Box)', border: OutlineInputBorder()),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _telephoneController,
+                    decoration: const InputDecoration(labelText: 'هاتف (Telephone)', border: OutlineInputBorder()),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _faxController,
+                    decoration: const InputDecoration(labelText: 'فاكس (Fax)', border: OutlineInputBorder()),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _mobileController,
+                    decoration: const InputDecoration(labelText: 'جوال (Mobile)', border: OutlineInputBorder()),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              value: _selectedCurrency,
               decoration: const InputDecoration(labelText: 'العملة الافتراضية', border: OutlineInputBorder()),
+              items: _currencies.map((curr) => DropdownMenuItem(value: curr, child: Text(curr))).toList(),
+              onChanged: (val) {
+                setState(() {
+                  _selectedCurrency = val;
+                });
+              },
             ),
             const SizedBox(height: 16),
             TextFormField(

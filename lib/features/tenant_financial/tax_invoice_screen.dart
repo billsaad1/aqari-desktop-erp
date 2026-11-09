@@ -1,3 +1,4 @@
+import "../../core/print_utils.dart";
 import 'package:flutter/material.dart';
 import 'dart:io';
 import 'package:flutter/services.dart';
@@ -77,10 +78,8 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   }
   Future<void> _printInvoice(String tenantName, double net, double tax, double gross, String date) async {
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-    final String companyName = companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية';
-    final String companyAddress = companyInfo?['address'] ?? '';
     final String companyTax = companyInfo?['tax_number'] ?? '';
-    final String? logoPath = companyInfo?['logo_path'];
+    final String companyName = companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية';
 
     final fontData = await rootBundle.load("assets/fonts/Cairo-Regular.ttf").catchError((_) => ByteData.view(Uint8List(0).buffer));
     final ttf = fontData.lengthInBytes > 0 ? pw.Font.ttf(fontData) : pw.Font.helvetica();
@@ -94,30 +93,12 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
         pageFormat: PdfPageFormat.a4,
         textDirection: pw.TextDirection.rtl,
         theme: pw.ThemeData.withFont(base: ttf, bold: ttfBold),
+
         build: (pw.Context context) {
           return pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                children: [
-                  pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.start,
-                    children: [
-                      pw.Text(companyName, style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-                      pw.Text('العنوان: $companyAddress', style: const pw.TextStyle(fontSize: 12)),
-                      if (companyTax.isNotEmpty) pw.Text('الرقم الضريبي: $companyTax', style: const pw.TextStyle(fontSize: 12)),
-                    ],
-                  ),
-                  if (logoPath != null && logoPath.isNotEmpty && File(logoPath).existsSync())
-                    pw.Image(
-                      pw.MemoryImage(File(logoPath).readAsBytesSync()),
-                      width: 60,
-                      height: 60,
-                    )
-                ],
-              ),
-              pw.Divider(thickness: 2),
+              PrintUtils.buildHeader(companyInfo, true),
               pw.SizedBox(height: 10),
               pw.Center(
                 child: pw.Text('فاتورة ضريبية مبسطة', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, decoration: pw.TextDecoration.underline)),

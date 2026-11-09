@@ -1,3 +1,4 @@
+import "../../core/print_utils.dart";
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -478,11 +479,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
   Future<void> _printContract(Map<String, dynamic> contract) async {
     // 1. Fetch Company Info
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-    final String companyName = companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية';
-    final String companyAddress = companyInfo?['address'] ?? '';
-    final String companyTax = companyInfo?['tax_number'] ?? '';
     final String termsConditions = companyInfo?['terms_conditions'] ?? '';
-    final String? logoPath = companyInfo?['logo_path'];
 
     // 2. Fetch required details from providers
     final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
@@ -515,34 +512,17 @@ class _ContractsScreenState extends State<ContractsScreen> {
         pageFormat: PdfPageFormat.a4,
         textDirection: pw.TextDirection.rtl,
         theme: pw.ThemeData.withFont(base: ttf, bold: ttfBold),
+
         header: (pw.Context context) {
           return pw.Column(
             children: [
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                children: [
-                  pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.start,
-                    children: [
-                      pw.Text(companyName, style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-                      pw.Text('العنوان: $companyAddress', style: const pw.TextStyle(fontSize: 12)),
-                      if (companyTax.isNotEmpty) pw.Text('الرقم الضريبي: $companyTax', style: const pw.TextStyle(fontSize: 12)),
-                    ],
-                  ),
-                  if (logoPath != null && logoPath.isNotEmpty && File(logoPath).existsSync())
-                    pw.Image(
-                      pw.MemoryImage(File(logoPath).readAsBytesSync()),
-                      width: 80,
-                      height: 80,
-                    )
-                  else
-                    pw.Container(width: 80, height: 80, color: PdfColors.grey200, child: pw.Center(child: pw.Text('شعار'))),
-                ],
-              ),
-              pw.Divider(thickness: 2),
+              PrintUtils.buildHeader(companyInfo, true),
               pw.SizedBox(height: 10),
             ],
           );
+        },
+        footer: (pw.Context context) {
+          return PrintUtils.buildFooter(companyInfo);
         },
         build: (pw.Context context) => [
           pw.Center(
@@ -553,7 +533,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
           pw.Text('تم إبرام هذا العقد بتاريخ ${DateFormat('yyyy-MM-dd').format(DateTime.now())} بين كل من:', style: const pw.TextStyle(fontSize: 14)),
           pw.SizedBox(height: 10),
 
-          pw.Text('الطرف الأول (المؤجر): $companyName', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+          pw.Text('الطرف الأول (المؤجر): ${companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية'}', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
           pw.Text('الطرف الثاني (المستأجر): ${tenant['name'] ?? ''}', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
           pw.Text('الجنسية: ${tenant['nationality'] ?? ''} | رقم الهوية: ${tenant['id_number'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
 

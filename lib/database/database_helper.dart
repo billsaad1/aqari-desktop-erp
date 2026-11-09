@@ -47,7 +47,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 5,
+        version: 6,
         onCreate: _createDB,
         onUpgrade: _upgradeDB,
       ),
@@ -80,6 +80,19 @@ class DatabaseHelper {
         // Ignored if already exists
       }
     }
+    if (oldVersion < 6) {
+      final columnsToAdd = [
+        'activity_name_ar', 'activity_name_en', 'address_ar', 'address_en',
+        'po_box', 'telephone', 'fax', 'mobile'
+      ];
+      for (final col in columnsToAdd) {
+        try {
+          await db.execute('ALTER TABLE company_info ADD COLUMN $col TEXT;');
+        } catch (e) {
+          // Ignored if already exists
+        }
+      }
+    }
   }
 
   Future _createDB(Database db, int version) async {
@@ -95,7 +108,15 @@ class DatabaseHelper {
         tax_number TEXT,
         commercial_register TEXT,
         logo_path TEXT,
-        terms_conditions TEXT
+        terms_conditions TEXT,
+        activity_name_ar TEXT,
+        activity_name_en TEXT,
+        address_ar TEXT,
+        address_en TEXT,
+        po_box TEXT,
+        telephone TEXT,
+        fax TEXT,
+        mobile TEXT
       )
     ''');
 
