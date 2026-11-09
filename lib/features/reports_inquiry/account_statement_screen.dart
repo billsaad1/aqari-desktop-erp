@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
@@ -6,6 +8,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import '../../providers/reports_provider.dart';
 import '../../providers/accounting_provider.dart';
+import '../../database/database_helper.dart';
 
 class AccountStatementScreen extends StatefulWidget {
   const AccountStatementScreen({super.key});
@@ -38,6 +41,17 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
   }
 
   Future<void> _printStatement(List<Map<String, dynamic>> statement, String accountName) async {
+    final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+    final String companyName = companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية';
+    final String companyAddress = companyInfo?['address'] ?? '';
+    final String companyTax = companyInfo?['tax_number'] ?? '';
+    final String? logoPath = companyInfo?['logo_path'];
+
+    final fontData = await rootBundle.load("assets/fonts/Cairo-Regular.ttf").catchError((_) => ByteData.view(Uint8List(0).buffer));
+    final ttf = fontData.lengthInBytes > 0 ? pw.Font.ttf(fontData) : pw.Font.helvetica();
+    final fontBoldData = await rootBundle.load("assets/fonts/Cairo-Bold.ttf").catchError((_) => ByteData.view(Uint8List(0).buffer));
+    final ttfBold = fontBoldData.lengthInBytes > 0 ? pw.Font.ttf(fontBoldData) : pw.Font.helveticaBold();
+
     final pdf = pw.Document();
 
     double runningBalance = 0.0;
@@ -59,23 +73,54 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
     pdf.addPage(
       pw.Page(
         pageFormat: PdfPageFormat.a4,
+        textDirection: pw.TextDirection.rtl,
+        theme: pw.ThemeData.withFont(base: ttf, bold: ttfBold),
         build: (pw.Context context) {
           return pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Center(
-                child: pw.Text('مؤسسة عبدالله النقيب التجارية', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold)),
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(companyName, style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+                      pw.Text('العنوان: $companyAddress', style: const pw.TextStyle(fontSize: 12)),
+                      if (companyTax.isNotEmpty) pw.Text('الرقم الضريبي: $companyTax', style: const pw.TextStyle(fontSize: 12)),
+                    ],
+                  ),
+                  if (logoPath != null && logoPath.isNotEmpty && File(logoPath).existsSync())
+                    pw.Image(
+                      pw.MemoryImage(File(logoPath).readAsBytesSync()),
+                      width: 60,
+                      height: 60,
+                    )
+                ],
               ),
+              pw.Divider(thickness: 2),
+              pw.SizedBox(height: 10),
               pw.Center(
-                child: pw.Text('كشف حساب', style: const pw.TextStyle(fontSize: 20)),
+                child: pw.Text('كشف حساب تفصيلي', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, decoration: pw.TextDecoration.underline)),
               ),
               pw.SizedBox(height: 30),
-              pw.Text('الحساب: $accountName'),
-              pw.Text('من تاريخ: ${_startDateController.text} إلى تاريخ: ${_endDateController.text}'),
-              pw.SizedBox(height: 30),
-              pw.Table.fromTextArray(
+              pw.Text('الحساب: $accountName', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+              pw.Text('من تاريخ: ${_startDateController.text} إلى تاريخ: ${_endDateController.text}', style: const pw.TextStyle(fontSize: 14)),
+              pw.SizedBox(height: 20),
+              pw.TableHelper.fromTextArray(
                 headers: ['التاريخ', 'رقم السند', 'البيان', 'مدين', 'دائن', 'الرصيد'],
                 data: tableData,
+                headerStyle: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey800),
+                cellStyle: const pw.TextStyle(fontSize: 12),
+                cellAlignments: {
+                  0: pw.Alignment.center,
+                  1: pw.Alignment.center,
+                  2: pw.Alignment.centerRight,
+                  3: pw.Alignment.center,
+                  4: pw.Alignment.center,
+                  5: pw.Alignment.center,
+                }
               ),
             ],
           );

@@ -1,4 +1,12 @@
-1. **Fix Downloaded Font Assets**: Re-download the actual binary TTF fonts using correct URLs from Google Fonts (e.g. `https://fonts.gstatic.com/s/cairo/v28/SLXVc1nY6HkvalvT.ttf` for regular, etc.) or reliable raw github links, and replace the corrupted HTML files in `assets/fonts/`.
-2. **Fix Database Migration**: Add the missing `ALTER TABLE company_info ADD COLUMN logo_path TEXT;` to the version 5 upgrade block in `lib/database/database_helper.dart`. Note that `logo_path` was added in a previous commit's `_createDB`, but existing DBs running older schemas (like version 4) need it added via migration.
-3. **Execute Pre-commit instructions**: Run `flutter analyze` and `flutter test`. Ensure fonts are valid binaries.
-4. **Submit changes**.
+1. **Create Utility for Printing Vouchers**:
+   - Instead of duplicating code in both `tenant_receipt_screen.dart` and `tenant_payment_screen.dart`, create a helper method `PrintUtils.printVoucher(...)` in a new file `lib/core/print_utils.dart` that handles fetching company info, loading Arabic fonts, and generating the PDF layout for a voucher (supporting both Receipt and Payment). Include `logoPath` handling.
+2. **Update `TenantReceiptScreen`**:
+   - Make `DatabaseHelper.instance.insertTenantReceiptVoucher` return the `voucherId` so we know the voucher number to print. (Modify `database_helper.dart` as well).
+   - In `_processReceipt()`, after successful save, immediately call `PrintUtils.printVoucher(...)` passing the details (voucher no, date, tenant name, amount, description/type).
+3. **Update `TenantPaymentScreen`**:
+   - Make `DatabaseHelper.instance.insertTenantPaymentVoucher` return the `voucherId`.
+   - In `_processPayment()`, call `PrintUtils.printVoucher(...)` similarly.
+4. **Update `AccountStatementScreen` and `OccupancyReportScreen` and `TaxInvoiceScreen`**:
+   - Update their PDF generation logic to dynamically fetch `company_info` (name, address, tax number, logo_path) to construct the unified letterhead, similar to what was done for contracts.
+5. **Execute Pre-commit instructions**: Run `flutter analyze` and `flutter test`. Skip playwright.
+6. **Submit changes**.

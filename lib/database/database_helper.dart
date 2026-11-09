@@ -884,7 +884,7 @@ class DatabaseHelper {
 
   // --- Tenant Financial Operations ---
 
-  Future<void> insertTenantReceiptVoucher({
+  Future<int> insertTenantReceiptVoucher({
     required int tenantId,
     required double amount,
     required String voucherDate,
@@ -892,6 +892,7 @@ class DatabaseHelper {
     required List<Map<String, dynamic>> installmentsToUpdate,
   }) async {
     final db = await instance.database;
+    int voucherId = 0;
     await db.transaction((txn) async {
       // 1. Fetch Tenant's Account ID
       final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
@@ -934,7 +935,7 @@ class DatabaseHelper {
         'tenant_id': tenantId,
         'journal_entry_id': journalId,
       };
-      await txn.insert('vouchers', voucher);
+      voucherId = await txn.insert('vouchers', voucher);
 
       // 6. Update Installments
       for (var inst in installmentsToUpdate) {
@@ -946,9 +947,10 @@ class DatabaseHelper {
         );
       }
     });
+    return voucherId;
   }
 
-  Future<void> insertTenantPaymentVoucher({
+  Future<int> insertTenantPaymentVoucher({
     required int tenantId,
     required double amount,
     required String voucherDate,
@@ -956,6 +958,7 @@ class DatabaseHelper {
     required String description,
   }) async {
     final db = await instance.database;
+    int voucherId = 0;
     await db.transaction((txn) async {
       // 1. Fetch Tenant's Account ID
       final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
@@ -998,8 +1001,9 @@ class DatabaseHelper {
         'tenant_id': tenantId,
         'journal_entry_id': journalId,
       };
-      await txn.insert('vouchers', voucher);
+      voucherId = await txn.insert('vouchers', voucher);
     });
+    return voucherId;
   }
 
   Future<void> insertTaxInvoice({

@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
+import '../../core/print_utils.dart';
 
 class TenantReceiptScreen extends StatefulWidget {
   const TenantReceiptScreen({super.key});
@@ -91,7 +92,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       }
 
       try {
-        await DatabaseHelper.instance.insertTenantReceiptVoucher(
+        final voucherId = await DatabaseHelper.instance.insertTenantReceiptVoucher(
           tenantId: _selectedTenantId!,
           amount: amountToPay,
           voucherDate: _dateController.text,
@@ -101,6 +102,25 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
 
         if (mounted) {
            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم التحصيل بنجاح وتوليد القيد الآلي')));
+
+           // Extract required info for printing
+           final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
+           final accProv = Provider.of<AccountingProvider>(context, listen: false);
+
+           final tenantName = leasingProv.tenants.firstWhere((t) => t['id'] == _selectedTenantId)['name'];
+           final accountName = accProv.accounts.firstWhere((a) => a['id'] == _selectedCashAccountId)['name'];
+
+           // Print Voucher
+           await PrintUtils.printVoucher(
+             voucherType: 'سند قبض',
+             voucherNo: voucherId,
+             date: _dateController.text,
+             targetName: tenantName,
+             amount: amountToPay,
+             paymentMethod: 'نقداً/بنكي',
+             accountName: accountName,
+           );
+
            // Refresh accounts to reflect new balances
            Provider.of<AccountingProvider>(context, listen: false).loadAccounts();
            // Refresh installments list
