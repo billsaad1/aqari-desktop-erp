@@ -22,6 +22,7 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
     int? selectedOwnerId;
     int? selectedCityId;
     int? selectedCostCenterId;
+    int? selectedPropertyTypeId;
 
     showDialog(
       context: context,
@@ -59,6 +60,15 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
                     decoration: const InputDecoration(labelText: 'المدينة'),
                   ),
                   DropdownButtonFormField<int>(
+                    value: selectedPropertyTypeId,
+                    items: provider.propertyTypes.map((pt) => DropdownMenuItem<int>(
+                      value: pt['id'],
+                      child: Text(pt['name']),
+                    )).toList(),
+                    onChanged: (val) => selectedPropertyTypeId = val,
+                    decoration: const InputDecoration(labelText: 'نوع العقار'),
+                  ),
+                  DropdownButtonFormField<int>(
                     value: selectedCostCenterId,
                     items: provider.costCenters.map((c) => DropdownMenuItem<int>(
                       value: c['id'],
@@ -88,6 +98,7 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
                     'name': nameController.text,
                     'owner_id': selectedOwnerId,
                     'city_id': selectedCityId,
+                    'property_type_id': selectedPropertyTypeId,
                     'cost_center_id': selectedCostCenterId,
                     'address': addressController.text,
                     'deed_number': deedController.text,
@@ -206,6 +217,9 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
     final formKey = GlobalKey<FormState>();
     final numController = TextEditingController();
     final rentController = TextEditingController();
+    final floorController = TextEditingController();
+    final elecController = TextEditingController();
+    final waterController = TextEditingController();
     int? selectedUnitTypeId;
 
     showDialog(
@@ -233,6 +247,18 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                   decoration: const InputDecoration(labelText: 'نوع الوحدة'),
                 ),
                 TextFormField(
+                  controller: floorController,
+                  decoration: const InputDecoration(labelText: 'الدور'),
+                ),
+                TextFormField(
+                  controller: elecController,
+                  decoration: const InputDecoration(labelText: 'رقم عداد الكهرباء'),
+                ),
+                TextFormField(
+                  controller: waterController,
+                  decoration: const InputDecoration(labelText: 'رقم عداد الماء'),
+                ),
+                TextFormField(
                   controller: rentController,
                   decoration: const InputDecoration(labelText: 'الإيجار الافتراضي'),
                   keyboardType: TextInputType.number,
@@ -249,6 +275,9 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                     'property_id': widget.propertyId,
                     'unit_number': numController.text,
                     'unit_type_id': selectedUnitTypeId,
+                    'floor': floorController.text,
+                    'elec_meter': elecController.text,
+                    'water_meter': waterController.text,
                     'default_rent': double.tryParse(rentController.text) ?? 0.0,
                     'status': 'شاغرة', // Default status
                   });

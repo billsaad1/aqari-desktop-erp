@@ -8,6 +8,7 @@ import '../system_settings/system_settings_screen.dart';
 import '../master_data/lookups_screen.dart';
 import '../general_accounting/accounting_main_screen.dart';
 import '../properties_owners/property_main_screen.dart';
+import '../tenants_leasing/leasing_main_screen.dart';
 
 class MainShellScreen extends StatelessWidget {
   const MainShellScreen({super.key});
@@ -43,7 +44,7 @@ class MainShellScreen extends StatelessWidget {
       case 3:
         return const PropertyMainScreen();
       case 4:
-        return const Center(child: Text('المستأجرين')); // Placeholder
+        return const LeasingMainScreen();
       case 5:
         return const AccountingMainScreen();
       case 6:

@@ -31,7 +31,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 2,
+        version: 3,
         onCreate: _createDB,
         onUpgrade: _upgradeDB,
       ),
@@ -41,6 +41,12 @@ class DatabaseHelper {
   Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute('ALTER TABLE owners ADD COLUMN iban TEXT;');
+    }
+    if (oldVersion < 3) {
+      await db.execute('ALTER TABLE properties ADD COLUMN property_type_id INTEGER;');
+      await db.execute('ALTER TABLE units ADD COLUMN floor TEXT;');
+      await db.execute('ALTER TABLE units ADD COLUMN elec_meter TEXT;');
+      await db.execute('ALTER TABLE units ADD COLUMN water_meter TEXT;');
     }
   }
 
@@ -177,11 +183,13 @@ class DatabaseHelper {
         name TEXT NOT NULL,
         owner_id INTEGER NOT NULL,
         city_id INTEGER,
+        property_type_id INTEGER,
         cost_center_id INTEGER,
         address TEXT,
         deed_number TEXT,
         FOREIGN KEY (owner_id) REFERENCES owners (id),
         FOREIGN KEY (city_id) REFERENCES cities (id),
+        FOREIGN KEY (property_type_id) REFERENCES property_types (id),
         FOREIGN KEY (cost_center_id) REFERENCES cost_centers (id)
       )
     ''');
@@ -192,6 +200,9 @@ class DatabaseHelper {
         property_id INTEGER NOT NULL,
         unit_number TEXT NOT NULL,
         unit_type_id INTEGER,
+        floor TEXT,
+        elec_meter TEXT,
+        water_meter TEXT,
         status TEXT DEFAULT 'شاغرة',
         default_rent REAL,
         FOREIGN KEY (property_id) REFERENCES properties (id),
@@ -523,7 +534,7 @@ class DatabaseHelper {
       final sequenceStr = lastChildCode.substring(parentCode.length);
       int sequence = int.tryParse(sequenceStr) ?? 0;
       sequence++;
-      return '$parentCode${sequence.toString().padLeft(2, '0')}';
+      return '$parentCode${sequence.toString().padLeft(4, '0')}';
   }
     }
 
@@ -675,13 +686,13 @@ class DatabaseHelper {
 
       String newCode;
       if (childrenResult.isEmpty) {
-        newCode = '${parentCode}01';
+        newCode = '${parentCode}0001';
       } else {
         final lastChildCode = childrenResult.first['code'] as String;
         final sequenceStr = lastChildCode.substring(parentCode.length);
         int sequence = int.tryParse(sequenceStr) ?? 0;
         sequence++;
-        newCode = '$parentCode${sequence.toString().padLeft(2, '0')}';
+        newCode = '$parentCode${sequence.toString().padLeft(4, '0')}';
       }
 
       // 3. Create the sub-account
@@ -740,6 +751,98 @@ class DatabaseHelper {
   Future<void> deleteUnit(int id) async {
     final db = await instance.database;
     await db.delete('units', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // --- Leasing & Tenants Operations ---
+
+  Future<void> insertTenantWithAccount(Map<String, dynamic> tenant) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Find the parent account for Tenants (code: '1201')
+      final parentResult = await txn.query('accounts', where: 'code = ?', whereArgs: ['1201']);
+      if (parentResult.isEmpty) throw Exception('حساب ذمم المستأجرين غير موجود (1201)');
+
+      final parentId = parentResult.first['id'] as int;
+      final parentCode = parentResult.first['code'] as String;
+
+      // 2. Generate Account Code for the new tenant
+      final childrenResult = await txn.query(
+        'accounts',
+        where: 'parent_id = ?',
+        whereArgs: [parentId],
+        orderBy: 'code DESC',
+        limit: 1,
+      );
+
+      String newCode;
+      if (childrenResult.isEmpty) {
+        newCode = '${parentCode}0001';
+      } else {
+        final lastChildCode = childrenResult.first['code'] as String;
+        final sequenceStr = lastChildCode.substring(parentCode.length);
+        int sequence = int.tryParse(sequenceStr) ?? 0;
+        sequence++;
+        newCode = '$parentCode${sequence.toString().padLeft(4, '0')}';
+      }
+
+      // 3. Create the sub-account
+      final newAccount = {
+        'code': newCode,
+        'name': tenant['name'],
+        'parent_id': parentId,
+        'account_type': 'Asset', // Since '1201' is an asset
+        'balance': 0.0,
+      };
+
+      final accountId = await txn.insert('accounts', newAccount);
+
+      // 4. Insert Tenant linked to the new account
+      tenant['account_id'] = accountId;
+      await txn.insert('tenants', tenant);
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getAllTenants() async {
+    final db = await instance.database;
+    return await db.query('tenants');
+  }
+
+  Future<void> insertContractWithInstallments(Map<String, dynamic> contract, List<Map<String, dynamic>> installments) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      // 1. Insert contract
+      final contractId = await txn.insert('contracts', contract);
+
+      // 2. Insert installments
+      for (var inst in installments) {
+        inst['contract_id'] = contractId;
+        await txn.insert('contract_installments', inst);
+      }
+
+      // 3. Update unit status to 'مؤجرة'
+      final unitId = contract['unit_id'];
+      await txn.update(
+        'units',
+        {'status': 'مؤجرة'},
+        where: 'id = ?',
+        whereArgs: [unitId],
+      );
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getVacantUnits() async {
+    final db = await instance.database;
+    return await db.query('units', where: 'status = ?', whereArgs: ['شاغرة']);
+  }
+
+  Future<List<Map<String, dynamic>>> getAllContracts() async {
+    final db = await instance.database;
+    return await db.query('contracts');
+  }
+
+  Future<List<Map<String, dynamic>>> getInstallmentsForContract(int contractId) async {
+    final db = await instance.database;
+    return await db.query('contract_installments', where: 'contract_id = ?', whereArgs: [contractId]);
   }
 
   Future close() async {
