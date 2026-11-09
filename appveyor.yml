@@ -6,8 +6,8 @@ environment:
   FLUTTER_CHANNEL: stable
 
 install:
-  - git clone https://github.com/flutter/flutter.git --depth 1 -b %FLUTTER_CHANNEL% C:\flutter
-  - set PATH=C:\flutter\bin;%PATH%
+  - git clone https://github.com/flutter/flutter.git --depth 1 -b %FLUTTER_CHANNEL% C:\flutter_sdk
+  - set PATH=C:\flutter_sdk\bin;%PATH%
   - flutter config --enable-windows-desktop
   - flutter doctor
   - flutter pub get
