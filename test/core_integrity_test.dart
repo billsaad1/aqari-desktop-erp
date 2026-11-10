@@ -6,20 +6,28 @@ import 'package:app/core/lease_contract_pdf.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
+import 'package:app/features/tenants_leasing/tenants_screen.dart';
+import 'package:app/providers/leasing_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
   const testDocuments = '/tmp/aqari_erp_flutter_test';
 
-  setUpAll(() {
+  setUpAll(() async {
+    final staleTestDirectory = Directory(testDocuments);
+    if (await staleTestDirectory.exists()) {
+      await staleTestDirectory.delete(recursive: true);
+    }
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pathProvider, (call) async {
-          if (call.method == 'getApplicationDocumentsDirectory')
+          if (call.method == 'getApplicationDocumentsDirectory') {
             return testDocuments;
+          }
           return null;
         });
   });
@@ -112,6 +120,14 @@ void main() {
       expect(PrintUtils.suggestedPdfName('سند قبض/17'), 'سند_قبض_17.pdf');
       expect(PrintUtils.currencyInArabic('YER'), 'ريال يمني');
       expect(PrintUtils.currencyInArabic('ريال سعودي (SAR)'), 'ريال سعودي');
+      expect(
+        LeaseContractPdf.formatAmountInWords(3222.5, 'YER'),
+        allOf(contains('ريال يمني'), contains('فلس'), isNot(contains('سعودي'))),
+      );
+      expect(
+        LeaseContractPdf.formatAmountInWords(10.5, 'SAR'),
+        allOf(contains('ريال سعودي'), contains('هللة')),
+      );
 
       final backupPath = '$testDocuments/aqari-test-backup.db';
       await DatabaseHelper.instance.backupToFile(backupPath);
@@ -361,6 +377,23 @@ void main() {
         throwsStateError,
       );
 
+      await expectLater(
+        DatabaseHelper.instance.cancelContract(contractId),
+        throwsStateError,
+      );
+      final protectedContract = (await db.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [contractId],
+      )).single;
+      final protectedInstallments = await db.query(
+        'contract_installments',
+        where: 'contract_id = ?',
+        whereArgs: [contractId],
+      );
+      expect(protectedContract['status'], 'Active');
+      expect(protectedInstallments, hasLength(12));
+
       final summary = await DatabaseHelper.instance.getDashboardSummary();
       expect((summary['outstanding_amount'] as num).toDouble(), 1050.0);
       final before =
@@ -435,6 +468,120 @@ void main() {
     },
   );
 
+  test('cancelling a contract preserves its installment history', () async {
+    final db = await DatabaseHelper.instance.database;
+    final tenant = (await db.query(
+      'tenants',
+      where: 'name = ?',
+      whereArgs: ['مستأجر الاختبار'],
+    )).single;
+    final ownerId = await db.insert('owners', {'name': 'مالك عقد الإلغاء'});
+    final propertyId = await db.insert('properties', {
+      'name': 'عقار عقد الإلغاء',
+      'owner_id': ownerId,
+    });
+    await DatabaseHelper.instance.updateProperty({
+      'id': propertyId,
+      'name': 'عقار عقد الإلغاء المعدل',
+      'owner_id': ownerId,
+      'city_id': null,
+      'property_type_id': null,
+      'cost_center_id': null,
+      'address': 'عنوان اختباري',
+      'deed_number': 'D-01',
+    });
+    final unitId = await db.insert('units', {
+      'property_id': propertyId,
+      'unit_number': 'CANCEL-01',
+    });
+    await DatabaseHelper.instance.updateUnit({
+      'id': unitId,
+      'unit_number': 'CANCEL-EDITED',
+      'unit_type_id': null,
+      'floor': 'الأول',
+      'elec_meter': 'E-01',
+      'water_meter': 'W-01',
+      'default_rent': 100.0,
+    });
+    final editedUnit = (await db.query(
+      'units',
+      where: 'id = ?',
+      whereArgs: [unitId],
+    )).single;
+    expect(editedUnit['unit_number'], 'CANCEL-EDITED');
+    expect(editedUnit['status'], 'شاغرة');
+    final contractId = await DatabaseHelper.instance
+        .insertContractWithInstallments(
+          {
+            'tenant_id': tenant['id'],
+            'unit_id': unitId,
+            'start_date': '2026-11-10',
+            'end_date': '2027-11-09',
+            'rent_amount': 100,
+            'payment_method': 'شهري',
+            'status': 'Active',
+          },
+          [
+            {
+              'amount': 100,
+              'paid_amount': 0,
+              'due_date': '2026-12-10',
+              'status': 'Unpaid',
+            },
+          ],
+        );
+    final secondOwnerId = await db.insert('owners', {
+      'name': 'مالك ثان للاختبار',
+    });
+    final savedProperty = (await db.query(
+      'properties',
+      where: 'id = ?',
+      whereArgs: [propertyId],
+    )).single;
+    await expectLater(
+      DatabaseHelper.instance.updateProperty({
+        ...savedProperty,
+        'owner_id': secondOwnerId,
+      }),
+      throwsStateError,
+    );
+    final installment = (await db.query(
+      'contract_installments',
+      where: 'contract_id = ?',
+      whereArgs: [contractId],
+    )).single;
+
+    await DatabaseHelper.instance.cancelContract(contractId);
+
+    final retainedInstallments = await db.query(
+      'contract_installments',
+      where: 'contract_id = ?',
+      whereArgs: [contractId],
+    );
+    final cancelledContract = (await db.query(
+      'contracts',
+      where: 'id = ?',
+      whereArgs: [contractId],
+    )).single;
+    final releasedUnit = (await db.query(
+      'units',
+      where: 'id = ?',
+      whereArgs: [unitId],
+    )).single;
+    final dueInstallments = await DatabaseHelper.instance.getDueInstallments(
+      3650,
+    );
+    expect(retainedInstallments, hasLength(1));
+    expect(retainedInstallments.single['id'], installment['id']);
+    expect(retainedInstallments.single['status'], 'Cancelled');
+    expect(cancelledContract['status'], 'Cancelled');
+    expect(releasedUnit['status'], 'شاغرة');
+    expect(
+      dueInstallments.any((row) => row['installment_id'] == installment['id']),
+      isFalse,
+    );
+  });
+
   testWidgets('voucher history lists persisted tenant and general vouchers', (
     tester,
   ) async {
@@ -461,4 +608,144 @@ void main() {
     expect(find.text('الحسابات والحركة المحاسبية'), findsOneWidget);
     expect(find.text('الأقساط التي سددها هذا السند'), findsOneWidget);
   });
+
+  test(
+    'updating a tenant keeps its account link and syncs account name',
+    () async {
+      final db = await DatabaseHelper.instance.database;
+      final tenant = (await db.query(
+        'tenants',
+        where: 'name = ?',
+        whereArgs: ['مستأجر الاختبار'],
+      )).single;
+      final tenantId = tenant['id'] as int;
+      final accountId = tenant['account_id'] as int;
+
+      await DatabaseHelper.instance.updateTenant({
+        'id': tenantId,
+        'name': 'مستأجر معدل',
+        'mobile': tenant['mobile'],
+        'identity_number': tenant['identity_number'],
+        'identity_issue_date': tenant['identity_issue_date'],
+        'identity_source': tenant['identity_source'],
+        'profession': tenant['profession'],
+        'nationality_id': tenant['nationality_id'],
+      });
+      final updated = (await db.query(
+        'tenants',
+        where: 'id = ?',
+        whereArgs: [tenantId],
+      )).single;
+      final account = (await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [accountId],
+      )).single;
+      expect(updated['name'], 'مستأجر معدل');
+      expect(updated['account_id'], accountId);
+      expect(account['name'], 'مستأجر معدل');
+    },
+  );
+
+  test(
+    'updating an owner keeps its account link and syncs account name',
+    () async {
+      final db = await DatabaseHelper.instance.database;
+      await DatabaseHelper.instance.insertOwnerWithAccount({
+        'name': 'مالك تعديل الاختبار',
+        'mobile': '777111222',
+        'commission_rate': 5.0,
+      });
+      final owner = (await db.query(
+        'owners',
+        where: 'name = ?',
+        whereArgs: ['مالك تعديل الاختبار'],
+      )).single;
+      final ownerId = owner['id'] as int;
+      final accountId = owner['account_id'] as int;
+
+      await DatabaseHelper.instance.updateOwner({
+        'id': ownerId,
+        'name': 'مالك محدث للاختبار',
+        'mobile': owner['mobile'],
+        'identity_number': owner['identity_number'],
+        'identity_issue_date': owner['identity_issue_date'],
+        'identity_source': owner['identity_source'],
+        'profession': owner['profession'],
+        'iban': owner['iban'],
+        'commission_rate': 7.5,
+      });
+      final updated = (await db.query(
+        'owners',
+        where: 'id = ?',
+        whereArgs: [ownerId],
+      )).single;
+      final account = (await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [accountId],
+      )).single;
+      expect(updated['name'], 'مالك محدث للاختبار');
+      expect(updated['account_id'], accountId);
+      expect(updated['commission_rate'], 7.5);
+      expect(account['name'], 'مالك محدث للاختبار');
+    },
+  );
+
+  testWidgets('tenant row opens an edit form and updates displayed data', (
+    tester,
+  ) async {
+    final provider = _TestLeasingProvider();
+    await tester.pumpWidget(
+      ChangeNotifierProvider<LeasingProvider>.value(
+        value: provider,
+        child: const MaterialApp(home: Scaffold(body: TenantsScreen())),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('مستأجر الاختبار').first);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('تعديل بيانات المستأجر'), findsOneWidget);
+    await tester.enterText(find.byType(TextFormField).first, 'مستأجر معدل');
+    await tester.tap(find.text('حفظ التعديلات'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('مستأجر معدل'), findsOneWidget);
+    expect(provider.tenants.single['account_id'], 81);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    provider.dispose();
+  });
+}
+
+class _TestLeasingProvider extends LeasingProvider {
+  final List<Map<String, dynamic>> _testTenants = [
+    {
+      'id': 17,
+      'name': 'مستأجر الاختبار',
+      'mobile': '777000000',
+      'identity_number': '12345',
+      'identity_issue_date': '2026-01-01',
+      'identity_source': 'صنعاء',
+      'profession': 'موظف',
+      'nationality_id': null,
+      'account_id': 81,
+    },
+  ];
+
+  @override
+  List<Map<String, dynamic>> get tenants => _testTenants;
+
+  @override
+  List<Map<String, dynamic>> get nationalities => const [];
+
+  @override
+  bool get isLoading => false;
+
+  @override
+  Future<void> updateTenant(Map<String, dynamic> tenant) async {
+    final index = _testTenants.indexWhere((item) => item['id'] == tenant['id']);
+    _testTenants[index] = {..._testTenants[index], ...tenant};
+    notifyListeners();
+  }
 }
