@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
+import 'arabic_amount_words.dart';
 import 'lease_contract_terms.dart';
 import 'print_utils.dart';
 
@@ -457,7 +458,7 @@ class LeaseContractPdf {
               preferred: valueDirection,
             ),
             textAlign: pw.TextAlign.right,
-            style: const pw.TextStyle(fontSize: 9.5),
+            style: const pw.TextStyle(fontSize: 10, wordSpacing: 1.12),
           ),
         ),
       ],
@@ -553,7 +554,11 @@ class LeaseContractPdf {
             text,
             textDirection: pw.TextDirection.rtl,
             textAlign: pw.TextAlign.right,
-            style: const pw.TextStyle(fontSize: 9.5, lineSpacing: 3),
+            style: const pw.TextStyle(
+              fontSize: 10,
+              lineSpacing: 3,
+              wordSpacing: 1.5,
+            ),
           ),
         ),
       ],
@@ -721,124 +726,6 @@ class LeaseContractPdf {
       rawCurrency,
       fallback: 'عملة المنشأة',
     );
-    return _amountInWords(amount, currency);
-  }
-
-  static String _amountInWords(double amount, String currency) {
-    final cents = (amount.abs() * 100).round();
-    final majorUnits = cents ~/ 100;
-    final minorUnits = cents % 100;
-    final majorText = '${_integerInWords(majorUnits)} $currency';
-    if (minorUnits == 0) return majorText;
-    return '$majorText و${_integerInWords(minorUnits)} ${_fractionName(currency)}';
-  }
-
-  static String _fractionName(String currency) {
-    if (currency.contains('سعودي')) return 'هللة';
-    if (currency.contains('دولار') || currency == 'يورو') return 'سنت';
-    if (currency.contains('كويتي') ||
-        currency.contains('إماراتي') ||
-        currency.contains('بحريني') ||
-        currency.contains('يمني')) {
-      return 'فلس';
-    }
-    if (currency.contains('عماني')) return 'بيسة';
-    if (currency.contains('قطري')) return 'درهم';
-    if (currency.contains('مصري')) return 'قرش';
-    return 'جزء من مئة $currency';
-  }
-
-  static String _integerInWords(int value) {
-    if (value == 0) return 'صفر';
-    if (value < 0) return 'سالب ${_integerInWords(-value)}';
-    const scales = ['', 'ألف', 'مليون', 'مليار', 'تريليون'];
-    const pluralScales = ['', 'آلاف', 'ملايين', 'مليارات', 'تريليونات'];
-    final groups = <int>[];
-    var remaining = value;
-    while (remaining > 0) {
-      groups.add(remaining % 1000);
-      remaining ~/= 1000;
-    }
-    if (groups.length > scales.length) return value.toString();
-    final words = <String>[];
-    for (var i = groups.length - 1; i >= 0; i--) {
-      final group = groups[i];
-      if (group == 0) continue;
-      if (i == 0) {
-        words.add(_underThousand(group));
-      } else if (group == 1) {
-        words.add(scales[i]);
-      } else if (group == 2) {
-        words.add('${scales[i]}ان');
-      } else if (group <= 10) {
-        words.add('${_underThousand(group)} ${pluralScales[i]}');
-      } else {
-        words.add('${_underThousand(group)} ${scales[i]}');
-      }
-    }
-    return words.join(' و');
-  }
-
-  static String _underThousand(int value) {
-    const ones = [
-      '',
-      'واحد',
-      'اثنان',
-      'ثلاثة',
-      'أربعة',
-      'خمسة',
-      'ستة',
-      'سبعة',
-      'ثمانية',
-      'تسعة',
-      'عشرة',
-      'أحد عشر',
-      'اثنا عشر',
-      'ثلاثة عشر',
-      'أربعة عشر',
-      'خمسة عشر',
-      'ستة عشر',
-      'سبعة عشر',
-      'ثمانية عشر',
-      'تسعة عشر',
-    ];
-    const tens = [
-      '',
-      '',
-      'عشرون',
-      'ثلاثون',
-      'أربعون',
-      'خمسون',
-      'ستون',
-      'سبعون',
-      'ثمانون',
-      'تسعون',
-    ];
-    const hundreds = [
-      '',
-      'مئة',
-      'مئتان',
-      'ثلاثمئة',
-      'أربعمئة',
-      'خمسمئة',
-      'ستمئة',
-      'سبعمئة',
-      'ثمانمئة',
-      'تسعمئة',
-    ];
-    final parts = <String>[];
-    final hundredsValue = value ~/ 100;
-    final remainder = value % 100;
-    if (hundredsValue > 0) parts.add(hundreds[hundredsValue]);
-    if (remainder > 0) {
-      if (remainder < 20) {
-        parts.add(ones[remainder]);
-      } else {
-        final unit = remainder % 10;
-        final ten = remainder ~/ 10;
-        parts.add(unit == 0 ? tens[ten] : '${ones[unit]} و${tens[ten]}');
-      }
-    }
-    return parts.join(' و');
+    return ArabicAmountWords.format(amount, currency);
   }
 }

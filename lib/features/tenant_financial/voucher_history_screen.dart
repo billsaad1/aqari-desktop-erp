@@ -3,6 +3,7 @@ import '../../core/erp_data_table.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/print_utils.dart';
+import '../../core/pdf_preview_dialog.dart';
 import '../../database/database_helper.dart';
 
 class VoucherHistoryScreen extends StatefulWidget {
@@ -325,20 +326,14 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         journalLines: lines,
         installmentAllocations: installments,
       );
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(
-          pdfBytes,
-          'سند_${voucher['voucher_type']}_${widget.voucherId}',
-        );
-        if (mounted && saved) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
-        }
-      } else {
-        await PrintUtils.printPdf(
-          pdfBytes,
-          'سند_${voucher['voucher_type']}_${widget.voucherId}',
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: pdfBytes,
+          fileName: 'سند_${voucher['voucher_type']}_${widget.voucherId}',
+          preferredIntent: saveAsPdf
+              ? PdfPreviewIntent.save
+              : PdfPreviewIntent.printDocument,
         );
       }
     } catch (e) {

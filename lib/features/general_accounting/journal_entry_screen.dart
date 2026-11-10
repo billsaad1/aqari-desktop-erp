@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../../providers/accounting_provider.dart';
 import 'package:intl/intl.dart';
 import '../../core/print_utils.dart';
+import '../../core/pdf_preview_dialog.dart';
 
 class JournalEntryScreen extends StatefulWidget {
   const JournalEntryScreen({super.key});
@@ -177,7 +178,14 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
     final name = _lastPdfName;
     if (bytes == null || name == null) return;
     try {
-      await PrintUtils.printPdf(bytes, name);
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: bytes,
+          fileName: name,
+          preferredIntent: PdfPreviewIntent.printDocument,
+        );
+      }
     } catch (e) {
       if (mounted)
         ScaffoldMessenger.of(
@@ -191,11 +199,14 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
     final name = _lastPdfName;
     if (bytes == null || name == null) return;
     try {
-      final saved = await PrintUtils.savePdf(bytes, name);
-      if (mounted && saved)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: bytes,
+          fileName: name,
+          preferredIntent: PdfPreviewIntent.save,
+        );
+      }
     } catch (e) {
       if (mounted)
         ScaffoldMessenger.of(

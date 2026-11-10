@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:convert';
 
+import 'package:app/core/arabic_amount_words.dart';
 import 'package:app/core/crypto_utils.dart';
 import 'package:app/core/company_logo_storage.dart';
 import 'package:app/core/lease_contract_pdf.dart';
@@ -158,6 +159,19 @@ void main() {
     expect(PrintUtils.resolveTextDirection('2026/11/10'), pw.TextDirection.ltr);
   });
 
+  test('spells receipt amounts in Arabic using the selected currency', () {
+    expect(
+      ArabicAmountWords.format(1220, 'ريال سعودي'),
+      'ألف ومئتان وعشرون ريال سعودي',
+    );
+    expect(ArabicAmountWords.format(1, 'ريال سعودي'), 'ريال سعودي واحد');
+    expect(ArabicAmountWords.format(2, 'ريال سعودي'), 'ريالان سعوديان');
+    expect(
+      ArabicAmountWords.format(10.5, 'ريال سعودي'),
+      'عشرة ريالات سعودية وخمسون هللة',
+    );
+  });
+
   test('lease terms prefer saved settings and strip display numbering', () {
     expect(LeaseContractTerms.defaultClauses, hasLength(8));
     expect(LeaseContractTerms.resolve('شرط خاص للمؤسسة\n2. شرط ثانٍ'), [
@@ -253,7 +267,7 @@ void main() {
       );
       expect(
         LeaseContractPdf.formatAmountInWords(10.5, 'SAR'),
-        allOf(contains('ريال سعودي'), contains('هللة')),
+        allOf(contains('ريالات سعودية'), contains('هللة')),
       );
 
       final backupPath = '$testDocuments/aqari-test-backup.db';

@@ -5,6 +5,7 @@ import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
 import '../../core/print_utils.dart';
+import '../../core/pdf_preview_dialog.dart';
 
 class TenantPaymentScreen extends StatefulWidget {
   const TenantPaymentScreen({super.key});
@@ -125,17 +126,15 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
         accountName: accountName,
         description: _descController.text.trim(),
       );
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(
-          pdfBytes,
-          'سند_صرف_مستأجر_$voucherId',
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: pdfBytes,
+          fileName: 'سند_صرف_مستأجر_$voucherId',
+          preferredIntent: saveAsPdf
+              ? PdfPreviewIntent.save
+              : PdfPreviewIntent.printDocument,
         );
-        if (mounted && saved)
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
-      } else {
-        await PrintUtils.printPdf(pdfBytes, 'سند_صرف_مستأجر_$voucherId');
       }
     } catch (e) {
       if (mounted)

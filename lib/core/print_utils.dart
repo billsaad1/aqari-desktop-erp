@@ -7,6 +7,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
+import 'arabic_amount_words.dart';
 import '../database/database_helper.dart';
 
 class PrintUtils {
@@ -648,15 +649,15 @@ class PrintUtils {
               children: [
                 if (hasParty)
                   buildLabelValue(
-                    isReceipt ? 'اسم المستلم منه' : 'اسم المستفيد',
+                    isReceipt ? 'استلمنا من الأخ/الأخت' : 'اسم المستفيد',
                     targetName.trim(),
                     labelWidth: 100,
-                    fontSize: 10,
+                    fontSize: 10.5,
                   ),
                 pw.Row(
                   children: [
                     pw.Text(
-                      'المبلغ',
+                      isReceipt ? 'مبلغ وقدره (رقماً)' : 'المبلغ',
                       textDirection: pw.TextDirection.rtl,
                       style: const pw.TextStyle(
                         fontSize: 9,
@@ -685,12 +686,21 @@ class PrintUtils {
                     ),
                   ],
                 ),
+                if (isReceipt)
+                  buildLabelValue(
+                    'وكتابةً',
+                    '${ArabicAmountWords.format(amount, currencyLabel)} فقط لا غير',
+                    labelWidth: 100,
+                    fontSize: 10,
+                  ),
                 if (description != null && description.trim().isNotEmpty)
                   buildLabelValue(
                     'البيان',
-                    description.trim(),
+                    isReceipt
+                        ? 'وذلك مقابل ${description.trim()}'
+                        : description.trim(),
                     labelWidth: 100,
-                    fontSize: 9,
+                    fontSize: 10,
                   ),
                 if (showPaymentMethod)
                   buildLabelValue(
@@ -902,7 +912,7 @@ class PrintUtils {
               preferred: valueDirection,
             ),
             textAlign: pw.TextAlign.right,
-            style: pw.TextStyle(fontSize: fontSize),
+            style: pw.TextStyle(fontSize: fontSize, wordSpacing: 1.12),
           ),
         ),
       ],
