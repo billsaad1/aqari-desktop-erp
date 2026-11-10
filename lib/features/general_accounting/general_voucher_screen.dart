@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../../providers/accounting_provider.dart';
 import 'package:intl/intl.dart';
 import '../../core/print_utils.dart';
+import '../../core/pdf_preview_dialog.dart';
 
 class GeneralVoucherScreen extends StatefulWidget {
   final String voucherType; // 'قبض عام' or 'صرف عام'
@@ -129,17 +130,15 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         accountName: '${cashAccount['name']} / ${counterpart['name']}',
         description: _descController.text.trim(),
       );
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(
-          pdfBytes,
-          '${widget.voucherType}_$voucherId',
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: pdfBytes,
+          fileName: '${widget.voucherType}_$voucherId',
+          preferredIntent: saveAsPdf
+              ? PdfPreviewIntent.save
+              : PdfPreviewIntent.printDocument,
         );
-        if (mounted && saved)
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
-      } else {
-        await PrintUtils.printPdf(pdfBytes, '${widget.voucherType}_$voucherId');
       }
     } catch (e) {
       if (mounted)

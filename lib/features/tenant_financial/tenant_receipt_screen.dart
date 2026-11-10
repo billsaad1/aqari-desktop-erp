@@ -5,6 +5,7 @@ import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
 import '../../core/print_utils.dart';
+import '../../core/pdf_preview_dialog.dart';
 
 class TenantReceiptScreen extends StatefulWidget {
   const TenantReceiptScreen({super.key});
@@ -181,17 +182,15 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         accountName: accountName,
         description: 'تحصيل دفعة إيجار',
       );
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(
-          pdfBytes,
-          'سند_قبض_مستأجر_$voucherId',
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: pdfBytes,
+          fileName: 'سند_قبض_مستأجر_$voucherId',
+          preferredIntent: saveAsPdf
+              ? PdfPreviewIntent.save
+              : PdfPreviewIntent.printDocument,
         );
-        if (mounted && saved)
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
-      } else {
-        await PrintUtils.printPdf(pdfBytes, 'سند_قبض_مستأجر_$voucherId');
       }
     } catch (e) {
       if (mounted)

@@ -1,4 +1,5 @@
 import "../../core/print_utils.dart";
+import '../../core/pdf_preview_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
@@ -347,14 +348,16 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
 
     final bytes = await pdf.save();
     try {
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(
-          bytes,
-          'فاتورة_ضريبية_$invoiceNo',
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: bytes,
+          fileName: 'فاتورة_ضريبية_$invoiceNo',
+          preferredIntent: saveAsPdf
+              ? PdfPreviewIntent.save
+              : PdfPreviewIntent.printDocument,
         );
-        return saved ? PrintUtils.savedPdfMessage : 'أُلغي حفظ ملف PDF';
       }
-      await PrintUtils.printPdf(bytes, 'فاتورة_ضريبية_$invoiceNo');
       return null;
     } catch (e) {
       return 'تعذر تجهيز/طباعة المستند: $e';

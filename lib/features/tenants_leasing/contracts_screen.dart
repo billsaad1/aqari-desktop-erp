@@ -1,4 +1,4 @@
-import "../../core/print_utils.dart";
+import '../../core/pdf_preview_dialog.dart';
 import '../../core/lease_contract_pdf.dart';
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
@@ -898,15 +898,15 @@ class _ContractsScreenState extends State<ContractsScreen> {
         unitTypeName: unitTypeName.isEmpty ? propertyTypeName : unitTypeName,
       );
       final name = 'عقد_إيجار_${contract['id']}';
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(bytes, name);
-        if (mounted && saved) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
-        }
-      } else {
-        await PrintUtils.printPdf(bytes, name);
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: bytes,
+          fileName: name,
+          preferredIntent: saveAsPdf
+              ? PdfPreviewIntent.save
+              : PdfPreviewIntent.printDocument,
+        );
       }
     } catch (e) {
       if (mounted) {

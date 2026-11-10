@@ -1,4 +1,5 @@
 import "../../core/print_utils.dart";
+import '../../core/pdf_preview_dialog.dart';
 import 'package:flutter/material.dart';
 import '../../core/erp_data_table.dart';
 import 'package:provider/provider.dart';
@@ -277,17 +278,15 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
       );
 
       final bytes = await pdf.save();
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(
-          bytes,
-          'كشف_حساب_${accountName}',
+      if (mounted) {
+        await PdfDocumentPreviewDialog.show(
+          context: context,
+          bytes: bytes,
+          fileName: 'كشف_حساب_${accountName}',
+          preferredIntent: saveAsPdf
+              ? PdfPreviewIntent.save
+              : PdfPreviewIntent.printDocument,
         );
-        if (mounted && saved)
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
-      } else {
-        await PrintUtils.printPdf(bytes, 'كشف_حساب_${accountName}');
       }
     } catch (e) {
       if (mounted) {
