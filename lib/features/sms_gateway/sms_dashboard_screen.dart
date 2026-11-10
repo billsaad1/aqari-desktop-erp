@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import '../../providers/sms_provider.dart';
 import '../../providers/leasing_provider.dart';
@@ -244,8 +245,10 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: Colors.blue.withOpacity(0.05),
-                  border: Border.all(color: Colors.blue.shade200),
+                  color: AppPalette.navy.withOpacity(0.05),
+                  border: Border.all(
+                    color: AppPalette.navy.withValues(alpha: 0.24),
+                  ),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Column(
@@ -255,7 +258,7 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
                       'معاينة الرسالة النهائية:',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
-                        color: Colors.blue,
+                        color: AppPalette.navy,
                       ),
                     ),
                     const SizedBox(height: 8),

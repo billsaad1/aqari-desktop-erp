@@ -1,5 +1,6 @@
 import "../../core/print_utils.dart";
 import 'package:flutter/material.dart';
+import '../../core/erp_data_table.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
@@ -327,7 +328,7 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
                       ),
                       Expanded(
                         child: SingleChildScrollView(
-                          child: DataTable(
+                          child: ErpDataTable(
                             columns: const [
                               DataColumn(label: Text('التاريخ')),
                               DataColumn(label: Text('رقم القيد/السند')),

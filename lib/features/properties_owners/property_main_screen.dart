@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import '../../providers/property_provider.dart';
 import 'owners_screen.dart';
@@ -11,7 +12,8 @@ class PropertyMainScreen extends StatefulWidget {
   State<PropertyMainScreen> createState() => _PropertyMainScreenState();
 }
 
-class _PropertyMainScreenState extends State<PropertyMainScreen> with SingleTickerProviderStateMixin {
+class _PropertyMainScreenState extends State<PropertyMainScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -35,7 +37,7 @@ class _PropertyMainScreenState extends State<PropertyMainScreen> with SingleTick
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: 'العقارات والوحدات'),
@@ -45,10 +47,7 @@ class _PropertyMainScreenState extends State<PropertyMainScreen> with SingleTick
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: const [
-              PropertiesScreen(),
-              OwnersScreen(),
-            ],
+            children: const [PropertiesScreen(), OwnersScreen()],
           ),
         ),
       ],

@@ -10,6 +10,7 @@ import 'providers/leasing_provider.dart';
 import 'providers/reports_provider.dart';
 import 'providers/sms_provider.dart';
 import 'features/auth/login_screen.dart';
+import 'core/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -41,7 +42,8 @@ class ERPApp extends StatelessWidget {
     return MaterialApp(
       title: 'مؤسسة عبدالله النقيب التجارية - ERP',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(primarySwatch: Colors.blue, fontFamily: 'Cairo'),
+      theme: AppTheme.light(),
+      scrollBehavior: const MaterialScrollBehavior().copyWith(scrollbars: true),
       // RTL Support for Arabic
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,

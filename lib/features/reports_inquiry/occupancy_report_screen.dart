@@ -1,5 +1,6 @@
 import "../../core/print_utils.dart";
 import 'package:flutter/material.dart';
+import '../../core/erp_data_table.dart';
 import 'package:provider/provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -161,7 +162,7 @@ class _OccupancyReportScreenState extends State<OccupancyReportScreen> {
               const SizedBox(height: 24),
               Expanded(
                 child: SingleChildScrollView(
-                  child: DataTable(
+                  child: ErpDataTable(
                     columns: const [
                       DataColumn(label: Text('اسم العقار')),
                       DataColumn(label: Text('إجمالي الوحدات')),

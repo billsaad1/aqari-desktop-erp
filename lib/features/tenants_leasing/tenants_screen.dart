@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
+import '../../core/erp_data_table.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/leasing_provider.dart';
@@ -404,7 +406,7 @@ class _TenantsScreenState extends State<TenantsScreen> {
                           child: SingleChildScrollView(
                             scrollDirection: Axis.horizontal,
                             child: SingleChildScrollView(
-                              child: DataTable(
+                              child: ErpDataTable(
                                 headingRowHeight: 52,
                                 dataRowMinHeight: 52,
                                 dataRowMaxHeight: 64,
@@ -426,7 +428,7 @@ class _TenantsScreenState extends State<TenantsScreen> {
                                           tenant['name']?.toString() ?? '',
                                           style: const TextStyle(
                                             fontWeight: FontWeight.w600,
-                                            color: Colors.blue,
+                                            color: AppPalette.navy,
                                           ),
                                         ),
                                         onTap: () => _showTenantDialog(

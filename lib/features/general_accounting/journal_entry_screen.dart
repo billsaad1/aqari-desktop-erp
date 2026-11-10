@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import '../../providers/accounting_provider.dart';
 import 'package:intl/intl.dart';
@@ -300,7 +301,7 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                         _buildTotalBox(
                           'إجمالي المدين',
                           totalDebit,
-                          Colors.blue,
+                          AppPalette.navy,
                         ),
                         const SizedBox(width: 16),
                         _buildTotalBox(
@@ -327,7 +328,7 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                         style: ElevatedButton.styleFrom(
                           padding: const EdgeInsets.all(16),
                           backgroundColor: isValidEntry
-                              ? Colors.blue
+                              ? AppPalette.navy
                               : Colors.grey,
                         ),
                         child: const Text(

@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
+import '../../core/erp_data_table.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
@@ -43,7 +45,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen>
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: 'بيانات المنشأة'),
@@ -740,7 +742,7 @@ class _UsersTabState extends State<UsersTab> {
           const SizedBox(height: 24),
           Expanded(
             child: SingleChildScrollView(
-              child: DataTable(
+              child: ErpDataTable(
                 columns: const [
                   DataColumn(label: Text('المعرف')),
                   DataColumn(label: Text('الاسم الكامل')),
