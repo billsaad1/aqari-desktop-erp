@@ -73,9 +73,6 @@ flutter:
   assets:
     - assets/fonts/Cairo-Regular.ttf
     - assets/fonts/Cairo-Bold.ttf
-    - assets/images/naqib_letterhead_header.png
-    - assets/images/naqib_letterhead_footer.png
-    - assets/images/naqib_logo.png
   fonts:
     - family: Cairo
       fonts:

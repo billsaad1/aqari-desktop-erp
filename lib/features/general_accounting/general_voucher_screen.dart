@@ -85,6 +85,7 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
       'voucher_type': widget.voucherType,
       'voucher_date': _dateController.text,
       'amount': amount,
+      'party_name': _descController.text.trim(),
       'description': _descController.text.trim(),
     };
     setState(() => _isProcessing = true);
