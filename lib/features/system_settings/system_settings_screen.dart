@@ -1,11 +1,17 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
+import '../../core/erp_data_table.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+
+import '../../core/company_logo_storage.dart';
+import '../../core/lease_contract_terms.dart';
 import '../../core/print_utils.dart';
 import '../../database/database_helper.dart';
 import '../../core/crypto_utils.dart';
@@ -43,7 +49,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen>
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: 'بيانات المنشأة'),
@@ -72,7 +78,11 @@ class CompanyInfoTab extends StatefulWidget {
 class _CompanyInfoTabState extends State<CompanyInfoTab> {
   final _formKey = GlobalKey<FormState>();
   bool _isLoading = true;
+  bool _isSavingCompany = false;
   CompanyInfo? _companyInfo;
+  String? _savedLogoPath;
+  String? _pendingLogoPath;
+  bool _removeLogoRequested = false;
 
   final _nameArController = TextEditingController();
   final _nameEnController = TextEditingController();
@@ -115,8 +125,12 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       _nameEnController.text = _companyInfo!.nameEn ?? '';
       _activityController.text = _companyInfo!.activity ?? '';
       _addressController.text = _companyInfo!.address ?? '';
-      _logoPathController.text = _companyInfo!.logoPath ?? '';
-      _termsController.text = _companyInfo!.termsConditions ?? '';
+      _savedLogoPath = _companyInfo!.logoPath;
+      _logoPathController.text = _savedLogoPath ?? '';
+      _termsController.text = _companyInfo!.termsConditions?.trim().isNotEmpty ==
+              true
+          ? _companyInfo!.termsConditions!
+          : LeaseContractTerms.defaultText;
 
       _activityArController.text = _companyInfo!.activityNameAr ?? '';
       _activityEnController.text = _companyInfo!.activityNameEn ?? '';
@@ -143,21 +157,19 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   }
 
   String? get _logoPathError {
-    final path = _logoPathController.text.trim();
-    if (path.isEmpty) return null;
+    final path = _pendingLogoPath;
+    if (path == null || path.isEmpty) return null;
     try {
       final file = File(path);
       if (!file.existsSync()) {
-        return 'ملف الشعار غير موجود؛ اختره من جهازك مرة أخرى.';
+        return 'ملف الشعار المؤقت غير موجود؛ أعد اختياره.';
       }
-      if (!const {
-        'png',
-        'jpg',
-        'jpeg',
-      }.contains(p.extension(path).toLowerCase())) {
+      if (!CompanyLogoStorage.supportedExtensions.contains(
+        p.extension(path).toLowerCase(),
+      )) {
         return 'صيغة الشعار يجب أن تكون PNG أو JPG.';
       }
-      if (file.lengthSync() > 8 * 1024 * 1024) {
+      if (file.lengthSync() > CompanyLogoStorage.maxBytes) {
         return 'حجم ملف الشعار أكبر من 8 ميغابايت.';
       }
     } catch (_) {
@@ -165,6 +177,12 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
     }
     return null;
   }
+
+  bool get _savedLogoIsMissing =>
+      !_removeLogoRequested &&
+      _pendingLogoPath == null &&
+      _savedLogoPath != null &&
+      !File(_savedLogoPath!).existsSync();
 
   Future<void> _selectLogo() async {
     try {
@@ -174,31 +192,54 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
         ],
       );
       if (selected == null) return;
-      final extension = p.extension(selected.name).toLowerCase();
-      if (!const {'.png', '.jpg', '.jpeg'}.contains(extension)) {
-        _showLogoMessage('اختر صورة بصيغة PNG أو JPG.');
+      final fileName = selected.name.isNotEmpty
+          ? selected.name
+          : p.basename(selected.path);
+      final fileSize = await selected.length();
+      if (fileSize > CompanyLogoStorage.maxBytes) {
+        _showLogoMessage('حجم ملف الشعار يجب ألا يتجاوز 8 ميغابايت.');
         return;
       }
-      if (await selected.length() > 8 * 1024 * 1024) {
-        _showLogoMessage('حجم ملف الشعار يجب ألا يتجاوز 8 ميغابايت.');
+      final bytes = await selected.readAsBytes();
+      final validationError = CompanyLogoStorage.validateBytes(
+        fileName,
+        bytes,
+      );
+      if (validationError != null) {
+        _showLogoMessage(validationError);
         return;
       }
 
       final supportDirectory = await getApplicationSupportDirectory();
-      final brandingDirectory = Directory(
-        p.join(supportDirectory.path, 'aqari_erp', 'branding'),
+      final savedFile = await CompanyLogoStorage.saveCandidate(
+        fileName: fileName,
+        bytes: bytes,
+        supportDirectory: supportDirectory.path,
       );
-      await brandingDirectory.create(recursive: true);
-      final targetPath = p.join(
-        brandingDirectory.path,
-        'company_logo_${DateTime.now().millisecondsSinceEpoch}$extension',
-      );
-      final savedFile = await File(selected.path).copy(targetPath);
+      final previousCandidate = _pendingLogoPath;
+      if (!mounted) {
+        await CompanyLogoStorage.deleteManagedFile(
+          savedFile.path,
+          supportDirectory: supportDirectory.path,
+        );
+        return;
+      }
+      setState(() {
+        _pendingLogoPath = savedFile.path;
+        _removeLogoRequested = false;
+        _logoPathController.text = savedFile.path;
+      });
+      if (previousCandidate != null) {
+        unawaited(
+          CompanyLogoStorage.deleteManagedFile(
+            previousCandidate,
+            supportDirectory: supportDirectory.path,
+          ),
+        );
+      }
       PrintUtils.clearLogoCache();
-      if (!mounted) return;
-      setState(() => _logoPathController.text = savedFile.path);
       _showLogoMessage(
-        'تم تحميل الشعار. احفظ التعديلات لاعتماده في المستندات.',
+        'تم التحقق من ملف الشعار؛ اضغط «حفظ التعديلات» لاعتماده.',
       );
     } catch (e) {
       _showLogoMessage('تعذر تحميل الشعار: $e');
@@ -206,8 +247,16 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   }
 
   void _removeLogo() {
+    final previousCandidate = _pendingLogoPath;
     PrintUtils.clearLogoCache();
-    setState(() => _logoPathController.clear());
+    setState(() {
+      _pendingLogoPath = null;
+      _removeLogoRequested = _savedLogoPath != null;
+      _logoPathController.clear();
+    });
+    if (previousCandidate != null) {
+      unawaited(CompanyLogoStorage.deleteManagedFile(previousCandidate));
+    }
   }
 
   void _showLogoMessage(String message) {
@@ -218,45 +267,75 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   }
 
   Future<void> _saveCompanyInfo() async {
+    if (_isSavingCompany) return;
     final logoError = _logoPathError;
     if (logoError != null) {
       _showLogoMessage(logoError);
       return;
     }
-    if (_formKey.currentState!.validate()) {
-      final updatedInfo = CompanyInfo(
-        id: _companyInfo?.id ?? 1,
-        nameAr: _nameArController.text,
-        nameEn: _nameEnController.text,
-        activity: _activityController.text,
-        address: _addressController.text,
-        defaultCurrency: _selectedCurrency,
-        logoPath: _logoPathController.text,
-        termsConditions: _termsController.text,
-        activityNameAr: _activityArController.text,
-        activityNameEn: _activityEnController.text,
-        addressAr: _addressArController.text,
-        addressEn: _addressEnController.text,
-        taxNumber: _taxNumberController.text,
-        commercialRegister: _commercialRegisterController.text,
-        poBox: _poBoxController.text,
-        telephone: _telephoneController.text,
-        fax: _faxController.text,
-        mobile: _mobileController.text,
-      );
+    if (!_formKey.currentState!.validate()) return;
 
+    final previousLogoPath = _savedLogoPath;
+    final candidatePath = _pendingLogoPath;
+    final logoPathToSave = _removeLogoRequested
+        ? null
+        : (candidatePath ?? previousLogoPath);
+    final updatedInfo = CompanyInfo(
+      id: _companyInfo?.id ?? 1,
+      nameAr: _nameArController.text,
+      nameEn: _nameEnController.text,
+      activity: _activityController.text,
+      address: _addressController.text,
+      defaultCurrency: _selectedCurrency,
+      logoPath: logoPathToSave,
+      termsConditions: _termsController.text,
+      activityNameAr: _activityArController.text,
+      activityNameEn: _activityEnController.text,
+      addressAr: _addressArController.text,
+      addressEn: _addressEnController.text,
+      taxNumber: _taxNumberController.text,
+      commercialRegister: _commercialRegisterController.text,
+      poBox: _poBoxController.text,
+      telephone: _telephoneController.text,
+      fax: _faxController.text,
+      mobile: _mobileController.text,
+    );
+
+    setState(() => _isSavingCompany = true);
+    try {
       await DatabaseHelper.instance.updateCompanyInfo(updatedInfo.toMap());
+      // The database now owns the candidate path; disposal must not remove it.
+      _savedLogoPath = logoPathToSave;
+      _pendingLogoPath = null;
+      _removeLogoRequested = false;
+      _companyInfo = updatedInfo;
+      _logoPathController.text = logoPathToSave ?? '';
       PrintUtils.clearLogoCache();
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('تم الحفظ بنجاح')));
+      if (previousLogoPath != null && previousLogoPath != logoPathToSave) {
+        await CompanyLogoStorage.deleteManagedFile(previousLogoPath);
       }
+      if (!mounted) return;
+      setState(() {});
+      final message = _savedLogoIsMissing
+          ? 'حُفظت البيانات، لكن ملف الشعار القديم غير موجود؛ أعد رفعه أو أزله.'
+          : 'تم حفظ بيانات المنشأة واعتماد الشعار.';
+      _showLogoMessage(message);
+    } catch (error) {
+      if (!mounted && candidatePath != null) {
+        unawaited(CompanyLogoStorage.deleteManagedFile(candidatePath));
+      }
+      if (mounted) _showLogoMessage('تعذر حفظ بيانات المنشأة: $error');
+    } finally {
+      if (mounted) setState(() => _isSavingCompany = false);
     }
   }
 
   @override
   void dispose() {
+    final candidate = _pendingLogoPath;
+    if (candidate != null && !_isSavingCompany) {
+      unawaited(CompanyLogoStorage.deleteManagedFile(candidate));
+    }
     _nameArController.dispose();
     _nameEnController.dispose();
     _activityController.dispose();
@@ -279,7 +358,9 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) return const Center(child: CircularProgressIndicator());
-    final selectedLogoPath = _logoPathController.text.trim();
+    final selectedLogoPath = _removeLogoRequested
+        ? ''
+        : (_pendingLogoPath ?? _savedLogoPath ?? '').trim();
     final selectedLogo = selectedLogoPath.isEmpty
         ? null
         : File(selectedLogoPath);
@@ -511,6 +592,13 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                             style: const TextStyle(color: Colors.red),
                           ),
                         ],
+                        if (_savedLogoIsMissing) ...[
+                          const SizedBox(height: 4),
+                          const Text(
+                            'ملف الشعار المسجل غير موجود؛ يمكنك حفظ بقية البيانات، أو رفع شعار جديد، أو إزالة المرجع.',
+                            style: TextStyle(color: Colors.orange),
+                          ),
+                        ],
                         const SizedBox(height: 10),
                         Wrap(
                           spacing: 8,
@@ -542,22 +630,33 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             const SizedBox(height: 16),
             TextFormField(
               controller: _termsController,
+              minLines: 7,
+              maxLines: 12,
+              textDirection: TextDirection.rtl,
+              textAlign: TextAlign.right,
               decoration: const InputDecoration(
                 labelText: 'الشروط والأحكام الافتراضية لعقد الإيجار',
+                helperText:
+                    'اكتب كل شرط في سطر مستقل. العقد المطبوع يقرأ هذه الشروط بعد حفظها هنا.',
                 border: OutlineInputBorder(),
               ),
-              maxLines: 4,
             ),
             const SizedBox(height: 32),
             ElevatedButton(
-              onPressed: _saveCompanyInfo,
+              onPressed: _isSavingCompany ? null : _saveCompanyInfo,
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.all(16),
               ),
-              child: const Text(
-                'حفظ التعديلات',
-                style: TextStyle(fontSize: 18),
-              ),
+              child: _isSavingCompany
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text(
+                      'حفظ التعديلات',
+                      style: TextStyle(fontSize: 18),
+                    ),
             ),
           ],
         ),
@@ -740,7 +839,7 @@ class _UsersTabState extends State<UsersTab> {
           const SizedBox(height: 24),
           Expanded(
             child: SingleChildScrollView(
-              child: DataTable(
+              child: ErpDataTable(
                 columns: const [
                   DataColumn(label: Text('المعرف')),
                   DataColumn(label: Text('الاسم الكامل')),

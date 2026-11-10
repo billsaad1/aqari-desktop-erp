@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
@@ -22,11 +23,15 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
   void _showAddAccountDialog(Map<String, dynamic>? parentAccount) async {
     final formKey = GlobalKey<FormState>();
     final nameController = TextEditingController();
-    String? accountType = parentAccount != null ? parentAccount['account_type'] : 'Asset';
+    String? accountType = parentAccount != null
+        ? parentAccount['account_type']
+        : 'Asset';
 
     String newCode = '';
     if (parentAccount != null) {
-      newCode = await DatabaseHelper.instance.generateAccountCode(parentAccount['id']);
+      newCode = await DatabaseHelper.instance.generateAccountCode(
+        parentAccount['id'],
+      );
     }
 
     if (!mounted) return;
@@ -35,7 +40,11 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: Text(parentAccount == null ? 'إضافة حساب رئيسي' : 'إضافة حساب فرعي تحت: ${parentAccount['''name''']}'),
+          title: Text(
+            parentAccount == null
+                ? 'إضافة حساب رئيسي'
+                : 'إضافة حساب فرعي تحت: ${parentAccount['''name''']}',
+          ),
           content: Form(
             key: formKey,
             child: Column(
@@ -44,7 +53,10 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
                 if (parentAccount != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 16.0),
-                    child: Text('رمز الحساب الجديد: $newCode', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    child: Text(
+                      'رمز الحساب الجديد: $newCode',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
                 TextFormField(
                   controller: nameController,
@@ -57,9 +69,18 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
                     items: const [
                       DropdownMenuItem(value: 'Asset', child: Text('أصول')),
                       DropdownMenuItem(value: 'Liability', child: Text('خصوم')),
-                      DropdownMenuItem(value: 'Equity', child: Text('حقوق ملكية')),
-                      DropdownMenuItem(value: 'Revenue', child: Text('إيرادات')),
-                      DropdownMenuItem(value: 'Expense', child: Text('مصروفات')),
+                      DropdownMenuItem(
+                        value: 'Equity',
+                        child: Text('حقوق ملكية'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Revenue',
+                        child: Text('إيرادات'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Expense',
+                        child: Text('مصروفات'),
+                      ),
                     ],
                     onChanged: (val) {
                       accountType = val;
@@ -78,13 +99,20 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
               onPressed: () async {
                 if (formKey.currentState!.validate()) {
                   final newAccount = {
-                    'code': parentAccount == null ? DateTime.now().millisecondsSinceEpoch.toString().substring(8) : newCode, // Simplistic root code fallback
+                    'code': parentAccount == null
+                        ? DateTime.now().millisecondsSinceEpoch
+                              .toString()
+                              .substring(8)
+                        : newCode, // Simplistic root code fallback
                     'name': nameController.text,
                     'parent_id': parentAccount?['id'],
                     'account_type': accountType,
                     'balance': 0.0,
                   };
-                  await Provider.of<AccountingProvider>(context, listen: false).addAccount(newAccount);
+                  await Provider.of<AccountingProvider>(
+                    context,
+                    listen: false,
+                  ).addAccount(newAccount);
                   if (context.mounted) {
                     Navigator.pop(context);
                   }
@@ -99,9 +127,15 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
   }
 
   // A very basic tree representation for demonstration
-  List<Widget> _buildAccountTree(List<Map<String, dynamic>> accounts, int? parentId, int depth) {
+  List<Widget> _buildAccountTree(
+    List<Map<String, dynamic>> accounts,
+    int? parentId,
+    int depth,
+  ) {
     List<Widget> children = [];
-    var currentLevelAccounts = accounts.where((a) => a['parent_id'] == parentId).toList();
+    var currentLevelAccounts = accounts
+        .where((a) => a['parent_id'] == parentId)
+        .toList();
 
     for (var acc in currentLevelAccounts) {
       children.add(
@@ -111,9 +145,17 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
             elevation: 1,
             margin: const EdgeInsets.symmetric(vertical: 4),
             child: ListTile(
-              leading: Text(acc['code'], style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+              leading: Text(
+                acc['code'],
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: AppPalette.navy,
+                ),
+              ),
               title: Text(acc['name']),
-              subtitle: Text('الرصيد: ${acc['''balance''']} | النوع: ${acc['''account_type''']}'),
+              subtitle: Text(
+                'الرصيد: ${acc['''balance''']} | النوع: ${acc['''account_type''']}',
+              ),
               trailing: IconButton(
                 icon: const Icon(Icons.add, color: Colors.green),
                 tooltip: 'إضافة حساب فرعي',
@@ -145,7 +187,10 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('دليل الحسابات', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'دليل الحسابات',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                  ),
                   ElevatedButton.icon(
                     onPressed: () => _showAddAccountDialog(null),
                     icon: const Icon(Icons.add),

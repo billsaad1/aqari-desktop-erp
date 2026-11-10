@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
@@ -10,10 +11,12 @@ class TenantFinancialMainScreen extends StatefulWidget {
   const TenantFinancialMainScreen({super.key});
 
   @override
-  State<TenantFinancialMainScreen> createState() => _TenantFinancialMainScreenState();
+  State<TenantFinancialMainScreen> createState() =>
+      _TenantFinancialMainScreenState();
 }
 
-class _TenantFinancialMainScreenState extends State<TenantFinancialMainScreen> with SingleTickerProviderStateMixin {
+class _TenantFinancialMainScreenState extends State<TenantFinancialMainScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -38,7 +41,7 @@ class _TenantFinancialMainScreenState extends State<TenantFinancialMainScreen> w
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: 'قبض مستأجر (تحصيل)'),

@@ -121,7 +121,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
         date: _dateController.text,
         targetName: tenantName,
         amount: amount,
-        paymentMethod: 'نقداً/بنكي',
+        paymentMethod: null,
         accountName: accountName,
         description: _descController.text.trim(),
       );

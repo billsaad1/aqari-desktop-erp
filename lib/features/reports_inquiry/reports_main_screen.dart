@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'smart_inquiry_screen.dart';
 import 'occupancy_report_screen.dart';
 import 'account_statement_screen.dart';
@@ -10,7 +11,8 @@ class ReportsMainScreen extends StatefulWidget {
   State<ReportsMainScreen> createState() => _ReportsMainScreenState();
 }
 
-class _ReportsMainScreenState extends State<ReportsMainScreen> with SingleTickerProviderStateMixin {
+class _ReportsMainScreenState extends State<ReportsMainScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -31,7 +33,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen> with SingleTicker
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: 'الاستعلام السريع'),

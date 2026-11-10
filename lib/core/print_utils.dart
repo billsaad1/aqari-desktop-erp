@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
@@ -9,6 +10,10 @@ import 'package:printing/printing.dart';
 import '../database/database_helper.dart';
 
 class PrintUtils {
+  static const PdfColor brandNavy = PdfColor.fromInt(0xFF17324F);
+  static const PdfColor brandEmerald = PdfColor.fromInt(0xFF16856B);
+  static const PdfColor softSurface = PdfColor.fromInt(0xFFF4F7F8);
+  static const PdfColor softBorder = PdfColor.fromInt(0xFFD8E0E4);
   static const String _defaultCompanyName = 'مؤسسة عبدالله النقيب التجارية';
   static String? _cachedLogoPath;
   static DateTime? _cachedLogoModified;
@@ -26,6 +31,22 @@ class PrintUtils {
       bold: pw.Font.ttf(boldData),
     );
   }
+
+  static pw.PageTheme pageTheme({
+    required pw.ThemeData theme,
+    required Map<String, dynamic>? companyInfo,
+    PdfPageFormat pageFormat = PdfPageFormat.a4,
+    pw.EdgeInsets margin = const pw.EdgeInsets.fromLTRB(32, 30, 32, 32),
+  }) => pw.PageTheme(
+    pageFormat: pageFormat,
+    textDirection: pw.TextDirection.rtl,
+    theme: theme,
+    margin: margin,
+    buildBackground: (_) => buildWatermark(companyInfo),
+  );
+
+  static String formatPdfAmount(num amount) =>
+      NumberFormat('#,##0.00', 'en_US').format(amount);
 
   static void clearLogoCache() {
     _cachedLogoPath = null;
@@ -122,35 +143,30 @@ class PrintUtils {
 
     pdf.addPage(
       pw.MultiPage(
-        pageTheme: pw.PageTheme(
-          pageFormat: PdfPageFormat.a4,
-          textDirection: pw.TextDirection.rtl,
-          theme: theme,
-          buildBackground: (_) => buildWatermark(companyInfo),
-        ),
+        pageTheme: pageTheme(theme: theme, companyInfo: companyInfo),
         header: (_) => buildHeader(companyInfo, true),
         footer: (context) => buildPageFooter(context, companyInfo),
         build: (_) => [
-          pw.Center(
-            child: pw.Text(
-              'قيد يومية',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
-            ),
-          ),
+          _documentTitle('قيد يومية'),
           pw.SizedBox(height: 14),
           pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
             children: [
-              pw.Text(
-                'رقم القيد: $journalNo',
-                textDirection: pw.TextDirection.rtl,
+              pw.Expanded(
+                child: _metadataItem(
+                  'رقم القيد',
+                  journalNo.toString(),
+                  pw.TextDirection.ltr,
+                ),
               ),
-              pw.Text('التاريخ: $date', textDirection: pw.TextDirection.rtl),
+              pw.SizedBox(width: 12),
+              pw.Expanded(
+                child: _metadataItem('تاريخ القيد', date, pw.TextDirection.ltr),
+              ),
             ],
           ),
           pw.SizedBox(height: 6),
-          pw.Text('البيان: $description', textDirection: pw.TextDirection.rtl),
+          if (description.trim().isNotEmpty)
+            buildLabelValue('البيان', description.trim()),
           pw.SizedBox(height: 14),
           pw.TableHelper.fromTextArray(
             headers: ['الحساب', 'البيان', 'مدين', 'دائن'],
@@ -159,12 +175,8 @@ class PrintUtils {
                   (line) => [
                     line['account_name']?.toString() ?? '',
                     line['description']?.toString() ?? '',
-                    ((line['debit'] as num?)?.toDouble() ?? 0).toStringAsFixed(
-                      2,
-                    ),
-                    ((line['credit'] as num?)?.toDouble() ?? 0).toStringAsFixed(
-                      2,
-                    ),
+                    formatPdfAmount((line['debit'] as num?)?.toDouble() ?? 0),
+                    formatPdfAmount((line['credit'] as num?)?.toDouble() ?? 0),
                   ],
                 )
                 .toList(),
@@ -173,24 +185,44 @@ class PrintUtils {
               fontWeight: pw.FontWeight.bold,
               color: PdfColors.white,
             ),
-            headerDecoration: const pw.BoxDecoration(
-              color: PdfColors.blueGrey800,
+            headerDecoration: pw.BoxDecoration(color: brandNavy),
+            cellStyle: const pw.TextStyle(fontSize: 9, lineSpacing: 2),
+            cellPadding: const pw.EdgeInsets.symmetric(
+              horizontal: 5,
+              vertical: 6,
             ),
-            cellStyle: const pw.TextStyle(fontSize: 9),
             cellAlignments: {
               0: pw.Alignment.centerRight,
               1: pw.Alignment.centerRight,
               2: pw.Alignment.center,
               3: pw.Alignment.center,
             },
+            tableDirection: pw.TextDirection.rtl,
+            headerDirection: pw.TextDirection.rtl,
+            columnWidths: const {
+              0: pw.FlexColumnWidth(1.6),
+              1: pw.FlexColumnWidth(2.4),
+              2: pw.FlexColumnWidth(1),
+              3: pw.FlexColumnWidth(1),
+            },
+            border: pw.TableBorder.all(color: softBorder, width: 0.5),
           ),
           pw.SizedBox(height: 10),
-          pw.Align(
-            alignment: pw.Alignment.centerLeft,
-            child: pw.Text(
-              'الإجمالي: مدين ${debitTotal.toStringAsFixed(2)}  |  دائن ${creditTotal.toStringAsFixed(2)} $currency',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11),
+          pw.Container(
+            padding: const pw.EdgeInsets.all(10),
+            decoration: pw.BoxDecoration(
+              color: softSurface,
+              borderRadius: pw.BorderRadius.circular(5),
+              border: pw.Border.all(color: softBorder),
+            ),
+            child: pw.Row(
+              children: [
+                pw.Expanded(child: _totalMetric('إجمالي المدين', debitTotal)),
+                pw.Expanded(child: _totalMetric('إجمالي الدائن', creditTotal)),
+                pw.Expanded(
+                  child: _totalMetric('العملة', 0, displayValue: currency),
+                ),
+              ],
             ),
           ),
           pw.SizedBox(height: 32),
@@ -208,6 +240,36 @@ class PrintUtils {
     return pdf.save();
   }
 
+  static pw.Widget _totalMetric(
+    String label,
+    double value, {
+    String? displayValue,
+  }) => pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+    mainAxisSize: pw.MainAxisSize.min,
+    children: [
+      pw.Text(
+        label,
+        textDirection: pw.TextDirection.rtl,
+        textAlign: pw.TextAlign.center,
+        style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+      ),
+      pw.SizedBox(height: 3),
+      pw.Text(
+        displayValue ?? formatPdfAmount(value),
+        textDirection: displayValue == null
+            ? pw.TextDirection.ltr
+            : pw.TextDirection.rtl,
+        textAlign: pw.TextAlign.center,
+        style: pw.TextStyle(
+          fontSize: 10,
+          fontWeight: pw.FontWeight.bold,
+          color: brandNavy,
+        ),
+      ),
+    ],
+  );
+
   static pw.Widget buildHeader(
     Map<String, dynamic>? info,
     bool isFinancialDocument,
@@ -224,15 +286,16 @@ class PrintUtils {
     final logo = _readLogo((info?['logo_path'] as String?)?.trim());
 
     return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
       mainAxisSize: pw.MainAxisSize.min,
       children: [
-        pw.SizedBox(height: 3),
         pw.Row(
           crossAxisAlignment: pw.CrossAxisAlignment.center,
           children: [
+            // In an RTL page, the first expanded block is physically on the right.
             pw.Expanded(
               child: pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.end,
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
                 mainAxisSize: pw.MainAxisSize.min,
                 children: [
                   pw.Text(
@@ -240,8 +303,9 @@ class PrintUtils {
                     textDirection: pw.TextDirection.rtl,
                     textAlign: pw.TextAlign.right,
                     style: pw.TextStyle(
-                      fontSize: 13,
+                      fontSize: 14,
                       fontWeight: pw.FontWeight.bold,
+                      color: brandNavy,
                     ),
                   ),
                   if (activityAr != null)
@@ -252,40 +316,30 @@ class PrintUtils {
                       style: const pw.TextStyle(fontSize: 8.5),
                     ),
                   if (commercialRegister != null)
-                    pw.Text(
-                      'س.ت: $commercialRegister',
-                      textDirection: pw.TextDirection.rtl,
-                      textAlign: pw.TextAlign.right,
-                      style: const pw.TextStyle(fontSize: 8),
-                    ),
+                    _companyNumberLine('س.ت:', commercialRegister),
                   if (isFinancialDocument && taxNumber != null)
-                    pw.Text(
-                      'الرقم الضريبي: $taxNumber',
-                      textDirection: pw.TextDirection.rtl,
-                      textAlign: pw.TextAlign.right,
-                      style: const pw.TextStyle(fontSize: 8),
-                    ),
+                    _companyNumberLine('الرقم الضريبي:', taxNumber),
                 ],
               ),
             ),
-            pw.SizedBox(width: 12),
+            pw.SizedBox(width: 10),
             pw.Container(
-              width: 74,
-              height: 74,
+              width: 64,
+              height: 64,
               alignment: pw.Alignment.center,
               child: logo == null
                   ? pw.SizedBox()
                   : pw.Image(
                       logo,
-                      width: 74,
-                      height: 74,
+                      width: 64,
+                      height: 64,
                       fit: pw.BoxFit.contain,
                     ),
             ),
-            pw.SizedBox(width: 12),
+            pw.SizedBox(width: 10),
             pw.Expanded(
               child: pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
                 mainAxisSize: pw.MainAxisSize.min,
                 children: [
                   if (nameEn != null)
@@ -296,6 +350,7 @@ class PrintUtils {
                       style: pw.TextStyle(
                         fontSize: 12,
                         fontWeight: pw.FontWeight.bold,
+                        color: brandNavy,
                       ),
                     ),
                   if (activityEn != null)
@@ -317,12 +372,29 @@ class PrintUtils {
             ),
           ],
         ),
-        pw.SizedBox(height: 7),
-        pw.Container(height: 1, color: PdfColors.grey700),
-        pw.SizedBox(height: 4),
+        pw.SizedBox(height: 6),
+        pw.Container(height: 1.4, color: brandEmerald),
+        pw.SizedBox(height: 5),
       ],
     );
   }
+
+  static pw.Widget _companyNumberLine(String label, String value) => pw.Row(
+    mainAxisSize: pw.MainAxisSize.min,
+    children: [
+      pw.Text(
+        label,
+        textDirection: pw.TextDirection.rtl,
+        style: const pw.TextStyle(fontSize: 8),
+      ),
+      pw.SizedBox(width: 3),
+      pw.Text(
+        value,
+        textDirection: pw.TextDirection.ltr,
+        style: const pw.TextStyle(fontSize: 8),
+      ),
+    ],
+  );
 
   static pw.Widget buildFooter(Map<String, dynamic>? info) {
     final addressAr = _firstNonEmpty(info?['address_ar'], info?['address']);
@@ -331,13 +403,6 @@ class PrintUtils {
     final telephone = _firstNonEmpty(info?['telephone']);
     final fax = _firstNonEmpty(info?['fax']);
     final mobile = _firstNonEmpty(info?['mobile']);
-    final arabicParts = <String>[
-      if (addressAr != null) 'العنوان: $addressAr',
-      if (poBox != null) 'ص.ب: $poBox',
-      if (telephone != null) 'هاتف: $telephone',
-      if (fax != null) 'فاكس: $fax',
-      if (mobile != null) 'جوال: $mobile',
-    ];
     final englishParts = <String>[
       if (addressEn != null) addressEn,
       if (poBox != null) 'P.O. Box $poBox',
@@ -346,28 +411,101 @@ class PrintUtils {
       if (mobile != null) 'Mobile $mobile',
     ];
 
+    final contactFields = <(String, String)>[
+      if (telephone != null) ('هاتف', telephone),
+      if (fax != null) ('فاكس', fax),
+      if (mobile != null) ('جوال', mobile),
+    ];
+
     return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
       mainAxisSize: pw.MainAxisSize.min,
       children: [
-        pw.Container(height: 0.7, color: PdfColors.grey600),
-        pw.SizedBox(height: 3),
-        if (arabicParts.isNotEmpty)
-          pw.Text(
-            arabicParts.join('   |   '),
-            textDirection: pw.TextDirection.rtl,
-            textAlign: pw.TextAlign.center,
-            style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey800),
+        pw.Container(height: 1, color: brandEmerald),
+        pw.SizedBox(height: 4),
+        if (addressAr != null || poBox != null)
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              if (addressAr != null)
+                pw.Expanded(
+                  flex: 3,
+                  child: _footerField(
+                    'العنوان',
+                    addressAr,
+                    valueDirection: pw.TextDirection.rtl,
+                    valueAlignment: pw.TextAlign.right,
+                    labelAlignment: pw.TextAlign.right,
+                  ),
+                ),
+              if (poBox != null)
+                pw.Expanded(
+                  child: _footerField(
+                    'ص.ب',
+                    poBox,
+                    valueDirection: pw.TextDirection.ltr,
+                  ),
+                ),
+            ],
+          ),
+        if (contactFields.isNotEmpty)
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              for (final field in contactFields)
+                pw.Expanded(
+                  child: _footerField(
+                    field.$1,
+                    field.$2,
+                    valueDirection: pw.TextDirection.ltr,
+                  ),
+                ),
+            ],
           ),
         if (englishParts.isNotEmpty)
-          pw.Text(
-            englishParts.join('   |   '),
-            textDirection: pw.TextDirection.ltr,
-            textAlign: pw.TextAlign.center,
-            style: const pw.TextStyle(fontSize: 6.5, color: PdfColors.grey700),
+          pw.Padding(
+            padding: const pw.EdgeInsets.only(top: 2),
+            child: pw.Text(
+              englishParts.join('   |   '),
+              textDirection: pw.TextDirection.ltr,
+              textAlign: pw.TextAlign.center,
+              style: const pw.TextStyle(
+                fontSize: 6.5,
+                color: PdfColors.grey700,
+              ),
+            ),
           ),
       ],
     );
   }
+
+  static pw.Widget _footerField(
+    String label,
+    String value, {
+    required pw.TextDirection valueDirection,
+    pw.TextAlign valueAlignment = pw.TextAlign.center,
+    pw.TextAlign labelAlignment = pw.TextAlign.center,
+  }) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 3),
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      mainAxisSize: pw.MainAxisSize.min,
+      children: [
+        pw.Text(
+          label,
+          textDirection: pw.TextDirection.rtl,
+          textAlign: labelAlignment,
+          style: const pw.TextStyle(fontSize: 6.8, color: PdfColors.grey700),
+        ),
+        pw.Text(
+          value,
+          textDirection: valueDirection,
+          textAlign: valueAlignment,
+          style: const pw.TextStyle(fontSize: 7.6, color: PdfColors.grey900),
+        ),
+      ],
+    ),
+  );
 
   static pw.Widget buildPageFooter(
     pw.Context context,
@@ -434,146 +572,358 @@ class PrintUtils {
     required String voucherType,
     required int voucherNo,
     required String date,
-    required String targetName,
+    String? targetName,
     required double amount,
-    required String paymentMethod,
+    String? paymentMethod,
     required String accountName,
     String? description,
+    List<Map<String, dynamic>> journalLines = const [],
+    List<Map<String, dynamic>> installmentAllocations = const [],
     bool isFinancialDocument = true,
   }) async {
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
     final pdf = pw.Document();
     final theme = await loadArabicTheme();
     final currencyLabel = currencyInArabic(companyInfo?['default_currency']);
+    final isReceipt = voucherType.contains('قبض');
+    final hasParty = targetName != null && targetName.trim().isNotEmpty;
+    final normalizedMethod = paymentMethod?.trim();
+    final showPaymentMethod =
+        normalizedMethod != null &&
+        normalizedMethod.isNotEmpty &&
+        normalizedMethod != 'نقداً/بنكي' &&
+        normalizedMethod != 'حسب الحسابات المرحلة';
 
     pdf.addPage(
-      pw.Page(
-        pageTheme: pw.PageTheme(
-          pageFormat: PdfPageFormat.a5.landscape,
-          textDirection: pw.TextDirection.rtl,
+      pw.MultiPage(
+        pageTheme: pageTheme(
           theme: theme,
-          buildBackground: (_) => buildWatermark(companyInfo),
+          companyInfo: companyInfo,
+          pageFormat: PdfPageFormat.a5.landscape,
+          margin: const pw.EdgeInsets.fromLTRB(24, 18, 24, 22),
         ),
-        build: (_) => pw.Container(
-          padding: const pw.EdgeInsets.all(10),
-          child: pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+        header: (_) => buildHeader(companyInfo, isFinancialDocument),
+        footer: (context) => buildPageFooter(context, companyInfo),
+        build: (_) => [
+          _documentTitle(voucherType),
+          pw.SizedBox(height: 6),
+          pw.Row(
             children: [
-              buildHeader(companyInfo, isFinancialDocument),
-              pw.Center(
-                child: pw.Text(
-                  voucherType,
-                  textDirection: pw.TextDirection.rtl,
-                  style: pw.TextStyle(
-                    fontSize: 19,
-                    fontWeight: pw.FontWeight.bold,
-                    decoration: pw.TextDecoration.underline,
-                  ),
+              pw.Expanded(
+                child: _metadataItem(
+                  'رقم السند',
+                  voucherNo.toString(),
+                  pw.TextDirection.ltr,
                 ),
               ),
-              pw.SizedBox(height: 10),
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                children: [
-                  pw.Text(
-                    'رقم السند: $voucherNo',
-                    style: pw.TextStyle(
-                      fontWeight: pw.FontWeight.bold,
-                      fontSize: 10,
-                    ),
-                  ),
-                  pw.Text(
-                    'التاريخ: $date',
-                    style: pw.TextStyle(
-                      fontWeight: pw.FontWeight.bold,
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
+              pw.SizedBox(width: 12),
+              pw.Expanded(
+                child: _metadataItem('تاريخ السند', date, pw.TextDirection.ltr),
               ),
-              pw.SizedBox(height: 10),
-              pw.Container(
-                padding: const pw.EdgeInsets.all(10),
-                decoration: pw.BoxDecoration(
-                  color: PdfColors.grey100,
-                  border: pw.Border.all(color: PdfColors.grey400),
-                  borderRadius: pw.BorderRadius.circular(4),
-                ),
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+            ],
+          ),
+          pw.SizedBox(height: 9),
+          pw.Container(
+            padding: const pw.EdgeInsets.all(12),
+            decoration: pw.BoxDecoration(
+              color: softSurface,
+              border: pw.Border.all(color: softBorder),
+              borderRadius: pw.BorderRadius.circular(6),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+              children: [
+                if (hasParty)
+                  buildLabelValue(
+                    isReceipt ? 'اسم المستلم منه' : 'اسم المستفيد',
+                    targetName!.trim(),
+                    labelWidth: 100,
+                    fontSize: 10,
+                  ),
+                pw.Row(
                   children: [
                     pw.Text(
-                      '${voucherType.contains('قبض') ? 'استلمنا من' : 'صرفنا إلى'}: $targetName',
+                      'المبلغ',
                       textDirection: pw.TextDirection.rtl,
-                      style: const pw.TextStyle(fontSize: 12),
+                      style: const pw.TextStyle(
+                        fontSize: 9,
+                        color: PdfColors.grey700,
+                      ),
                     ),
-                    pw.SizedBox(height: 5),
+                    pw.SizedBox(width: 10),
                     pw.Text(
-                      'المبلغ: ${amount.toStringAsFixed(2)} $currencyLabel',
+                      formatPdfAmount(amount),
+                      textDirection: pw.TextDirection.ltr,
+                      style: pw.TextStyle(
+                        fontSize: 20,
+                        fontWeight: pw.FontWeight.bold,
+                        color: brandNavy,
+                      ),
+                    ),
+                    pw.SizedBox(width: 7),
+                    pw.Text(
+                      currencyLabel,
                       textDirection: pw.TextDirection.rtl,
                       style: pw.TextStyle(
-                        fontSize: 13,
+                        fontSize: 11,
                         fontWeight: pw.FontWeight.bold,
+                        color: brandEmerald,
                       ),
-                    ),
-                    if (description != null &&
-                        description.trim().isNotEmpty) ...[
-                      pw.SizedBox(height: 5),
-                      pw.Text(
-                        'البيان: ${description.trim()}',
-                        textDirection: pw.TextDirection.rtl,
-                        style: const pw.TextStyle(fontSize: 10),
-                      ),
-                    ],
-                    pw.SizedBox(height: 5),
-                    pw.Text(
-                      'طريقة الدفع: $paymentMethod  |  الحساب: $accountName',
-                      textDirection: pw.TextDirection.rtl,
-                      style: const pw.TextStyle(fontSize: 9),
                     ),
                   ],
                 ),
-              ),
-              pw.Spacer(),
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                children: [
-                  _signature('توقيع المحاسب'),
-                  _signature('الختم الرسمي'),
-                  _signature('توقيع المستلم'),
-                ],
-              ),
-              pw.SizedBox(height: 5),
-              buildFooter(companyInfo),
+                if (description != null && description.trim().isNotEmpty)
+                  buildLabelValue(
+                    'البيان',
+                    description.trim(),
+                    labelWidth: 100,
+                    fontSize: 9,
+                  ),
+                if (showPaymentMethod)
+                  buildLabelValue(
+                    'طريقة الدفع',
+                    normalizedMethod,
+                    labelWidth: 100,
+                    fontSize: 9,
+                  ),
+                if (accountName.trim().isNotEmpty)
+                  buildLabelValue(
+                    'الحساب',
+                    accountName,
+                    labelWidth: 72,
+                    fontSize: 9,
+                  ),
+              ],
+            ),
+          ),
+          pw.SizedBox(height: 18),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              _signature('توقيع المحاسب'),
+              _signature('الختم الرسمي'),
+              _signature(isReceipt ? 'توقيع المستلم' : 'توقيع المستفيد'),
             ],
           ),
-        ),
+          if (journalLines.isNotEmpty || installmentAllocations.isNotEmpty) ...[
+            pw.NewPage(),
+            _documentTitle('ملحق تفاصيل السند'),
+            buildLabelValue(
+              'رقم السند',
+              voucherNo.toString(),
+              valueDirection: pw.TextDirection.ltr,
+            ),
+          ],
+          if (journalLines.isNotEmpty) ...[
+            pw.SizedBox(height: 10),
+            _documentTitle('تفاصيل القيد المحاسبي'),
+            pw.SizedBox(height: 5),
+            pw.TableHelper.fromTextArray(
+              headers: ['الحساب', 'مدين', 'دائن'],
+              data: journalLines
+                  .map(
+                    (line) => [
+                      line['account_name']?.toString() ?? '',
+                      formatPdfAmount((line['debit'] as num?)?.toDouble() ?? 0),
+                      formatPdfAmount(
+                        (line['credit'] as num?)?.toDouble() ?? 0,
+                      ),
+                    ],
+                  )
+                  .toList(),
+              headerStyle: pw.TextStyle(
+                fontSize: 8,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration: pw.BoxDecoration(color: brandNavy),
+              cellStyle: const pw.TextStyle(fontSize: 8),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 5,
+                vertical: 5,
+              ),
+              tableDirection: pw.TextDirection.rtl,
+              headerDirection: pw.TextDirection.rtl,
+              columnWidths: const {
+                0: pw.FlexColumnWidth(2.4),
+                1: pw.FlexColumnWidth(1),
+                2: pw.FlexColumnWidth(1),
+              },
+              border: pw.TableBorder.all(color: softBorder, width: 0.5),
+            ),
+          ],
+          if (installmentAllocations.isNotEmpty) ...[
+            pw.SizedBox(height: 10),
+            _documentTitle('توزيع الدفعة على الأقساط'),
+            pw.SizedBox(height: 5),
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'العقار',
+                'الوحدة',
+                'تاريخ الاستحقاق',
+                'مبلغ القسط',
+                'المبلغ المخصص',
+              ],
+              data: installmentAllocations
+                  .map(
+                    (installment) => [
+                      installment['property_name']?.toString() ?? '',
+                      installment['unit_number']?.toString() ?? '',
+                      installment['due_date']?.toString() ?? '',
+                      formatPdfAmount(
+                        (installment['installment_amount'] as num?)
+                                ?.toDouble() ??
+                            0,
+                      ),
+                      formatPdfAmount(
+                        (installment['allocated_amount'] as num?)?.toDouble() ??
+                            0,
+                      ),
+                    ],
+                  )
+                  .toList(),
+              headerStyle: pw.TextStyle(
+                fontSize: 7.5,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration: pw.BoxDecoration(color: brandNavy),
+              cellStyle: const pw.TextStyle(fontSize: 7.5),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 3,
+                vertical: 4,
+              ),
+              tableDirection: pw.TextDirection.rtl,
+              headerDirection: pw.TextDirection.rtl,
+              columnWidths: const {
+                0: pw.FlexColumnWidth(1.7),
+                1: pw.FlexColumnWidth(0.8),
+                2: pw.FlexColumnWidth(1.4),
+                3: pw.FlexColumnWidth(1.2),
+                4: pw.FlexColumnWidth(1.2),
+              },
+              border: pw.TableBorder.all(color: softBorder, width: 0.5),
+            ),
+          ],
+        ],
       ),
     );
     return pdf.save();
   }
 
-  static pw.Widget _signature(String title) => pw.Column(
+  static pw.Widget _documentTitle(String title) => pw.Column(
+    mainAxisSize: pw.MainAxisSize.min,
     children: [
       pw.Text(
         title,
         textDirection: pw.TextDirection.rtl,
-        style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9),
+        textAlign: pw.TextAlign.center,
+        style: pw.TextStyle(
+          fontSize: 16,
+          fontWeight: pw.FontWeight.bold,
+          color: brandNavy,
+        ),
       ),
-      pw.SizedBox(height: 18),
-      pw.Text('____________________', style: const pw.TextStyle(fontSize: 8)),
+      pw.SizedBox(height: 4),
+      pw.Container(width: 58, height: 2, color: brandEmerald),
     ],
+  );
+
+  static pw.Widget _metadataItem(
+    String label,
+    String value,
+    pw.TextDirection direction,
+  ) => pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+    mainAxisSize: pw.MainAxisSize.min,
+    children: [
+      pw.Text(
+        label,
+        textDirection: pw.TextDirection.rtl,
+        textAlign: pw.TextAlign.center,
+        style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+      ),
+      pw.SizedBox(height: 2),
+      pw.Text(
+        value,
+        textDirection: direction,
+        textAlign: pw.TextAlign.center,
+        style: pw.TextStyle(
+          fontSize: 10,
+          fontWeight: pw.FontWeight.bold,
+          color: brandNavy,
+        ),
+      ),
+    ],
+  );
+
+  static pw.Widget buildLabelValue(
+    String label,
+    String value, {
+    pw.TextDirection valueDirection = pw.TextDirection.rtl,
+    double labelWidth = 100,
+    double fontSize = 10,
+  }) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 4),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.SizedBox(
+          width: labelWidth,
+          child: pw.Text(
+            label,
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.right,
+            style: const pw.TextStyle(color: PdfColors.grey700),
+          ),
+        ),
+        pw.SizedBox(width: 6),
+        pw.Expanded(
+          child: pw.Text(
+            value,
+            textDirection: valueDirection,
+            textAlign: pw.TextAlign.right,
+            style: pw.TextStyle(fontSize: fontSize),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static pw.Widget _signature(String title) => pw.Expanded(
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      children: [
+        pw.Text(
+          title,
+          textDirection: pw.TextDirection.rtl,
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(
+            fontWeight: pw.FontWeight.bold,
+            fontSize: 9,
+            color: brandNavy,
+          ),
+        ),
+        pw.SizedBox(height: 24),
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 12),
+          child: pw.Container(height: 0.7, color: PdfColors.grey700),
+        ),
+      ],
+    ),
   );
 
   static Future<void> printVoucher({
     required String voucherType,
     required int voucherNo,
     required String date,
-    required String targetName,
+    String? targetName,
     required double amount,
-    required String paymentMethod,
+    String? paymentMethod,
     required String accountName,
     String? description,
+    List<Map<String, dynamic>> journalLines = const [],
+    List<Map<String, dynamic>> installmentAllocations = const [],
     bool isFinancialDocument = true,
   }) async {
     final bytes = await buildVoucherPdf(
@@ -585,6 +935,8 @@ class PrintUtils {
       paymentMethod: paymentMethod,
       accountName: accountName,
       description: description,
+      journalLines: journalLines,
+      installmentAllocations: installmentAllocations,
       isFinancialDocument: isFinancialDocument,
     );
     await printPdf(bytes, '${voucherType}_$voucherNo');

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/sms_provider.dart';
@@ -54,7 +55,7 @@ class _SmsMainScreenState extends State<SmsMainScreen>
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: tabs,
         ),

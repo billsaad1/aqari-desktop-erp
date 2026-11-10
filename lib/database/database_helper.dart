@@ -3,6 +3,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart';
 import 'dart:io';
 
+import '../core/lease_contract_terms.dart';
+
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
@@ -80,7 +82,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 9,
+        version: 10,
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
         },
@@ -160,6 +162,18 @@ class DatabaseHelper {
           FOREIGN KEY (installment_id) REFERENCES contract_installments (id)
         )
       ''');
+    }
+    if (oldVersion < 10) {
+      const legacySeed =
+          '1. يلتزم المستأجر بسداد الإيجار في المواعيد المحددة.\n'
+          '2. لا يحق للمستأجر تأجير العين بالباطن.';
+      await db.update(
+        'company_info',
+        {'terms_conditions': LeaseContractTerms.defaultText},
+        where:
+            'terms_conditions IS NULL OR TRIM(terms_conditions) = ? OR terms_conditions = ?',
+        whereArgs: ['', legacySeed],
+      );
     }
   }
 
@@ -500,8 +514,7 @@ class DatabaseHelper {
       'activity': 'إدارة وتطوير العقارات والتأجير',
       'address': 'اليمن',
       'default_currency': 'ريال يمني (YER)',
-      'terms_conditions':
-          '1. يلتزم المستأجر بسداد الإيجار في المواعيد المحددة.\n2. لا يحق للمستأجر تأجير العين بالباطن.',
+      'terms_conditions': LeaseContractTerms.defaultText,
     });
 
     // Seed Admin User (password: 123456 encrypted in SHA-256 in production logic, here we place the pre-hashed string for 123456)

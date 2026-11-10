@@ -2,7 +2,9 @@ import 'dart:io';
 import 'dart:convert';
 
 import 'package:app/core/crypto_utils.dart';
+import 'package:app/core/company_logo_storage.dart';
 import 'package:app/core/lease_contract_pdf.dart';
+import 'package:app/core/lease_contract_terms.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
@@ -11,6 +13,7 @@ import 'package:app/providers/leasing_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:provider/provider.dart';
 
 void main() {
@@ -68,12 +71,97 @@ void main() {
     });
   });
 
+  group('company logo files', () {
+    test('accepts a JPG extension with a JPEG signature', () {
+      final jpeg = img.encodeJpg(img.Image(width: 2, height: 2));
+      expect(CompanyLogoStorage.validateBytes('company.JPG', jpeg), isNull);
+      expect(CompanyLogoStorage.validateBytes('company.jpeg', jpeg), isNull);
+      expect(
+        CompanyLogoStorage.validateBytes('company.jpg', [0x89, 0x50, 0x4e]),
+        contains('لا يطابق'),
+      );
+      expect(
+        CompanyLogoStorage.validateBytes('broken.jpg', [
+          0xff,
+          0xd8,
+          0xff,
+          0xe0,
+          0x00,
+        ]),
+        contains('تعذر فك ترميز الصورة'),
+      );
+      expect(
+        CompanyLogoStorage.validateBytes('company.gif', jpeg),
+        contains('PNG أو JPG'),
+      );
+      expect(
+        CompanyLogoStorage.validateBytes(
+          'company.jpg',
+          Uint8List(CompanyLogoStorage.maxBytes + 1),
+        ),
+        contains('8 ميغابايت'),
+      );
+    });
+
+    test(
+      'stores candidate logos privately and deletes only managed files',
+      () async {
+        final support = await Directory.systemTemp.createTemp(
+          'aqari-logo-storage-test-',
+        );
+        final jpeg = img.encodeJpg(img.Image(width: 2, height: 2));
+        final outside = File('${support.path}/not-managed.jpg');
+        try {
+          final saved = await CompanyLogoStorage.saveCandidate(
+            fileName: 'valid.jpg',
+            bytes: jpeg,
+            supportDirectory: support.path,
+          );
+          expect(await saved.exists(), isTrue);
+          expect(
+            saved.path,
+            contains(
+              '${Platform.pathSeparator}branding${Platform.pathSeparator}',
+            ),
+          );
+          expect(saved.path.toLowerCase().endsWith('.jpg'), isTrue);
+          expect(await saved.readAsBytes(), jpeg);
+
+          await outside.writeAsBytes(jpeg);
+          await CompanyLogoStorage.deleteManagedFile(
+            outside.path,
+            supportDirectory: support.path,
+          );
+          expect(await outside.exists(), isTrue);
+
+          await CompanyLogoStorage.deleteManagedFile(
+            saved.path,
+            supportDirectory: support.path,
+          );
+          expect(await saved.exists(), isFalse);
+        } finally {
+          await support.delete(recursive: true);
+        }
+      },
+    );
+  });
+
+  test('lease terms prefer saved settings and strip display numbering', () {
+    expect(LeaseContractTerms.defaultClauses, hasLength(8));
+    expect(LeaseContractTerms.resolve('شرط خاص للمؤسسة\n2. شرط ثانٍ'), [
+      'شرط خاص للمؤسسة',
+      'شرط ثانٍ',
+    ]);
+    expect(LeaseContractTerms.resolve('  '), LeaseContractTerms.defaultClauses);
+  });
+
   test(
     'creates a valid Arabic voucher PDF and a consistent SQLite backup',
     () async {
       final db = await DatabaseHelper.instance.database;
       final info = await DatabaseHelper.instance.getCompanyInfo();
       expect(info?['name_ar'], isNotEmpty);
+      expect(info?['terms_conditions'], LeaseContractTerms.defaultText);
       final tenantColumns = (await db.rawQuery(
         'PRAGMA table_info(tenants)',
       )).map((row) => row['name']).toSet();
@@ -117,6 +205,30 @@ void main() {
       );
       expect(String.fromCharCodes(pdf.take(5)), '%PDF-');
       expect(latin1.decode(pdf), contains('Tajawal'));
+      final detailedVoucherPdf = await PrintUtils.buildVoucherPdf(
+        voucherType: 'سند قبض مستأجر',
+        voucherNo: 18,
+        date: '2026-11-10',
+        targetName: 'مستأجر تجريبي',
+        amount: 1250.50,
+        accountName: '',
+        description: 'دفعة إيجار اختبارية',
+        journalLines: [
+          {'account_name': 'الصندوق الرئيسي', 'debit': 1250.5, 'credit': 0},
+          {'account_name': 'حساب المستأجر', 'debit': 0, 'credit': 1250.5},
+        ],
+        installmentAllocations: [
+          {
+            'property_name': 'عقار الاختبار',
+            'unit_number': '1',
+            'due_date': '2026-11-10',
+            'installment_amount': 1250.5,
+            'allocated_amount': 1250.5,
+          },
+        ],
+      );
+      expect(String.fromCharCodes(detailedVoucherPdf.take(5)), '%PDF-');
+      expect(detailedVoucherPdf.length, greaterThan(pdf.length));
       expect(PrintUtils.suggestedPdfName('سند قبض/17'), 'سند_قبض_17.pdf');
       expect(PrintUtils.currencyInArabic('YER'), 'ريال يمني');
       expect(PrintUtils.currencyInArabic('ريال سعودي (SAR)'), 'ريال سعودي');
@@ -142,15 +254,13 @@ void main() {
   );
 
   test(
-    'lease template embeds the settings logo and has exactly two pages',
+    'default lease template embeds the settings logo and fits two pages',
     () async {
       final logoFile = File(
         '${Directory.systemTemp.path}/aqari-test-logo-${DateTime.now().microsecondsSinceEpoch}.png',
       );
       await logoFile.writeAsBytes(
-        base64Decode(
-          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQCXD7DwAC0AGqugkibgAAAABJRU5ErkJggg==',
-        ),
+        img.encodePng(img.Image(width: 2, height: 2)),
       );
       try {
         final pdf = await LeaseContractPdf.build(
@@ -163,6 +273,7 @@ void main() {
             'address_ar': 'شارع عمرو بن العاص - صنعاء',
             'telephone': '0777420665',
             'logo_path': logoFile.path,
+            'terms_conditions': LeaseContractTerms.defaultText,
           },
           contract: {
             'id': 7,

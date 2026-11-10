@@ -123,9 +123,9 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         voucherType: isReceipt ? 'سند قبض عام' : 'سند صرف عام',
         voucherNo: voucherId,
         date: _dateController.text,
-        targetName: _descController.text.trim(),
+        targetName: null,
         amount: amount,
-        paymentMethod: 'نقداً/بنكي',
+        paymentMethod: null,
         accountName: '${cashAccount['name']} / ${counterpart['name']}',
         description: _descController.text.trim(),
       );

@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
+import '../../core/erp_data_table.dart';
 import 'package:provider/provider.dart';
 import '../../providers/property_provider.dart';
 import '../../database/database_helper.dart';
@@ -331,7 +333,7 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
                                     'المالك: ${provider.owners.firstWhere((o) => o['id'] == prop['owner_id'], orElse: () => {'name': 'غير معروف'})['name']}',
                                   ),
                                   selected: isSelected,
-                                  selectedTileColor: Colors.blue.withValues(
+                                  selectedTileColor: AppPalette.navy.withValues(
                                     alpha: 0.1,
                                   ),
                                   trailing: IconButton(
@@ -730,7 +732,7 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
           const SizedBox(height: 16),
           Expanded(
             child: SingleChildScrollView(
-              child: DataTable(
+              child: ErpDataTable(
                 columns: const [
                   DataColumn(label: Text('رقم الوحدة')),
                   DataColumn(label: Text('النوع')),

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
+import '../../core/erp_data_table.dart';
 import '../../database/database_helper.dart';
 
 class LookupsScreen extends StatefulWidget {
@@ -8,7 +10,8 @@ class LookupsScreen extends StatefulWidget {
   State<LookupsScreen> createState() => _LookupsScreenState();
 }
 
-class _LookupsScreenState extends State<LookupsScreen> with SingleTickerProviderStateMixin {
+class _LookupsScreenState extends State<LookupsScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   final List<LookupConfig> lookupConfigs = [
@@ -17,7 +20,9 @@ class _LookupsScreenState extends State<LookupsScreen> with SingleTickerProvider
     LookupConfig('البنوك', 'banks', ['name', 'account_id']),
     LookupConfig('أنواع العقارات', 'property_types', ['name']),
     LookupConfig('أنواع العيون', 'unit_types', ['name']),
-    LookupConfig('مراكز التكلفة', 'cost_centers', ['name']), // Removed 'code' from fields list for input
+    LookupConfig('مراكز التكلفة', 'cost_centers', [
+      'name',
+    ]), // Removed 'code' from fields list for input
   ];
 
   @override
@@ -38,7 +43,7 @@ class _LookupsScreenState extends State<LookupsScreen> with SingleTickerProvider
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           isScrollable: true,
           tabs: lookupConfigs.map((config) => Tab(text: config.title)).toList(),
@@ -47,12 +52,15 @@ class _LookupsScreenState extends State<LookupsScreen> with SingleTickerProvider
           child: TabBarView(
             controller: _tabController,
             children: lookupConfigs.map((config) {
-               // Determine display fields
-               List<String> displayFields = List.from(config.fields);
-               if (config.tableName == 'cost_centers') {
-                 displayFields.insert(0, 'code'); // Always show 'code' first in the table
-               }
-               return LookupTab(config: config, displayFields: displayFields);
+              // Determine display fields
+              List<String> displayFields = List.from(config.fields);
+              if (config.tableName == 'cost_centers') {
+                displayFields.insert(
+                  0,
+                  'code',
+                ); // Always show 'code' first in the table
+              }
+              return LookupTab(config: config, displayFields: displayFields);
             }).toList(),
           ),
         ),
@@ -72,7 +80,11 @@ class LookupConfig {
 class LookupTab extends StatefulWidget {
   final LookupConfig config;
   final List<String> displayFields;
-  const LookupTab({super.key, required this.config, required this.displayFields});
+  const LookupTab({
+    super.key,
+    required this.config,
+    required this.displayFields,
+  });
 
   @override
   State<LookupTab> createState() => _LookupTabState();
@@ -89,7 +101,9 @@ class _LookupTabState extends State<LookupTab> {
   }
 
   Future<void> _loadData() async {
-    final data = await DatabaseHelper.instance.getLookupData(widget.config.tableName);
+    final data = await DatabaseHelper.instance.getLookupData(
+      widget.config.tableName,
+    );
     setState(() {
       _data = data;
       _isLoading = false;
@@ -101,14 +115,20 @@ class _LookupTabState extends State<LookupTab> {
     final Map<String, TextEditingController> controllers = {};
 
     for (var field in widget.config.fields) {
-      controllers[field] = TextEditingController(text: item != null ? item[field]?.toString() : '');
+      controllers[field] = TextEditingController(
+        text: item != null ? item[field]?.toString() : '',
+      );
     }
 
     showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: Text(item == null ? 'إضافة ${widget.config.title}' : 'تعديل ${widget.config.title}'),
+          title: Text(
+            item == null
+                ? 'إضافة ${widget.config.title}'
+                : 'تعديل ${widget.config.title}',
+          ),
           content: Form(
             key: formKey,
             child: Column(
@@ -136,10 +156,16 @@ class _LookupTabState extends State<LookupTab> {
                   }
 
                   if (item == null) {
-                    await DatabaseHelper.instance.insertLookupData(widget.config.tableName, data);
+                    await DatabaseHelper.instance.insertLookupData(
+                      widget.config.tableName,
+                      data,
+                    );
                   } else {
                     data['id'] = item['id'];
-                    await DatabaseHelper.instance.updateLookupData(widget.config.tableName, data);
+                    await DatabaseHelper.instance.updateLookupData(
+                      widget.config.tableName,
+                      data,
+                    );
                   }
 
                   if (context.mounted) {
@@ -181,30 +207,39 @@ class _LookupTabState extends State<LookupTab> {
           const SizedBox(height: 24),
           Expanded(
             child: SingleChildScrollView(
-              child: DataTable(
+              child: ErpDataTable(
                 columns: [
                   const DataColumn(label: Text('المعرف')),
-                  ...widget.displayFields.map((field) => DataColumn(label: Text(field))),
+                  ...widget.displayFields.map(
+                    (field) => DataColumn(label: Text(field)),
+                  ),
                   const DataColumn(label: Text('الإجراءات')),
                 ],
                 rows: _data.map((row) {
                   return DataRow(
                     cells: [
                       DataCell(Text(row['id'].toString())),
-                      ...widget.displayFields.map((field) => DataCell(Text(row[field]?.toString() ?? ''))),
-                      DataCell(Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.edit, color: Colors.blue),
-                            onPressed: () => _showAddEditDialog(row),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () => _deleteItem(row['id']),
-                          ),
-                        ],
-                      )),
+                      ...widget.displayFields.map(
+                        (field) => DataCell(Text(row[field]?.toString() ?? '')),
+                      ),
+                      DataCell(
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(
+                                Icons.edit,
+                                color: AppPalette.navy,
+                              ),
+                              onPressed: () => _showAddEditDialog(row),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () => _deleteItem(row['id']),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   );
                 }).toList(),

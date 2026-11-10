@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
+import '../../core/erp_data_table.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/property_provider.dart';
@@ -333,7 +335,7 @@ class _OwnersScreenState extends State<OwnersScreen> {
                           child: SingleChildScrollView(
                             scrollDirection: Axis.horizontal,
                             child: SingleChildScrollView(
-                              child: DataTable(
+                              child: ErpDataTable(
                                 headingRowHeight: 52,
                                 dataRowMinHeight: 52,
                                 dataRowMaxHeight: 64,
@@ -353,7 +355,7 @@ class _OwnersScreenState extends State<OwnersScreen> {
                                         Text(
                                           owner['name']?.toString() ?? '',
                                           style: const TextStyle(
-                                            color: Colors.blue,
+                                            color: AppPalette.navy,
                                             fontWeight: FontWeight.w600,
                                           ),
                                         ),
