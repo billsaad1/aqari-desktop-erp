@@ -9,6 +9,11 @@ class DatabaseHelper {
 
   DatabaseHelper._init();
 
+  bool _hasCentPrecision(num value) {
+    final scaled = value.toDouble() * 100;
+    return scaled.isFinite && (scaled - scaled.round()).abs() < 0.000001;
+  }
+
   Future<Database> get database async {
     if (_database != null) return _database!;
     _database = await _initDB('desktop_erp.db');
@@ -18,6 +23,32 @@ class DatabaseHelper {
   Future<String> getDbPath() async {
     final dbPath = await getApplicationDocumentsDirectory();
     return join(dbPath.path, 'AbdullahAlNaqeebERP', 'desktop_erp.db');
+  }
+
+  Future<void> backupToFile(String targetPath) async {
+    final target = File(targetPath);
+    await target.parent.create(recursive: true);
+    if (await target.exists()) await target.delete();
+    final db = await database;
+    final escapedPath = target.absolute.path.replaceAll("'", "''");
+    await db.execute("VACUUM INTO '$escapedPath'");
+
+    Database? snapshot;
+    try {
+      snapshot = await databaseFactory.openDatabase(
+        target.absolute.path,
+        options: OpenDatabaseOptions(readOnly: true),
+      );
+      final check = await snapshot.rawQuery('PRAGMA quick_check');
+      if (check.isEmpty || check.first.values.first != 'ok') {
+        throw StateError('فشل فحص سلامة النسخة الاحتياطية');
+      }
+    } catch (_) {
+      if (await target.exists()) await target.delete();
+      rethrow;
+    } finally {
+      await snapshot?.close();
+    }
   }
 
   Future<void> factoryReset() async {
@@ -42,12 +73,17 @@ class DatabaseHelper {
     final path = join(dbPath.path, 'AbdullahAlNaqeebERP', filePath);
 
     // Ensure the directory exists
-    await Directory(join(dbPath.path, 'AbdullahAlNaqeebERP')).create(recursive: true);
+    await Directory(
+      join(dbPath.path, 'AbdullahAlNaqeebERP'),
+    ).create(recursive: true);
 
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 6,
+        version: 7,
+        onConfigure: (db) async {
+          await db.execute('PRAGMA foreign_keys = ON');
+        },
         onCreate: _createDB,
         onUpgrade: _upgradeDB,
       ),
@@ -56,43 +92,60 @@ class DatabaseHelper {
 
   Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
-      await db.execute('ALTER TABLE owners ADD COLUMN iban TEXT;');
+      await _ensureColumn(db, 'owners', 'iban', 'TEXT');
     }
     if (oldVersion < 3) {
-      await db.execute('ALTER TABLE properties ADD COLUMN property_type_id INTEGER;');
-      await db.execute('ALTER TABLE units ADD COLUMN floor TEXT;');
-      await db.execute('ALTER TABLE units ADD COLUMN elec_meter TEXT;');
-      await db.execute('ALTER TABLE units ADD COLUMN water_meter TEXT;');
+      await _ensureColumn(db, 'properties', 'property_type_id', 'INTEGER');
+      await _ensureColumn(db, 'units', 'floor', 'TEXT');
+      await _ensureColumn(db, 'units', 'elec_meter', 'TEXT');
+      await _ensureColumn(db, 'units', 'water_meter', 'TEXT');
     }
     if (oldVersion < 4) {
-      await db.execute('ALTER TABLE sms_settings ADD COLUMN reminder_template TEXT;');
-      await db.execute('ALTER TABLE sms_settings ADD COLUMN receipt_template TEXT;');
+      await _ensureColumn(db, 'sms_settings', 'reminder_template', 'TEXT');
+      await _ensureColumn(db, 'sms_settings', 'receipt_template', 'TEXT');
     }
     if (oldVersion < 5) {
-      try {
-        await db.execute('ALTER TABLE company_info ADD COLUMN logo_path TEXT;');
-      } catch (e) {
-        // Ignored if already exists
-      }
-      try {
-        await db.execute('ALTER TABLE company_info ADD COLUMN terms_conditions TEXT;');
-      } catch (e) {
-        // Ignored if already exists
-      }
+      await _ensureColumn(db, 'company_info', 'logo_path', 'TEXT');
+      await _ensureColumn(db, 'company_info', 'terms_conditions', 'TEXT');
     }
     if (oldVersion < 6) {
       final columnsToAdd = [
-        'activity_name_ar', 'activity_name_en', 'address_ar', 'address_en',
-        'po_box', 'telephone', 'fax', 'mobile'
+        'activity_name_ar',
+        'activity_name_en',
+        'address_ar',
+        'address_en',
+        'po_box',
+        'telephone',
+        'fax',
+        'mobile',
       ];
       for (final col in columnsToAdd) {
-        try {
-          await db.execute('ALTER TABLE company_info ADD COLUMN $col TEXT;');
-        } catch (e) {
-          // Ignored if already exists
-        }
+        await _ensureColumn(db, 'company_info', col, 'TEXT');
       }
     }
+    if (oldVersion < 7) {
+      await _ensureColumn(
+        db,
+        'users',
+        'must_change_password',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
+      await _ensureColumn(db, 'vouchers', 'description', 'TEXT');
+      await db.execute(
+        "UPDATE users SET must_change_password = 1 WHERE username = 'admin' AND password_hash = '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92';",
+      );
+    }
+  }
+
+  Future<void> _ensureColumn(
+    Database db,
+    String table,
+    String column,
+    String declaration,
+  ) async {
+    final columns = await db.rawQuery('PRAGMA table_info("$table")');
+    if (columns.any((row) => row['name'] == column)) return;
+    await db.execute('ALTER TABLE "$table" ADD COLUMN "$column" $declaration');
   }
 
   Future _createDB(Database db, int version) async {
@@ -128,7 +181,8 @@ class DatabaseHelper {
         password_hash TEXT NOT NULL,
         full_name TEXT NOT NULL,
         role TEXT NOT NULL,
-        cash_box_account_id INTEGER
+        cash_box_account_id INTEGER,
+        must_change_password INTEGER NOT NULL DEFAULT 0
       )
     ''');
 
@@ -335,6 +389,7 @@ class DatabaseHelper {
         amount REAL NOT NULL,
         tenant_id INTEGER,
         journal_entry_id INTEGER,
+        description TEXT,
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (journal_entry_id) REFERENCES journal_entries (id)
       )
@@ -398,16 +453,19 @@ class DatabaseHelper {
       'activity': 'إدارة وتطوير العقارات والتأجير',
       'address': 'اليمن',
       'default_currency': 'ريال يمني (YER)',
-      'terms_conditions': '1. يلتزم المستأجر بسداد الإيجار في المواعيد المحددة.\n2. لا يحق للمستأجر تأجير العين بالباطن.'
+      'terms_conditions':
+          '1. يلتزم المستأجر بسداد الإيجار في المواعيد المحددة.\n2. لا يحق للمستأجر تأجير العين بالباطن.',
     });
 
     // Seed Admin User (password: 123456 encrypted in SHA-256 in production logic, here we place the pre-hashed string for 123456)
     // SHA-256 for '123456' is '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92'
     await db.insert('users', {
       'username': 'admin',
-      'password_hash': '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92',
+      'password_hash':
+          '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92',
       'full_name': 'مدير النظام',
       'role': 'SuperAdmin',
+      'must_change_password': 1,
     });
 
     // Seed Lookups
@@ -416,7 +474,13 @@ class DatabaseHelper {
       await db.insert('cities', {'name': city});
     }
 
-    final propertyTypes = ['عمارة سكنية', 'مجمع تجاري', 'فيلا', 'مستودع', 'أرض'];
+    final propertyTypes = [
+      'عمارة سكنية',
+      'مجمع تجاري',
+      'فيلا',
+      'مستودع',
+      'أرض',
+    ];
     for (var pType in propertyTypes) {
       await db.insert('property_types', {'name': pType});
     }
@@ -428,22 +492,102 @@ class DatabaseHelper {
 
     // Seed Chart of Accounts
     final accounts = [
-      {'code': '1', 'name': 'الأصول', 'parent_id': null, 'account_type': 'Asset'},
-      {'code': '11', 'name': 'النقدية والبنوك', 'parent_id': 1, 'account_type': 'Asset'},
-      {'code': '1101', 'name': 'الصندوق الرئيسي', 'parent_id': 2, 'account_type': 'Asset'},
-      {'code': '1102', 'name': 'البنك', 'parent_id': 2, 'account_type': 'Asset'},
-      {'code': '1201', 'name': 'ذمم المستأجرين', 'parent_id': 1, 'account_type': 'Asset'},
-      {'code': '2', 'name': 'الخصوم', 'parent_id': null, 'account_type': 'Liability'},
-      {'code': '2101', 'name': 'حسابات الملاك الجارية', 'parent_id': 6, 'account_type': 'Liability'},
-      {'code': '2102', 'name': 'تأمينات المستأجرين المستردة', 'parent_id': 6, 'account_type': 'Liability'},
-      {'code': '2103', 'name': 'ضريبة القيمة المضافة', 'parent_id': 6, 'account_type': 'Liability'},
-      {'code': '4', 'name': 'الإيرادات', 'parent_id': null, 'account_type': 'Revenue'},
-      {'code': '4101', 'name': 'إيرادات إيجارات العقارات', 'parent_id': 10, 'account_type': 'Revenue'},
-      {'code': '4102', 'name': 'إيرادات عمولات السعي والإدارة', 'parent_id': 10, 'account_type': 'Revenue'},
-      {'code': '5', 'name': 'المصروفات', 'parent_id': null, 'account_type': 'Expense'},
-      {'code': '5101', 'name': 'المصروفات الإدارية والنثرية', 'parent_id': 13, 'account_type': 'Expense'},
-      {'code': '5102', 'name': 'رواتب وأجور الموظفين', 'parent_id': 13, 'account_type': 'Expense'},
-      {'code': '5103', 'name': 'مصاريف صيانة العقارات', 'parent_id': 13, 'account_type': 'Expense'},
+      {
+        'code': '1',
+        'name': 'الأصول',
+        'parent_id': null,
+        'account_type': 'Asset',
+      },
+      {
+        'code': '11',
+        'name': 'النقدية والبنوك',
+        'parent_id': 1,
+        'account_type': 'Asset',
+      },
+      {
+        'code': '1101',
+        'name': 'الصندوق الرئيسي',
+        'parent_id': 2,
+        'account_type': 'Asset',
+      },
+      {
+        'code': '1102',
+        'name': 'البنك',
+        'parent_id': 2,
+        'account_type': 'Asset',
+      },
+      {
+        'code': '1201',
+        'name': 'ذمم المستأجرين',
+        'parent_id': 1,
+        'account_type': 'Asset',
+      },
+      {
+        'code': '2',
+        'name': 'الخصوم',
+        'parent_id': null,
+        'account_type': 'Liability',
+      },
+      {
+        'code': '2101',
+        'name': 'حسابات الملاك الجارية',
+        'parent_id': 6,
+        'account_type': 'Liability',
+      },
+      {
+        'code': '2102',
+        'name': 'تأمينات المستأجرين المستردة',
+        'parent_id': 6,
+        'account_type': 'Liability',
+      },
+      {
+        'code': '2103',
+        'name': 'ضريبة القيمة المضافة',
+        'parent_id': 6,
+        'account_type': 'Liability',
+      },
+      {
+        'code': '4',
+        'name': 'الإيرادات',
+        'parent_id': null,
+        'account_type': 'Revenue',
+      },
+      {
+        'code': '4101',
+        'name': 'إيرادات إيجارات العقارات',
+        'parent_id': 10,
+        'account_type': 'Revenue',
+      },
+      {
+        'code': '4102',
+        'name': 'إيرادات عمولات السعي والإدارة',
+        'parent_id': 10,
+        'account_type': 'Revenue',
+      },
+      {
+        'code': '5',
+        'name': 'المصروفات',
+        'parent_id': null,
+        'account_type': 'Expense',
+      },
+      {
+        'code': '5101',
+        'name': 'المصروفات الإدارية والنثرية',
+        'parent_id': 13,
+        'account_type': 'Expense',
+      },
+      {
+        'code': '5102',
+        'name': 'رواتب وأجور الموظفين',
+        'parent_id': 13,
+        'account_type': 'Expense',
+      },
+      {
+        'code': '5103',
+        'name': 'مصاريف صيانة العقارات',
+        'parent_id': 13,
+        'account_type': 'Expense',
+      },
     ];
 
     for (var acc in accounts) {
@@ -486,13 +630,26 @@ class DatabaseHelper {
     );
   }
 
+  Future<int> updateUserPassword(
+    int userId,
+    String passwordHash, {
+    bool mustChangePassword = false,
+  }) async {
+    final db = await instance.database;
+    return db.update(
+      'users',
+      {
+        'password_hash': passwordHash,
+        'must_change_password': mustChangePassword ? 1 : 0,
+      },
+      where: 'id = ?',
+      whereArgs: [userId],
+    );
+  }
+
   Future<int> deleteUser(int id) async {
     final db = await instance.database;
-    return await db.delete(
-      'users',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    return await db.delete('users', where: 'id = ?', whereArgs: [id]);
   }
 
   // --- CRUD Operations for Audit Logs ---
@@ -515,13 +672,11 @@ class DatabaseHelper {
 
   Future<int> updateCompanyInfo(Map<String, dynamic> info) async {
     final db = await instance.database;
-    // Assuming there's only one company info record with id = 1
-    return await db.update(
-      'company_info',
-      info,
-      where: 'id = ?',
-      whereArgs: [1],
-    );
+    final rows = await db.query('company_info', columns: ['id'], limit: 1);
+    final values = Map<String, dynamic>.from(info)..remove('id');
+    if (rows.isEmpty) return db.insert('company_info', values);
+    final id = info['id'] ?? rows.first['id'];
+    return db.update('company_info', values, where: 'id = ?', whereArgs: [id]);
   }
 
   // --- Generic CRUD Operations for Lookups ---
@@ -531,12 +686,20 @@ class DatabaseHelper {
     return await db.query(tableName);
   }
 
-  Future<int> insertLookupData(String tableName, Map<String, dynamic> data) async {
+  Future<int> insertLookupData(
+    String tableName,
+    Map<String, dynamic> data,
+  ) async {
     final db = await instance.database;
 
     // Auto-generate code for cost_centers
-    if (tableName == 'cost_centers' && (!data.containsKey('code') || data['code'] == null || data['code'].toString().isEmpty)) {
-      final List<Map<String, dynamic>> maps = await db.rawQuery('SELECT code FROM cost_centers ORDER BY id DESC LIMIT 1');
+    if (tableName == 'cost_centers' &&
+        (!data.containsKey('code') ||
+            data['code'] == null ||
+            data['code'].toString().isEmpty)) {
+      final List<Map<String, dynamic>> maps = await db.rawQuery(
+        'SELECT code FROM cost_centers ORDER BY id DESC LIMIT 1',
+      );
       String newCode = 'CC001';
       if (maps.isNotEmpty && maps.first['code'] != null) {
         final lastCode = maps.first['code'] as String;
@@ -553,7 +716,10 @@ class DatabaseHelper {
     return await db.insert(tableName, data);
   }
 
-  Future<int> updateLookupData(String tableName, Map<String, dynamic> data) async {
+  Future<int> updateLookupData(
+    String tableName,
+    Map<String, dynamic> data,
+  ) async {
     final db = await instance.database;
     return await db.update(
       tableName,
@@ -565,11 +731,7 @@ class DatabaseHelper {
 
   Future<int> deleteLookupData(String tableName, int id) async {
     final db = await instance.database;
-    return await db.delete(
-      tableName,
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    return await db.delete(tableName, where: 'id = ?', whereArgs: [id]);
   }
 
   // --- Accounting Operations ---
@@ -588,7 +750,11 @@ class DatabaseHelper {
 
   Future<String> generateAccountCode(int parentId) async {
     final db = await instance.database;
-    final parentResult = await db.query('accounts', where: 'id = ?', whereArgs: [parentId]);
+    final parentResult = await db.query(
+      'accounts',
+      where: 'id = ?',
+      whereArgs: [parentId],
+    );
     if (parentResult.isEmpty) throw Exception('Parent account not found');
 
     final parentCode = parentResult.first['code'] as String;
@@ -602,15 +768,15 @@ class DatabaseHelper {
     );
 
     if (childrenResult.isEmpty) {
-      return '${parentCode}01';
+      return '${parentCode}0001';
     } else {
       final lastChildCode = childrenResult.first['code'] as String;
       final sequenceStr = lastChildCode.substring(parentCode.length);
       int sequence = int.tryParse(sequenceStr) ?? 0;
       sequence++;
       return '$parentCode${sequence.toString().padLeft(4, '0')}';
-  }
     }
+  }
 
   Future<int> insertAccount(Map<String, dynamic> account) async {
     final db = await instance.database;
@@ -618,51 +784,132 @@ class DatabaseHelper {
   }
 
   // Journal Entries with Transactions
-  Future<void> insertJournalEntryWithLines(Map<String, dynamic> header, List<Map<String, dynamic>> lines) async {
+  Future<int> insertJournalEntryWithLines(
+    Map<String, dynamic> header,
+    List<Map<String, dynamic>> lines,
+  ) async {
+    if (DateTime.tryParse(header['entry_date']?.toString() ?? '') == null) {
+      throw ArgumentError('تاريخ القيد غير صحيح');
+    }
+    if (lines.length < 2)
+      throw ArgumentError('يجب أن يحتوي القيد على سطرين على الأقل');
+    int debitCents = 0;
+    int creditCents = 0;
+    for (final line in lines) {
+      final debit = (line['debit'] as num? ?? 0).toDouble();
+      final credit = (line['credit'] as num? ?? 0).toDouble();
+      if (!_hasCentPrecision(debit) ||
+          !_hasCentPrecision(credit) ||
+          debit < 0 ||
+          credit < 0 ||
+          (debit > 0 && credit > 0) ||
+          (debit == 0 && credit == 0)) {
+        throw ArgumentError('قيمة أحد أسطر القيد غير صحيحة');
+      }
+      debitCents += (debit * 100).round();
+      creditCents += (credit * 100).round();
+    }
+    if (debitCents != creditCents || debitCents == 0) {
+      throw ArgumentError(
+        'القيد غير متوازن: يجب أن يتساوى إجمالي المدين والدائن',
+      );
+    }
+
     final db = await instance.database;
-    await db.transaction((txn) async {
+    return db.transaction((txn) async {
       // 1. Insert header
       final journalId = await txn.insert('journal_entries', header);
 
       // 2. Insert lines
       for (var line in lines) {
+        final accountId = line['account_id'];
+        final accountRows = accountId == null
+            ? <Map<String, Object?>>[]
+            : await txn.query(
+                'accounts',
+                where: 'id = ? AND parent_id IS NOT NULL',
+                whereArgs: [accountId],
+              );
+        if (accountRows.isEmpty)
+          throw ArgumentError('اختر حساباً تفصيلياً صالحاً لكل سطر');
         line['journal_entry_id'] = journalId;
         await txn.insert('journal_lines', line);
 
         // 3. Update account balances
-        final accountId = line['account_id'];
-        final debit = line['debit'] ?? 0.0;
-        final credit = line['credit'] ?? 0.0;
+        final debit = (line['debit'] as num? ?? 0).toDouble();
+        final credit = (line['credit'] as num? ?? 0).toDouble();
 
         await _updateBalanceTx(txn, accountId, debit, credit);
       }
+      return journalId;
     });
   }
 
   // General Vouchers (Receipts/Payments) with Auto-Posting
-  Future<void> insertGeneralVoucher(Map<String, dynamic> voucher, int cashAccountId, int oppositeAccountId, int? costCenterId, String voucherType) async {
+  Future<int> insertGeneralVoucher(
+    Map<String, dynamic> voucher,
+    int cashAccountId,
+    int oppositeAccountId,
+    int? costCenterId,
+    String voucherType,
+  ) async {
+    if (voucherType != 'قبض عام' && voucherType != 'صرف عام') {
+      throw ArgumentError('نوع السند غير معروف');
+    }
+    final amountValue = voucher['amount'];
+    if (amountValue is! num ||
+        amountValue <= 0 ||
+        !_hasCentPrecision(amountValue) ||
+        DateTime.tryParse(voucher['voucher_date']?.toString() ?? '') == null) {
+      throw ArgumentError('مبلغ أو تاريخ السند غير صحيح');
+    }
     final db = await instance.database;
-    await db.transaction((txn) async {
-
+    return db.transaction((txn) async {
+      final cashRows = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [cashAccountId],
+      );
+      final oppositeRows = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [oppositeAccountId],
+      );
+      if (cashRows.isEmpty ||
+          cashRows.first['account_type'] != 'Asset' ||
+          cashRows.first['parent_id'] == null ||
+          !(cashRows.first['code'] as String).startsWith('11')) {
+        throw ArgumentError('حساب النقدية يجب أن يكون صندوقاً أو بنكاً');
+      }
+      final allowedCounterpartTypes = voucherType == 'قبض عام'
+          ? ['Asset', 'Liability', 'Equity', 'Revenue']
+          : ['Asset', 'Liability', 'Equity', 'Expense'];
+      if (oppositeRows.isEmpty ||
+          oppositeAccountId == cashAccountId ||
+          oppositeRows.first['parent_id'] == null ||
+          !allowedCounterpartTypes.contains(
+            oppositeRows.first['account_type'],
+          )) {
+        throw ArgumentError('الحساب المقابل غير صالح');
+      }
       final amount = (voucher['amount'] as num).toDouble();
       final date = voucher['voucher_date'];
-      final description = "سند $voucherType رقم آلي";
+      final description =
+          (voucher['description'] as String?)?.trim().isNotEmpty == true
+          ? (voucher['description'] as String).trim()
+          : 'سند $voucherType';
 
       // 1. Insert Journal Entry Header
       final journalHeader = {
         'entry_date': date,
         'description': description,
-        'is_posted': 1
+        'is_posted': 1,
       };
       final journalId = await txn.insert('journal_entries', journalHeader);
 
       // 2. Insert Journal Lines
-      Map<String, dynamic> line1 = {
-        'journal_entry_id': journalId,
-      };
-      Map<String, dynamic> line2 = {
-        'journal_entry_id': journalId,
-      };
+      Map<String, dynamic> line1 = {'journal_entry_id': journalId};
+      Map<String, dynamic> line2 = {'journal_entry_id': journalId};
 
       if (voucherType == 'قبض عام') {
         // Cash Account (Debit)
@@ -697,44 +944,67 @@ class DatabaseHelper {
 
       // Update balances (simplified logic here for brevity, in production we might use a trigger or shared function)
       // Debit line
-      await _updateBalanceTx(txn, line1['account_id'], line1['debit'], line1['credit']);
+      await _updateBalanceTx(
+        txn,
+        line1['account_id'],
+        line1['debit'],
+        line1['credit'],
+      );
       // Credit line
-      await _updateBalanceTx(txn, line2['account_id'], line2['debit'], line2['credit']);
+      await _updateBalanceTx(
+        txn,
+        line2['account_id'],
+        line2['debit'],
+        line2['credit'],
+      );
 
       // 3. Insert Voucher
       voucher['journal_entry_id'] = journalId;
-      await txn.insert('vouchers', voucher);
+      final voucherId = await txn.insert('vouchers', voucher);
+      return voucherId;
     });
   }
 
-  Future<void> _updateBalanceTx(Transaction txn, int accountId, double debit, double credit) async {
-     int? currentAccountId = accountId;
+  Future<void> _updateBalanceTx(
+    Transaction txn,
+    int accountId,
+    double debit,
+    double credit,
+  ) async {
+    int? currentAccountId = accountId;
 
-     while (currentAccountId != null) {
-        final accountResult = await txn.query('accounts', where: 'id = ?', whereArgs: [currentAccountId]);
-        if (accountResult.isNotEmpty) {
-          final accountMap = accountResult.first;
-          final accountType = accountMap['account_type'] as String?;
-          double currentBalance = (accountMap['balance'] as num?)?.toDouble() ?? 0.0;
+    while (currentAccountId != null) {
+      final accountResult = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [currentAccountId],
+      );
+      if (accountResult.isNotEmpty) {
+        final accountMap = accountResult.first;
+        final accountType = accountMap['account_type'] as String?;
+        double currentBalance =
+            (accountMap['balance'] as num?)?.toDouble() ?? 0.0;
 
-          if (accountType == 'Asset' || accountType == 'Expense') {
-             currentBalance += (debit - credit);
-          } else if (accountType == 'Liability' || accountType == 'Revenue' || accountType == 'Equity') {
-             currentBalance += (credit - debit);
-          }
-
-          await txn.update(
-            'accounts',
-            {'balance': currentBalance},
-            where: 'id = ?',
-            whereArgs: [currentAccountId],
-          );
-
-          currentAccountId = accountMap['parent_id'] as int?;
-        } else {
-          break;
+        if (accountType == 'Asset' || accountType == 'Expense') {
+          currentBalance += (debit - credit);
+        } else if (accountType == 'Liability' ||
+            accountType == 'Revenue' ||
+            accountType == 'Equity') {
+          currentBalance += (credit - debit);
         }
-     }
+
+        await txn.update(
+          'accounts',
+          {'balance': currentBalance},
+          where: 'id = ?',
+          whereArgs: [currentAccountId],
+        );
+
+        currentAccountId = accountMap['parent_id'] as int?;
+      } else {
+        break;
+      }
+    }
   }
 
   // --- Owner & Property Operations ---
@@ -743,8 +1013,13 @@ class DatabaseHelper {
     final db = await instance.database;
     await db.transaction((txn) async {
       // 1. Find the parent account for Owners (code: '2101')
-      final parentResult = await txn.query('accounts', where: 'code = ?', whereArgs: ['2101']);
-      if (parentResult.isEmpty) throw Exception('حساب الملاك الرئيسي غير موجود (2101)');
+      final parentResult = await txn.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['2101'],
+      );
+      if (parentResult.isEmpty)
+        throw Exception('حساب الملاك الرئيسي غير موجود (2101)');
 
       final parentId = parentResult.first['id'] as int;
       final parentCode = parentResult.first['code'] as String;
@@ -809,17 +1084,16 @@ class DatabaseHelper {
 
   Future<List<Map<String, dynamic>>> getUnitsForProperty(int propertyId) async {
     final db = await instance.database;
-    return await db.query('units', where: 'property_id = ?', whereArgs: [propertyId]);
+    return await db.query(
+      'units',
+      where: 'property_id = ?',
+      whereArgs: [propertyId],
+    );
   }
 
   Future<void> updateUnit(Map<String, dynamic> unit) async {
     final db = await instance.database;
-    await db.update(
-      'units',
-      unit,
-      where: 'id = ?',
-      whereArgs: [unit['id']],
-    );
+    await db.update('units', unit, where: 'id = ?', whereArgs: [unit['id']]);
   }
 
   Future<void> deleteUnit(int id) async {
@@ -833,8 +1107,13 @@ class DatabaseHelper {
     final db = await instance.database;
     await db.transaction((txn) async {
       // 1. Find the parent account for Tenants (code: '1201')
-      final parentResult = await txn.query('accounts', where: 'code = ?', whereArgs: ['1201']);
-      if (parentResult.isEmpty) throw Exception('حساب ذمم المستأجرين غير موجود (1201)');
+      final parentResult = await txn.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['1201'],
+      );
+      if (parentResult.isEmpty)
+        throw Exception('حساب ذمم المستأجرين غير موجود (1201)');
 
       final parentId = parentResult.first['id'] as int;
       final parentCode = parentResult.first['code'] as String;
@@ -881,26 +1160,88 @@ class DatabaseHelper {
     return await db.query('tenants');
   }
 
-  Future<void> insertContractWithInstallments(Map<String, dynamic> contract, List<Map<String, dynamic>> installments) async {
-    final db = await instance.database;
-    await db.transaction((txn) async {
-      // 1. Insert contract
-      final contractId = await txn.insert('contracts', contract);
-
-      // 2. Insert installments
-      for (var inst in installments) {
-        inst['contract_id'] = contractId;
-        await txn.insert('contract_installments', inst);
+  Future<int> insertContractWithInstallments(
+    Map<String, dynamic> contract,
+    List<Map<String, dynamic>> installments,
+  ) async {
+    final rent = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
+    final startDate = DateTime.tryParse(
+      contract['start_date']?.toString() ?? '',
+    );
+    final endDate = DateTime.tryParse(contract['end_date']?.toString() ?? '');
+    if (rent <= 0 ||
+        !_hasCentPrecision(rent) ||
+        startDate == null ||
+        endDate == null ||
+        startDate.isAfter(endDate)) {
+      throw ArgumentError('بيانات العقد أو مدة الإيجار غير صحيحة');
+    }
+    if (installments.isEmpty)
+      throw ArgumentError('يجب إضافة قسط واحد على الأقل');
+    var installmentCents = 0;
+    for (final installment in installments) {
+      final amount = (installment['amount'] as num?)?.toDouble() ?? 0;
+      final dueDate = DateTime.tryParse(
+        installment['due_date']?.toString() ?? '',
+      );
+      if (amount <= 0 ||
+          !_hasCentPrecision(amount) ||
+          dueDate == null ||
+          dueDate.isBefore(startDate) ||
+          dueDate.isAfter(endDate)) {
+        throw ArgumentError(
+          'مبلغ أو تاريخ أحد الأقساط غير صحيح أو خارج مدة العقد',
+        );
       }
+      installmentCents += (amount * 100).round();
+    }
+    if (installmentCents != (rent * 100).round()) {
+      throw ArgumentError('مجموع الأقساط لا يساوي قيمة العقد');
+    }
 
-      // 3. Update unit status to 'مؤجرة'
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final tenantId = contract['tenant_id'];
       final unitId = contract['unit_id'];
-      await txn.update(
+      if (tenantId == null ||
+          (await txn.query(
+            'tenants',
+            where: 'id = ?',
+            whereArgs: [tenantId],
+          )).isEmpty) {
+        throw ArgumentError('المستأجر المحدد غير موجود');
+      }
+      final unitRows = await txn.query(
         'units',
-        {'status': 'مؤجرة'},
         where: 'id = ?',
         whereArgs: [unitId],
       );
+      if (unitRows.isEmpty || unitRows.first['status'] != 'شاغرة') {
+        throw StateError('الوحدة لم تعد شاغرة؛ حدّث القائمة واختر وحدة أخرى');
+      }
+      final activeContracts = await txn.query(
+        'contracts',
+        columns: ['id'],
+        where: "unit_id = ? AND status = 'Active'",
+        whereArgs: [unitId],
+        limit: 1,
+      );
+      if (activeContracts.isNotEmpty) throw StateError('للوحدة عقد نشط بالفعل');
+
+      final contractId = await txn.insert('contracts', contract);
+      for (final item in installments) {
+        final installment = Map<String, dynamic>.from(item)
+          ..['contract_id'] = contractId;
+        await txn.insert('contract_installments', installment);
+      }
+      final updated = await txn.update(
+        'units',
+        {'status': 'مؤجرة'},
+        where: "id = ? AND status = 'شاغرة'",
+        whereArgs: [unitId],
+      );
+      if (updated != 1) throw StateError('تعذر اعتماد الوحدة؛ أُلغيت المعاملة');
+      return contractId;
     });
   }
 
@@ -914,9 +1255,15 @@ class DatabaseHelper {
     return await db.query('contracts');
   }
 
-  Future<List<Map<String, dynamic>>> getInstallmentsForContract(int contractId) async {
+  Future<List<Map<String, dynamic>>> getInstallmentsForContract(
+    int contractId,
+  ) async {
     final db = await instance.database;
-    return await db.query('contract_installments', where: 'contract_id = ?', whereArgs: [contractId]);
+    return await db.query(
+      'contract_installments',
+      where: 'contract_id = ?',
+      whereArgs: [contractId],
+    );
   }
 
   // --- Tenant Financial Operations ---
@@ -928,23 +1275,81 @@ class DatabaseHelper {
     required int cashAccountId,
     required List<Map<String, dynamic>> installmentsToUpdate,
   }) async {
+    if (amount <= 0 ||
+        !_hasCentPrecision(amount) ||
+        DateTime.tryParse(voucherDate) == null ||
+        installmentsToUpdate.isEmpty) {
+      throw ArgumentError('المبلغ والأقساط المطلوب تسديدها يجب أن تكون صحيحة');
+    }
     final db = await instance.database;
-    int voucherId = 0;
-    await db.transaction((txn) async {
-      // 1. Fetch Tenant's Account ID
-      final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
-      if (tenantResult.isEmpty) throw Exception('المستأجر غير موجود');
-      final tenantAccountId = tenantResult.first['account_id'] as int;
+    return db.transaction((txn) async {
+      final tenantRows = await txn.query(
+        'tenants',
+        where: 'id = ?',
+        whereArgs: [tenantId],
+      );
+      if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
+      final tenantAccountId = tenantRows.first['account_id'] as int;
+      final cashRows = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [cashAccountId],
+      );
+      if (cashRows.isEmpty ||
+          cashRows.first['account_type'] != 'Asset' ||
+          cashRows.first['parent_id'] == null ||
+          !(cashRows.first['code'] as String).startsWith('11')) {
+        throw ArgumentError('اختر حساب صندوق أو بنك صالحاً');
+      }
 
-      // 2. Insert Journal Entry Header
-      final journalHeader = {
+      var allocatedCents = 0;
+      final verifiedUpdates = <Map<String, dynamic>>[];
+      for (final requested in installmentsToUpdate) {
+        final rows = await txn.rawQuery(
+          '''
+          SELECT ci.* FROM contract_installments ci
+          JOIN contracts c ON c.id = ci.contract_id
+          WHERE ci.id = ? AND c.tenant_id = ? AND c.status = 'Active'
+        ''',
+          [requested['id'], tenantId],
+        );
+        if (rows.isEmpty)
+          throw StateError(
+            'القسط المحدد لا يتبع هذا المستأجر أو أن عقده غير نشط',
+          );
+        final current = rows.first;
+        final total = (current['amount'] as num).toDouble();
+        final oldPaid = (current['paid_amount'] as num?)?.toDouble() ?? 0;
+        final newPaid = (requested['paid_amount'] as num?)?.toDouble();
+        if (newPaid == null ||
+            !_hasCentPrecision(newPaid) ||
+            !_hasCentPrecision(oldPaid) ||
+            newPaid <= oldPaid ||
+            newPaid > total + 0.001) {
+          throw StateError(
+            'تغير رصيد القسط أو أن المبلغ يتجاوز المستحق؛ أعد تحميل الأقساط',
+          );
+        }
+        final status = newPaid >= total - 0.001 ? 'Paid' : 'Partially Paid';
+        if (requested['status'] != status)
+          throw ArgumentError('حالة القسط لا تطابق المبلغ المدفوع');
+        allocatedCents += ((newPaid - oldPaid) * 100).round();
+        verifiedUpdates.add({
+          'id': requested['id'],
+          'old_paid': oldPaid,
+          'paid_amount': newPaid,
+          'status': status,
+        });
+      }
+      if (allocatedCents != (amount * 100).round()) {
+        throw ArgumentError('مجموع توزيع الدفعة لا يساوي مبلغ السند');
+      }
+
+      final journalId = await txn.insert('journal_entries', {
         'entry_date': voucherDate,
-        'description': 'سند قبض مستأجر رقم آلي',
-        'is_posted': 1
-      };
-      final journalId = await txn.insert('journal_entries', journalHeader);
-
-      // 3. Insert Journal Lines (Cash Debit, Tenant Asset Credit)
+        'description': 'سند قبض مستأجر',
+        'is_posted': 1,
+      });
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
         'account_id': cashAccountId,
@@ -959,32 +1364,32 @@ class DatabaseHelper {
         'credit': amount,
         'description': 'تحصيل دفعة مستأجر',
       });
-
-      // 4. Update balances
       await _updateBalanceTx(txn, cashAccountId, amount, 0.0);
       await _updateBalanceTx(txn, tenantAccountId, 0.0, amount);
 
-      // 5. Insert Voucher
-      final voucher = {
+      final voucherId = await txn.insert('vouchers', {
         'voucher_type': 'قبض مستأجر',
         'voucher_date': voucherDate,
         'amount': amount,
         'tenant_id': tenantId,
         'journal_entry_id': journalId,
-      };
-      voucherId = await txn.insert('vouchers', voucher);
-
-      // 6. Update Installments
-      for (var inst in installmentsToUpdate) {
-        await txn.update(
+        'description': 'تحصيل دفعة مستأجر',
+      });
+      for (final installment in verifiedUpdates) {
+        final changed = await txn.update(
           'contract_installments',
-          {'paid_amount': inst['paid_amount'], 'status': inst['status']},
-          where: 'id = ?',
-          whereArgs: [inst['id']],
+          {
+            'paid_amount': installment['paid_amount'],
+            'status': installment['status'],
+          },
+          where: 'id = ? AND paid_amount = ?',
+          whereArgs: [installment['id'], installment['old_paid']],
         );
+        if (changed != 1)
+          throw StateError('تم تحديث القسط من عملية أخرى؛ أُلغيت المعاملة');
       }
+      return voucherId;
     });
-    return voucherId;
   }
 
   Future<int> insertTenantPaymentVoucher({
@@ -992,28 +1397,58 @@ class DatabaseHelper {
     required double amount,
     required String voucherDate,
     required int cashAccountId,
+    required int offsetAccountId,
     required String description,
   }) async {
+    if (amount <= 0 ||
+        !_hasCentPrecision(amount) ||
+        DateTime.tryParse(voucherDate) == null ||
+        description.trim().isEmpty) {
+      throw ArgumentError('المبلغ أو التاريخ أو البيان غير صحيح');
+    }
     final db = await instance.database;
-    int voucherId = 0;
-    await db.transaction((txn) async {
-      // 1. Fetch Tenant's Account ID
-      final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
-      if (tenantResult.isEmpty) throw Exception('المستأجر غير موجود');
-      final tenantAccountId = tenantResult.first['account_id'] as int;
+    return db.transaction((txn) async {
+      final tenantRows = await txn.query(
+        'tenants',
+        where: 'id = ?',
+        whereArgs: [tenantId],
+      );
+      if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
+      final cashRows = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [cashAccountId],
+      );
+      final offsetRows = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [offsetAccountId],
+      );
+      if (cashRows.isEmpty ||
+          cashRows.first['account_type'] != 'Asset' ||
+          cashRows.first['parent_id'] == null ||
+          !(cashRows.first['code'] as String).startsWith('11')) {
+        throw ArgumentError('اختر حساب صندوق أو بنك صالحاً');
+      }
+      if (offsetRows.isEmpty ||
+          offsetAccountId == cashAccountId ||
+          offsetRows.first['parent_id'] == null ||
+          ![
+            'Liability',
+            'Expense',
+            'Revenue',
+          ].contains(offsetRows.first['account_type'])) {
+        throw ArgumentError('الحساب المقابل غير صالح');
+      }
 
-      // 2. Insert Journal Entry Header
-      final journalHeader = {
+      final journalId = await txn.insert('journal_entries', {
         'entry_date': voucherDate,
         'description': description,
-        'is_posted': 1
-      };
-      final journalId = await txn.insert('journal_entries', journalHeader);
-
-      // 3. Insert Journal Lines (Tenant Asset Debit, Cash Credit)
+        'is_posted': 1,
+      });
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
-        'account_id': tenantAccountId,
+        'account_id': offsetAccountId,
         'debit': amount,
         'credit': 0.0,
         'description': description,
@@ -1025,52 +1460,95 @@ class DatabaseHelper {
         'credit': amount,
         'description': description,
       });
-
-      // 4. Update balances
-      await _updateBalanceTx(txn, tenantAccountId, amount, 0.0);
+      await _updateBalanceTx(txn, offsetAccountId, amount, 0.0);
       await _updateBalanceTx(txn, cashAccountId, 0.0, amount);
 
-      // 5. Insert Voucher
-      final voucher = {
+      return txn.insert('vouchers', {
         'voucher_type': 'صرف مستأجر',
         'voucher_date': voucherDate,
         'amount': amount,
         'tenant_id': tenantId,
         'journal_entry_id': journalId,
-      };
-      voucherId = await txn.insert('vouchers', voucher);
+        'description': description,
+      });
     });
-    return voucherId;
   }
 
-  Future<void> insertTaxInvoice({
+  Future<int> insertTaxInvoice({
     required int contractId,
     required int tenantId,
     required String invoiceDate,
-    required double totalAmount, // Net Rent
+    required double totalAmount,
     required double taxAmount,
     required int revenueAccountId,
     required int taxAccountId,
   }) async {
+    if (totalAmount <= 0 ||
+        !_hasCentPrecision(totalAmount) ||
+        !_hasCentPrecision(taxAmount) ||
+        taxAmount < 0 ||
+        DateTime.tryParse(invoiceDate) == null) {
+      throw ArgumentError('مبالغ أو تاريخ الفاتورة غير صحيح');
+    }
     final db = await instance.database;
-    await db.transaction((txn) async {
-      // 1. Fetch Tenant's Account ID
-      final tenantResult = await txn.query('tenants', where: 'id = ?', whereArgs: [tenantId]);
-      if (tenantResult.isEmpty) throw Exception('المستأجر غير موجود');
-      final tenantAccountId = tenantResult.first['account_id'] as int;
+    return db.transaction((txn) async {
+      final contractRows = await txn.query(
+        'contracts',
+        where: "id = ? AND tenant_id = ? AND status = 'Active'",
+        whereArgs: [contractId, tenantId],
+      );
+      if (contractRows.isEmpty)
+        throw StateError('العقد المحدد لا يتبع المستأجر المختار');
+      final duplicates = await txn.query(
+        'tax_invoices',
+        where:
+            'contract_id = ? AND invoice_date = ? AND total_amount = ? AND tax_amount = ?',
+        whereArgs: [
+          contractId,
+          invoiceDate,
+          totalAmount + taxAmount,
+          taxAmount,
+        ],
+        limit: 1,
+      );
+      if (duplicates.isNotEmpty)
+        throw StateError(
+          'هذه الفاتورة صادرة مسبقاً لهذا العقد والتاريخ والمبلغ',
+        );
+      final tenantRows = await txn.query(
+        'tenants',
+        where: 'id = ?',
+        whereArgs: [tenantId],
+      );
+      if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
+      final tenantAccountId = tenantRows.first['account_id'] as int;
+      final revenueRows = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [revenueAccountId],
+      );
+      final taxRows = await txn.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [taxAccountId],
+      );
+      if (revenueRows.isEmpty ||
+          revenueRows.first['account_type'] != 'Revenue' ||
+          revenueRows.first['parent_id'] == null) {
+        throw ArgumentError('اختر حساب إيراد صالحاً');
+      }
+      if (taxRows.isEmpty ||
+          taxRows.first['account_type'] != 'Liability' ||
+          taxRows.first['parent_id'] == null) {
+        throw ArgumentError('اختر حساب ضريبة من الخصوم');
+      }
 
-      double grossAmount = totalAmount + taxAmount;
-
-      // 2. Insert Journal Entry Header
-      final journalHeader = {
+      final grossAmount = totalAmount + taxAmount;
+      final journalId = await txn.insert('journal_entries', {
         'entry_date': invoiceDate,
         'description': 'إثبات فاتورة ضريبية إيجار',
-        'is_posted': 1
-      };
-      final journalId = await txn.insert('journal_entries', journalHeader);
-
-      // 3. Insert Journal Lines
-      // Debit: Tenant (Asset) for Gross
+        'is_posted': 1,
+      });
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
         'account_id': tenantAccountId,
@@ -1078,7 +1556,6 @@ class DatabaseHelper {
         'credit': 0.0,
         'description': 'استحقاق فاتورة إيجار',
       });
-      // Credit: Revenue Account for Net
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
         'account_id': revenueAccountId,
@@ -1086,25 +1563,24 @@ class DatabaseHelper {
         'credit': totalAmount,
         'description': 'إيراد إيجار',
       });
-      // Credit: Tax Account (Liability) for Tax
-      await txn.insert('journal_lines', {
-        'journal_entry_id': journalId,
-        'account_id': taxAccountId,
-        'debit': 0.0,
-        'credit': taxAmount,
-        'description': 'ضريبة قيمة مضافة',
-      });
-
-      // 4. Update balances
+      if (taxAmount > 0) {
+        await txn.insert('journal_lines', {
+          'journal_entry_id': journalId,
+          'account_id': taxAccountId,
+          'debit': 0.0,
+          'credit': taxAmount,
+          'description': 'ضريبة قيمة مضافة',
+        });
+      }
       await _updateBalanceTx(txn, tenantAccountId, grossAmount, 0.0);
       await _updateBalanceTx(txn, revenueAccountId, 0.0, totalAmount);
-      await _updateBalanceTx(txn, taxAccountId, 0.0, taxAmount);
+      if (taxAmount > 0)
+        await _updateBalanceTx(txn, taxAccountId, 0.0, taxAmount);
 
-      // 5. Insert Tax Invoice
-      await txn.insert('tax_invoices', {
+      return txn.insert('tax_invoices', {
         'contract_id': contractId,
         'invoice_date': invoiceDate,
-        'total_amount': grossAmount, // Conventionally gross total is saved, but depends on design
+        'total_amount': grossAmount,
         'tax_amount': taxAmount,
       });
     });
@@ -1114,19 +1590,35 @@ class DatabaseHelper {
     final db = await instance.database;
     await db.transaction((txn) async {
       // 1. Check if any installments are paid
-      final installments = await txn.query('contract_installments', where: 'contract_id = ?', whereArgs: [contractId]);
-      bool hasPaid = installments.any((inst) => (inst['paid_amount'] as num) > 0);
+      final installments = await txn.query(
+        'contract_installments',
+        where: 'contract_id = ?',
+        whereArgs: [contractId],
+      );
+      bool hasPaid = installments.any(
+        (inst) => (inst['paid_amount'] as num) > 0,
+      );
       if (hasPaid) {
-        throw Exception('لا يمكن إلغاء العقد بشكل مباشر. يوجد دفعات مسددة، يتطلب عمل تسوية أو إشعار دائن.');
+        throw Exception(
+          'لا يمكن إلغاء العقد بشكل مباشر. يوجد دفعات مسددة، يتطلب عمل تسوية أو إشعار دائن.',
+        );
       }
 
       // 2. Get Unit ID before deleting/updating
-      final contractResult = await txn.query('contracts', where: 'id = ?', whereArgs: [contractId]);
+      final contractResult = await txn.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [contractId],
+      );
       if (contractResult.isEmpty) throw Exception('العقد غير موجود');
       final unitId = contractResult.first['unit_id'] as int;
 
       // 3. Delete unpaid installments
-      await txn.delete('contract_installments', where: 'contract_id = ?', whereArgs: [contractId]);
+      await txn.delete(
+        'contract_installments',
+        where: 'contract_id = ?',
+        whereArgs: [contractId],
+      );
 
       // 4. Update Contract Status
       await txn.update(
@@ -1147,10 +1639,63 @@ class DatabaseHelper {
   }
 
   // --- Reports & Alerts Queries ---
+  // --- Reports & Alerts Queries ---
 
-  Future<List<Map<String, dynamic>>> getAccountStatement(int accountId, String startDate, String endDate) async {
+  Future<Map<String, dynamic>> getDashboardSummary() async {
     final db = await instance.database;
-    return await db.rawQuery('''
+    final rows = await db.rawQuery('''
+      SELECT
+        (SELECT COUNT(*) FROM properties) AS properties_count,
+        (SELECT COUNT(*) FROM units) AS units_count,
+        (SELECT COUNT(*) FROM units WHERE status = 'مؤجرة') AS rented_units_count,
+        (SELECT COUNT(*) FROM units WHERE status = 'شاغرة') AS vacant_units_count,
+        (SELECT COUNT(*) FROM tenants) AS tenants_count,
+        (SELECT COUNT(*) FROM contracts WHERE status = 'Active') AS active_contracts_count,
+        (SELECT COALESCE(SUM(MAX(ci.amount - ci.paid_amount, 0)), 0)
+          FROM contract_installments ci JOIN contracts c ON c.id = ci.contract_id
+          WHERE c.status = 'Active' AND ci.status != 'Paid') AS outstanding_amount
+    ''');
+    return rows.first;
+  }
+
+  Future<double> getAccountOpeningBalance(
+    int accountId,
+    String startDate,
+  ) async {
+    final db = await instance.database;
+    final accounts = await db.query(
+      'accounts',
+      columns: ['account_type'],
+      where: 'id = ?',
+      whereArgs: [accountId],
+    );
+    if (accounts.isEmpty) throw StateError('الحساب غير موجود');
+    final totals = await db.rawQuery(
+      '''
+      SELECT COALESCE(SUM(jl.debit), 0) AS debit_total,
+             COALESCE(SUM(jl.credit), 0) AS credit_total
+      FROM journal_lines jl
+      JOIN journal_entries je ON jl.journal_entry_id = je.id
+      WHERE jl.account_id = ? AND je.entry_date < ? AND je.is_posted = 1
+    ''',
+      [accountId, startDate],
+    );
+    final debit = (totals.first['debit_total'] as num).toDouble();
+    final credit = (totals.first['credit_total'] as num).toDouble();
+    final type = accounts.first['account_type'];
+    return (type == 'Liability' || type == 'Revenue' || type == 'Equity')
+        ? credit - debit
+        : debit - credit;
+  }
+
+  Future<List<Map<String, dynamic>>> getAccountStatement(
+    int accountId,
+    String startDate,
+    String endDate,
+  ) async {
+    final db = await instance.database;
+    return await db.rawQuery(
+      '''
       SELECT
         je.entry_date as date,
         je.id as voucher_no,
@@ -1159,9 +1704,11 @@ class DatabaseHelper {
         jl.credit as credit
       FROM journal_lines jl
       JOIN journal_entries je ON jl.journal_entry_id = je.id
-      WHERE jl.account_id = ? AND je.entry_date >= ? AND je.entry_date <= ?
-      ORDER BY je.entry_date ASC, je.id ASC
-    ''', [accountId, startDate, endDate]);
+      WHERE jl.account_id = ? AND je.entry_date >= ? AND je.entry_date <= ? AND je.is_posted = 1
+      ORDER BY je.entry_date ASC, je.id ASC, jl.id ASC
+    ''',
+      [accountId, startDate, endDate],
+    );
   }
 
   Future<List<Map<String, dynamic>>> getUnitOccupancyStats() async {
@@ -1178,10 +1725,13 @@ class DatabaseHelper {
     ''');
   }
 
-  Future<List<Map<String, dynamic>>> searchTenantsAndContracts(String query) async {
+  Future<List<Map<String, dynamic>>> searchTenantsAndContracts(
+    String query,
+  ) async {
     final db = await instance.database;
     final searchTerm = '%$query%';
-    return await db.rawQuery('''
+    return await db.rawQuery(
+      '''
       SELECT
         t.name as tenant_name,
         t.mobile as mobile,
@@ -1196,7 +1746,9 @@ class DatabaseHelper {
       LEFT JOIN units u ON c.unit_id = u.id
       LEFT JOIN properties p ON u.property_id = p.id
       WHERE t.name LIKE ? OR t.mobile LIKE ? OR u.unit_number LIKE ?
-    ''', [searchTerm, searchTerm, searchTerm]);
+    ''',
+      [searchTerm, searchTerm, searchTerm],
+    );
   }
 
   Future<List<Map<String, dynamic>>> getDueInstallments(int days) async {
@@ -1204,12 +1756,14 @@ class DatabaseHelper {
     final targetDate = DateTime.now().add(Duration(days: days));
     final targetDateStr = targetDate.toIso8601String().substring(0, 10);
 
-    return await db.rawQuery('''
+    return await db.rawQuery(
+      '''
       SELECT
         ci.id as installment_id,
         ci.due_date,
         ci.amount,
         ci.paid_amount,
+        (ci.amount - ci.paid_amount) AS remaining_amount,
         ci.status,
         t.name as tenant_name,
         t.id as tenant_id
@@ -1218,15 +1772,19 @@ class DatabaseHelper {
       JOIN tenants t ON c.tenant_id = t.id
       WHERE ci.status != 'Paid' AND ci.due_date <= ?
       ORDER BY ci.due_date ASC
-    ''', [targetDateStr]);
+    ''',
+      [targetDateStr],
+    );
   }
 
   Future<List<Map<String, dynamic>>> getExpiringContracts(int days) async {
     final db = await instance.database;
     final targetDate = DateTime.now().add(Duration(days: days));
     final targetDateStr = targetDate.toIso8601String().substring(0, 10);
+    final todayStr = DateTime.now().toIso8601String().substring(0, 10);
 
-    return await db.rawQuery('''
+    return await db.rawQuery(
+      '''
       SELECT
         c.id as contract_id,
         c.end_date,
@@ -1237,9 +1795,11 @@ class DatabaseHelper {
       JOIN tenants t ON c.tenant_id = t.id
       JOIN units u ON c.unit_id = u.id
       JOIN properties p ON u.property_id = p.id
-      WHERE c.status = 'Active' AND c.end_date <= ?
+      WHERE c.status = 'Active' AND c.end_date >= ? AND c.end_date <= ?
       ORDER BY c.end_date ASC
-    ''', [targetDateStr]);
+    ''',
+      [todayStr, targetDateStr],
+    );
   }
 
   // --- SMS Operations ---
@@ -1257,7 +1817,12 @@ class DatabaseHelper {
     if (existing.isEmpty) {
       await db.insert('sms_settings', settings);
     } else {
-      await db.update('sms_settings', settings, where: 'id = ?', whereArgs: [existing.first['id']]);
+      await db.update(
+        'sms_settings',
+        settings,
+        where: 'id = ?',
+        whereArgs: [existing.first['id']],
+      );
     }
   }
 
@@ -1272,7 +1837,10 @@ class DatabaseHelper {
   }
 
   Future close() async {
-    final db = await instance.database;
-    db.close();
+    final db = _database;
+    if (db != null) {
+      await db.close();
+      _database = null;
+    }
   }
 }

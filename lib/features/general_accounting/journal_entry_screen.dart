@@ -1,7 +1,9 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/accounting_provider.dart';
 import 'package:intl/intl.dart';
+import '../../core/print_utils.dart';
 
 class JournalEntryScreen extends StatefulWidget {
   const JournalEntryScreen({super.key});
@@ -12,10 +14,14 @@ class JournalEntryScreen extends StatefulWidget {
 
 class _JournalEntryScreenState extends State<JournalEntryScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _dateController = TextEditingController(text: DateFormat('yyyy-MM-dd').format(DateTime.now()));
+  final _dateController = TextEditingController(
+    text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
+  );
   final _descController = TextEditingController();
 
   List<JournalLine> lines = [];
+  Uint8List? _lastPdf;
+  String? _lastPdfName;
 
   @override
   void initState() {
@@ -29,10 +35,15 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
     lines.add(JournalLine());
   }
 
-  double get totalDebit => lines.fold(0, (sum, line) => sum + (line.debit ?? 0));
-  double get totalCredit => lines.fold(0, (sum, line) => sum + (line.credit ?? 0));
+  double get totalDebit =>
+      lines.fold(0, (sum, line) => sum + (line.debit ?? 0));
+  double get totalCredit =>
+      lines.fold(0, (sum, line) => sum + (line.credit ?? 0));
   double get difference => totalDebit - totalCredit;
-  bool get isValidEntry => totalDebit == totalCredit && totalDebit > 0 && _formKey.currentState?.validate() == true;
+  bool get isValidEntry =>
+      (totalDebit * 100).round() == (totalCredit * 100).round() &&
+      totalDebit > 0 &&
+      _formKey.currentState?.validate() == true;
 
   @override
   void dispose() {
@@ -54,10 +65,14 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
   void _removeLine(int index) {
     if (lines.length > 2) {
       setState(() {
-        lines.removeAt(index);
+        final removed = lines.removeAt(index);
+        removed.debitController.dispose();
+        removed.creditController.dispose();
       });
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('يجب أن يحتوي القيد على سطرين على الأقل')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يجب أن يحتوي القيد على سطرين على الأقل')),
+      );
     }
   }
 
@@ -65,8 +80,10 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
     if (isValidEntry) {
       // Validate all lines have accounts
       if (lines.any((l) => l.accountId == null)) {
-         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الرجاء اختيار الحساب لجميع الأسطر')));
-         return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('الرجاء اختيار الحساب لجميع الأسطر')),
+        );
+        return;
       }
 
       final header = {
@@ -75,26 +92,114 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
         'is_posted': 1,
       };
 
-      final linesData = lines.map((l) => {
-        'account_id': l.accountId,
-        'debit': l.debit ?? 0.0,
-        'credit': l.credit ?? 0.0,
-        'cost_center_id': l.costCenterId,
-        'description': l.description,
-      }).toList();
+      final linesData = lines
+          .map(
+            (l) => {
+              'account_id': l.accountId,
+              'debit': l.debit ?? 0.0,
+              'credit': l.credit ?? 0.0,
+              'cost_center_id': l.costCenterId,
+              'description': l.description,
+            },
+          )
+          .toList();
 
       try {
-        await Provider.of<AccountingProvider>(context, listen: false).saveJournalEntry(header, linesData);
+        final journalId = await Provider.of<AccountingProvider>(
+          context,
+          listen: false,
+        ).saveJournalEntry(header, linesData);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ القيد بنجاح')));
+          final accounts = Provider.of<AccountingProvider>(
+            context,
+            listen: false,
+          ).accounts;
+          final pdfLines = lines.map((line) {
+            final account = accounts.firstWhere(
+              (a) => a['id'] == line.accountId,
+              orElse: () => <String, dynamic>{},
+            );
+            return {
+              'account_name':
+                  '${account['code'] ?? ''} ${account['name'] ?? ''}'.trim(),
+              'description': line.description ?? _descController.text,
+              'debit': line.debit ?? 0.0,
+              'credit': line.credit ?? 0.0,
+            };
+          }).toList();
+          try {
+            final bytes = await PrintUtils.buildJournalEntryPdf(
+              journalNo: journalId,
+              date: _dateController.text,
+              description: _descController.text,
+              lines: pdfLines,
+            );
+            if (!mounted) return;
+            setState(() {
+              _lastPdf = bytes;
+              _lastPdfName = 'قيد_يومية_$journalId';
+            });
+          } catch (e) {
+            if (mounted)
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'حُفظ القيد رقم $journalId، لكن تعذر تجهيز PDF: $e',
+                  ),
+                ),
+              );
+          }
+          if (mounted)
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('تم حفظ القيد رقم $journalId')),
+            );
+          for (final line in lines) {
+            line.debitController.dispose();
+            line.creditController.dispose();
+          }
           setState(() {
             _descController.clear();
             lines = [JournalLine(), JournalLine()];
           });
         }
       } catch (e) {
-         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ: $e')));
+        if (mounted)
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('خطأ: $e')));
       }
+    }
+  }
+
+  Future<void> _printLastPdf() async {
+    final bytes = _lastPdf;
+    final name = _lastPdfName;
+    if (bytes == null || name == null) return;
+    try {
+      await PrintUtils.printPdf(bytes, name);
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('تعذرت الطباعة: $e')));
+    }
+  }
+
+  Future<void> _saveLastPdf() async {
+    final bytes = _lastPdf;
+    final name = _lastPdfName;
+    if (bytes == null || name == null) return;
+    try {
+      final saved = await PrintUtils.savePdf(bytes, name);
+      if (mounted && saved)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('تعذر حفظ PDF: $e')));
     }
   }
 
@@ -102,7 +207,8 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
   Widget build(BuildContext context) {
     return Consumer<AccountingProvider>(
       builder: (context, provider, child) {
-        if (provider.isLoading) return const Center(child: CircularProgressIndicator());
+        if (provider.isLoading)
+          return const Center(child: CircularProgressIndicator());
 
         return Padding(
           padding: const EdgeInsets.all(24.0),
@@ -111,7 +217,10 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text('قيد يومية يدوي', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                const Text(
+                  'قيد يومية يدوي',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
                 const SizedBox(height: 24),
                 // Header
                 Row(
@@ -120,7 +229,10 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                       flex: 1,
                       child: TextFormField(
                         controller: _dateController,
-                        decoration: const InputDecoration(labelText: 'التاريخ', border: OutlineInputBorder()),
+                        decoration: const InputDecoration(
+                          labelText: 'التاريخ',
+                          border: OutlineInputBorder(),
+                        ),
                         readOnly: true,
                         onTap: () async {
                           final date = await showDatePicker(
@@ -131,7 +243,9 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                           );
                           if (date != null) {
                             setState(() {
-                              _dateController.text = DateFormat('yyyy-MM-dd').format(date);
+                              _dateController.text = DateFormat(
+                                'yyyy-MM-dd',
+                              ).format(date);
                             });
                           }
                         },
@@ -142,7 +256,10 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                       flex: 3,
                       child: TextFormField(
                         controller: _descController,
-                        decoration: const InputDecoration(labelText: 'البيان العام', border: OutlineInputBorder()),
+                        decoration: const InputDecoration(
+                          labelText: 'البيان العام',
+                          border: OutlineInputBorder(),
+                        ),
                         validator: (v) => v!.isEmpty ? 'مطلوب' : null,
                       ),
                     ),
@@ -159,7 +276,11 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                     child: ListView.builder(
                       itemCount: lines.length,
                       itemBuilder: (context, index) {
-                        return _buildLineRow(index, provider.accounts, provider.costCenters);
+                        return _buildLineRow(
+                          index,
+                          provider.accounts,
+                          provider.costCenters,
+                        );
                       },
                     ),
                   ),
@@ -176,23 +297,60 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                     ),
                     Row(
                       children: [
-                        _buildTotalBox('إجمالي المدين', totalDebit, Colors.blue),
+                        _buildTotalBox(
+                          'إجمالي المدين',
+                          totalDebit,
+                          Colors.blue,
+                        ),
                         const SizedBox(width: 16),
-                        _buildTotalBox('إجمالي الدائن', totalCredit, Colors.green),
+                        _buildTotalBox(
+                          'إجمالي الدائن',
+                          totalCredit,
+                          Colors.green,
+                        ),
                         const SizedBox(width: 16),
-                        _buildTotalBox('الفرق', difference, difference == 0 ? Colors.grey : Colors.red),
+                        _buildTotalBox(
+                          'الفرق',
+                          difference,
+                          difference == 0 ? Colors.grey : Colors.red,
+                        ),
                       ],
                     ),
                   ],
                 ),
                 const SizedBox(height: 24),
-                ElevatedButton(
-                  onPressed: isValidEntry ? _saveEntry : null,
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.all(16),
-                    backgroundColor: isValidEntry ? Colors.blue : Colors.grey,
-                  ),
-                  child: const Text('حفظ وترحيل القيد', style: TextStyle(fontSize: 18)),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: isValidEntry ? _saveEntry : null,
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.all(16),
+                          backgroundColor: isValidEntry
+                              ? Colors.blue
+                              : Colors.grey,
+                        ),
+                        child: const Text(
+                          'حفظ وترحيل القيد',
+                          style: TextStyle(fontSize: 18),
+                        ),
+                      ),
+                    ),
+                    if (_lastPdf != null) ...[
+                      const SizedBox(width: 12),
+                      OutlinedButton.icon(
+                        onPressed: _printLastPdf,
+                        icon: const Icon(Icons.print),
+                        label: const Text('طباعة آخر قيد'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: _saveLastPdf,
+                        icon: const Icon(Icons.picture_as_pdf),
+                        label: const Text('حفظ PDF'),
+                      ),
+                    ],
+                  ],
                 ),
               ],
             ),
@@ -212,14 +370,24 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
       ),
       child: Column(
         children: [
-          Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold)),
-          Text(value.toStringAsFixed(2), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          Text(
+            label,
+            style: TextStyle(color: color, fontWeight: FontWeight.bold),
+          ),
+          Text(
+            value.toStringAsFixed(2),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildLineRow(int index, List<Map<String, dynamic>> accounts, List<Map<String, dynamic>> costCenters) {
+  Widget _buildLineRow(
+    int index,
+    List<Map<String, dynamic>> accounts,
+    List<Map<String, dynamic>> costCenters,
+  ) {
     final line = lines[index];
     return Padding(
       padding: const EdgeInsets.all(8.0),
@@ -229,14 +397,25 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
             flex: 3,
             child: DropdownButtonFormField<int>(
               value: line.accountId,
-              items: accounts.map((a) => DropdownMenuItem<int>(
-                value: a['id'],
-                child: Text('${a['''code''']} - ${a['''name''']}'),
-              )).toList(),
+              items: accounts
+                  .where((a) => a['parent_id'] != null)
+                  .map(
+                    (a) => DropdownMenuItem<int>(
+                      value: a['id'],
+                      child: Text('${a['code']} - ${a['name']}'),
+                    ),
+                  )
+                  .toList(),
               onChanged: (val) {
-                setState(() { line.accountId = val; });
+                setState(() {
+                  line.accountId = val;
+                });
               },
-              decoration: const InputDecoration(labelText: 'الحساب', isDense: true, border: OutlineInputBorder()),
+              decoration: const InputDecoration(
+                labelText: 'الحساب',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
             ),
           ),
           const SizedBox(width: 8),
@@ -245,13 +424,17 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
             child: TextFormField(
               controller: line.debitController,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'مدين', isDense: true, border: OutlineInputBorder()),
+              decoration: const InputDecoration(
+                labelText: 'مدين',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
               onChanged: (val) {
                 setState(() {
                   line.debit = double.tryParse(val);
                   if (line.debit != null && line.debit! > 0) {
-                     line.credit = 0;
-                     line.creditController.text = '';
+                    line.credit = 0;
+                    line.creditController.text = '';
                   }
                 });
               },
@@ -263,13 +446,17 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
             child: TextFormField(
               controller: line.creditController,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'دائن', isDense: true, border: OutlineInputBorder()),
+              decoration: const InputDecoration(
+                labelText: 'دائن',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
               onChanged: (val) {
                 setState(() {
                   line.credit = double.tryParse(val);
                   if (line.credit != null && line.credit! > 0) {
-                     line.debit = 0;
-                     line.debitController.text = '';
+                    line.debit = 0;
+                    line.debitController.text = '';
                   }
                 });
               },
@@ -280,14 +467,24 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
             flex: 2,
             child: DropdownButtonFormField<int>(
               value: line.costCenterId,
-              items: costCenters.map((c) => DropdownMenuItem<int>(
-                value: c['id'],
-                child: Text(c['name']),
-              )).toList(),
+              items: costCenters
+                  .map(
+                    (c) => DropdownMenuItem<int>(
+                      value: c['id'],
+                      child: Text(c['name']),
+                    ),
+                  )
+                  .toList(),
               onChanged: (val) {
-                setState(() { line.costCenterId = val; });
+                setState(() {
+                  line.costCenterId = val;
+                });
               },
-              decoration: const InputDecoration(labelText: 'مركز التكلفة', isDense: true, border: OutlineInputBorder()),
+              decoration: const InputDecoration(
+                labelText: 'مركز التكلفة',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
             ),
           ),
           const SizedBox(width: 8),
@@ -295,9 +492,15 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
             flex: 2,
             child: TextFormField(
               initialValue: line.description ?? '',
-              decoration: const InputDecoration(labelText: 'بيان السطر', isDense: true, border: OutlineInputBorder()),
+              decoration: const InputDecoration(
+                labelText: 'بيان السطر',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
               onChanged: (val) {
-                setState(() { line.description = val; });
+                setState(() {
+                  line.description = val;
+                });
               },
             ),
           ),
