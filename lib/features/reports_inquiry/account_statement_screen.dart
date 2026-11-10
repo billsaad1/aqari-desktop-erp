@@ -74,7 +74,9 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
   }) async {
     try {
       final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-      final currency = companyInfo?['default_currency']?.toString() ?? 'ريال';
+      final currency = PrintUtils.currencyInArabic(
+        companyInfo?['default_currency'],
+      );
       final pdf = pw.Document();
       final theme = await PrintUtils.loadArabicTheme();
       final debitNormal = accountType == 'Asset' || accountType == 'Expense';
@@ -99,12 +101,12 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
       pdf.addPage(
         pw.MultiPage(
           pageTheme: pw.PageTheme(
+            pageFormat: PdfPageFormat.a4,
+            textDirection: pw.TextDirection.rtl,
+            theme: theme,
             buildBackground: (pw.Context context) =>
                 PrintUtils.buildWatermark(companyInfo),
           ),
-          pageFormat: PdfPageFormat.a4,
-          textDirection: pw.TextDirection.rtl,
-          theme: theme,
           header: (_) => PrintUtils.buildHeader(companyInfo, true),
           footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
           build: (_) => [

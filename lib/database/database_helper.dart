@@ -80,7 +80,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 7,
+        version: 8,
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
         },
@@ -134,6 +134,18 @@ class DatabaseHelper {
       await db.execute(
         "UPDATE users SET must_change_password = 1 WHERE username = 'admin' AND password_hash = '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92';",
       );
+    }
+    if (oldVersion < 8) {
+      for (final column in [
+        'identity_issue_date',
+        'identity_source',
+        'profession',
+      ]) {
+        await _ensureColumn(db, 'owners', column, 'TEXT');
+        await _ensureColumn(db, 'tenants', column, 'TEXT');
+      }
+      await _ensureColumn(db, 'contracts', 'purpose', 'TEXT');
+      await _ensureColumn(db, 'contracts', 'electricity_reading', 'TEXT');
     }
   }
 
@@ -277,6 +289,9 @@ class DatabaseHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         identity_number TEXT,
+        identity_issue_date TEXT,
+        identity_source TEXT,
+        profession TEXT,
         mobile TEXT,
         iban TEXT,
         account_id INTEGER,
@@ -324,6 +339,9 @@ class DatabaseHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         identity_number TEXT,
+        identity_issue_date TEXT,
+        identity_source TEXT,
+        profession TEXT,
         mobile TEXT,
         account_id INTEGER,
         nationality_id INTEGER,
@@ -341,6 +359,8 @@ class DatabaseHelper {
         end_date TEXT NOT NULL,
         rent_amount REAL NOT NULL,
         payment_method TEXT,
+        purpose TEXT,
+        electricity_reading TEXT,
         status TEXT DEFAULT 'Active',
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (unit_id) REFERENCES units (id)

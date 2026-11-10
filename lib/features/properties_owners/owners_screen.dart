@@ -10,6 +10,8 @@ class OwnersScreen extends StatelessWidget {
     final nameController = TextEditingController();
     final mobileController = TextEditingController();
     final identityController = TextEditingController();
+    final identityIssueDateController = TextEditingController();
+    final identitySourceController = TextEditingController();
     final ibanController = TextEditingController();
     final commissionController = TextEditingController(text: '0.0');
 
@@ -36,44 +38,79 @@ class OwnersScreen extends StatelessWidget {
                   ),
                   TextFormField(
                     controller: identityController,
-                    decoration: const InputDecoration(labelText: 'رقم الهوية/السجل'),
+                    decoration: const InputDecoration(
+                      labelText: 'رقم الهوية/السجل',
+                    ),
+                  ),
+                  TextFormField(
+                    controller: identityIssueDateController,
+                    decoration: const InputDecoration(
+                      labelText: 'تاريخ إصدار الهوية',
+                    ),
+                  ),
+                  TextFormField(
+                    controller: identitySourceController,
+                    decoration: const InputDecoration(labelText: 'مصدر الهوية'),
                   ),
                   TextFormField(
                     controller: ibanController,
-                    decoration: const InputDecoration(labelText: 'رقم الآيبان (IBAN)'),
+                    decoration: const InputDecoration(
+                      labelText: 'رقم الآيبان (IBAN)',
+                    ),
                   ),
                   TextFormField(
                     controller: commissionController,
-                    decoration: const InputDecoration(labelText: 'نسبة العمولة (%)'),
+                    decoration: const InputDecoration(
+                      labelText: 'نسبة العمولة (%)',
+                    ),
                     keyboardType: TextInputType.number,
                     validator: (v) => v!.isEmpty ? 'مطلوب' : null,
                   ),
                   const SizedBox(height: 16),
-                  const Text('ملاحظة: سيتم إنشاء حساب فرعي للمالك تلقائياً في دليل الحسابات.', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  const Text(
+                    'ملاحظة: سيتم إنشاء حساب فرعي للمالك تلقائياً في دليل الحسابات.',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
                 ],
               ),
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('إلغاء')),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إلغاء'),
+            ),
             ElevatedButton(
               onPressed: () async {
                 if (formKey.currentState!.validate()) {
-                  final provider = Provider.of<PropertyProvider>(context, listen: false);
+                  final provider = Provider.of<PropertyProvider>(
+                    context,
+                    listen: false,
+                  );
                   try {
                     await provider.addOwner({
                       'name': nameController.text,
                       'mobile': mobileController.text,
                       'identity_number': identityController.text,
+                      'identity_issue_date': identityIssueDateController.text,
+                      'identity_source': identitySourceController.text,
                       'iban': ibanController.text,
-                      'commission_rate': double.tryParse(commissionController.text) ?? 0.0,
+                      'commission_rate':
+                          double.tryParse(commissionController.text) ?? 0.0,
                     });
                     if (context.mounted) {
                       Navigator.pop(context);
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تمت إضافة المالك وإنشاء الحساب بنجاح')));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('تمت إضافة المالك وإنشاء الحساب بنجاح'),
+                        ),
+                      );
                     }
                   } catch (e) {
-                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ: $e')));
+                    if (context.mounted)
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(SnackBar(content: Text('خطأ: $e')));
                   }
                 }
               },
@@ -89,7 +126,8 @@ class OwnersScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<PropertyProvider>(
       builder: (context, provider, child) {
-        if (provider.isLoading) return const Center(child: CircularProgressIndicator());
+        if (provider.isLoading)
+          return const Center(child: CircularProgressIndicator());
 
         return Padding(
           padding: const EdgeInsets.all(24.0),
@@ -99,7 +137,10 @@ class OwnersScreen extends StatelessWidget {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('إدارة الملاك', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'إدارة الملاك',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                  ),
                   ElevatedButton.icon(
                     onPressed: () => _showAddOwnerDialog(context),
                     icon: const Icon(Icons.add),
@@ -119,13 +160,15 @@ class OwnersScreen extends StatelessWidget {
                       DataColumn(label: Text('نسبة العمولة')),
                     ],
                     rows: provider.owners.map((owner) {
-                      return DataRow(cells: [
-                        DataCell(Text(owner['id'].toString())),
-                        DataCell(Text(owner['name'] ?? '')),
-                        DataCell(Text(owner['mobile'] ?? '')),
-                        DataCell(Text(owner['account_id']?.toString() ?? '')),
-                        DataCell(Text('${owner['commission_rate']} %')),
-                      ]);
+                      return DataRow(
+                        cells: [
+                          DataCell(Text(owner['id'].toString())),
+                          DataCell(Text(owner['name'] ?? '')),
+                          DataCell(Text(owner['mobile'] ?? '')),
+                          DataCell(Text(owner['account_id']?.toString() ?? '')),
+                          DataCell(Text('${owner['commission_rate']} %')),
+                        ],
+                      );
                     }).toList(),
                   ),
                 ),
