@@ -341,7 +341,7 @@ class LeaseContractPdf {
   );
 
   static pw.Widget _sectionTitle(String text) => pw.Container(
-    padding: const pw.EdgeInsets.only(bottom: 4),
+    padding: const pw.EdgeInsets.only(left: 2, right: 4, bottom: 4),
     decoration: const pw.BoxDecoration(
       border: pw.Border(
         bottom: pw.BorderSide(color: PrintUtils.brandEmerald, width: 1),
@@ -350,7 +350,8 @@ class LeaseContractPdf {
     child: pw.Text(
       text,
       textDirection: pw.TextDirection.rtl,
-      textAlign: pw.TextAlign.right,
+      textAlign: pw.TextAlign.start,
+      overflow: pw.TextOverflow.visible,
       style: pw.TextStyle(
         fontSize: 11.5,
         fontWeight: pw.FontWeight.bold,
@@ -435,35 +436,51 @@ class LeaseContractPdf {
     String label,
     String value, {
     pw.TextDirection? valueDirection,
-  }) => pw.Padding(
-    padding: const pw.EdgeInsets.symmetric(vertical: 1.2),
-    child: pw.Row(
-      crossAxisAlignment: pw.CrossAxisAlignment.start,
-      children: [
-        pw.SizedBox(
-          width: 112,
-          child: pw.Text(
-            label,
-            textDirection: pw.TextDirection.rtl,
-            textAlign: pw.TextAlign.right,
-            style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
-          ),
-        ),
-        pw.SizedBox(width: 7),
-        pw.Expanded(
-          child: pw.Text(
-            value,
-            textDirection: PrintUtils.resolveTextDirection(
-              value,
-              preferred: valueDirection,
+  }) {
+    final direction = PrintUtils.resolveTextDirection(
+      value,
+      preferred: valueDirection,
+    );
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 1.2),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: 112,
+            child: pw.Padding(
+              padding: const pw.EdgeInsets.only(left: 2, right: 4),
+              child: pw.Text(
+                label,
+                textDirection: pw.TextDirection.rtl,
+                textAlign: pw.TextAlign.start,
+                overflow: pw.TextOverflow.visible,
+                style: const pw.TextStyle(
+                  fontSize: 9,
+                  color: PdfColors.grey700,
+                ),
+              ),
             ),
-            textAlign: pw.TextAlign.right,
-            style: const pw.TextStyle(fontSize: 10, wordSpacing: 1.12),
           ),
-        ),
-      ],
-    ),
-  );
+          pw.SizedBox(width: 7),
+          pw.Expanded(
+            child: pw.Padding(
+              padding: const pw.EdgeInsets.symmetric(horizontal: 2),
+              child: pw.Text(
+                value,
+                textDirection: direction,
+                textAlign: direction == pw.TextDirection.rtl
+                    ? pw.TextAlign.start
+                    : pw.TextAlign.right,
+                overflow: pw.TextOverflow.visible,
+                style: const pw.TextStyle(fontSize: 10),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   static pw.Widget _numberedItem(int number, pw.Widget child) => pw.Padding(
     padding: const pw.EdgeInsets.symmetric(vertical: 1.5),
@@ -517,10 +534,18 @@ class LeaseContractPdf {
                 ),
               ),
               pw.SizedBox(width: 5),
-              pw.Text(
-                currency,
-                textDirection: pw.TextDirection.rtl,
-                style: const pw.TextStyle(fontSize: 9.5),
+              pw.Padding(
+                padding: const pw.EdgeInsets.symmetric(horizontal: 4),
+                child: pw.Text(
+                  currency,
+                  textDirection: pw.TextDirection.rtl,
+                  textAlign: pw.TextAlign.start,
+                  overflow: pw.TextOverflow.visible,
+                  style: pw.TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
               ),
             ],
           ),
@@ -530,7 +555,7 @@ class LeaseContractPdf {
   );
 
   static pw.Widget _clause(int number, String text) => pw.Padding(
-    padding: const pw.EdgeInsets.symmetric(vertical: 2.5),
+    padding: const pw.EdgeInsets.symmetric(vertical: 1.5),
     child: pw.Row(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
       children: [
@@ -550,14 +575,14 @@ class LeaseContractPdf {
         ),
         pw.SizedBox(width: 5),
         pw.Expanded(
-          child: pw.Text(
-            text,
-            textDirection: pw.TextDirection.rtl,
-            textAlign: pw.TextAlign.right,
-            style: const pw.TextStyle(
-              fontSize: 10,
-              lineSpacing: 3,
-              wordSpacing: 1.5,
+          child: pw.Padding(
+            padding: const pw.EdgeInsets.symmetric(horizontal: 1.5),
+            child: pw.Text(
+              text,
+              textDirection: pw.TextDirection.rtl,
+              textAlign: pw.TextAlign.start,
+              overflow: pw.TextOverflow.visible,
+              style: const pw.TextStyle(fontSize: 10, lineSpacing: 3),
             ),
           ),
         ),
