@@ -5,6 +5,7 @@ class User {
   final String fullName;
   final String role;
   final int? cashBoxAccountId;
+  final bool mustChangePassword;
 
   User({
     this.id,
@@ -13,6 +14,7 @@ class User {
     required this.fullName,
     required this.role,
     this.cashBoxAccountId,
+    this.mustChangePassword = false,
   });
 
   factory User.fromMap(Map<String, dynamic> map) {
@@ -23,6 +25,7 @@ class User {
       fullName: map['full_name'],
       role: map['role'],
       cashBoxAccountId: map['cash_box_account_id'],
+      mustChangePassword: (map['must_change_password'] as num?)?.toInt() == 1,
     );
   }
 
@@ -34,6 +37,7 @@ class User {
       'full_name': fullName,
       'role': role,
       'cash_box_account_id': cashBoxAccountId,
+      'must_change_password': mustChangePassword ? 1 : 0,
     };
   }
 }

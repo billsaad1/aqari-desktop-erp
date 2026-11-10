@@ -11,4 +11,6 @@ class NavigationProvider with ChangeNotifier {
       notifyListeners();
     }
   }
+
+  void reset() => setIndex(0);
 }

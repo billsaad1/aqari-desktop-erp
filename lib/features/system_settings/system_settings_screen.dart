@@ -1,10 +1,14 @@
-import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+import 'package:provider/provider.dart';
 import '../../database/database_helper.dart';
 import '../../core/crypto_utils.dart';
 import '../../models/company_info_model.dart';
+import '../../providers/auth_provider.dart';
+import '../../providers/navigation_provider.dart';
+import '../auth/login_screen.dart';
 
 class SystemSettingsScreen extends StatefulWidget {
   const SystemSettingsScreen({super.key});
@@ -13,7 +17,8 @@ class SystemSettingsScreen extends StatefulWidget {
   State<SystemSettingsScreen> createState() => _SystemSettingsScreenState();
 }
 
-class _SystemSettingsScreenState extends State<SystemSettingsScreen> with SingleTickerProviderStateMixin {
+class _SystemSettingsScreenState extends State<SystemSettingsScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -45,11 +50,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> with Single
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: const [
-              CompanyInfoTab(),
-              UsersTab(),
-              MaintenanceTab(),
-            ],
+            children: const [CompanyInfoTab(), UsersTab(), MaintenanceTab()],
           ),
         ),
       ],
@@ -90,6 +91,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   final _termsController = TextEditingController();
 
   final List<String> _currencies = [
+    'ريال يمني (YER)',
     'ريال سعودي (SAR)',
     'دولار أمريكي (USD)',
   ];
@@ -116,13 +118,15 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       _addressArController.text = _companyInfo!.addressAr ?? '';
       _addressEnController.text = _companyInfo!.addressEn ?? '';
       _taxNumberController.text = _companyInfo!.taxNumber ?? '';
-      _commercialRegisterController.text = _companyInfo!.commercialRegister ?? '';
+      _commercialRegisterController.text =
+          _companyInfo!.commercialRegister ?? '';
       _poBoxController.text = _companyInfo!.poBox ?? '';
       _telephoneController.text = _companyInfo!.telephone ?? '';
       _faxController.text = _companyInfo!.fax ?? '';
       _mobileController.text = _companyInfo!.mobile ?? '';
 
-      if (_companyInfo!.defaultCurrency != null && _companyInfo!.defaultCurrency!.isNotEmpty) {
+      if (_companyInfo!.defaultCurrency != null &&
+          _companyInfo!.defaultCurrency!.isNotEmpty) {
         if (_currencies.contains(_companyInfo!.defaultCurrency)) {
           _selectedCurrency = _companyInfo!.defaultCurrency;
         }
@@ -158,9 +162,9 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
 
       await DatabaseHelper.instance.updateCompanyInfo(updatedInfo.toMap());
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تم الحفظ بنجاح')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('تم الحفظ بنجاح')));
       }
     }
   }
@@ -198,13 +202,20 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
           children: [
             TextFormField(
               controller: _nameArController,
-              decoration: const InputDecoration(labelText: 'اسم المنشأة (عربي)', border: OutlineInputBorder()),
-              validator: (value) => value == null || value.isEmpty ? 'مطلوب' : null,
+              decoration: const InputDecoration(
+                labelText: 'اسم المنشأة (عربي)',
+                border: OutlineInputBorder(),
+              ),
+              validator: (value) =>
+                  value == null || value.isEmpty ? 'مطلوب' : null,
             ),
             const SizedBox(height: 16),
             TextFormField(
               controller: _nameEnController,
-              decoration: const InputDecoration(labelText: 'اسم المنشأة (إنجليزي)', border: OutlineInputBorder()),
+              decoration: const InputDecoration(
+                labelText: 'اسم المنشأة (إنجليزي)',
+                border: OutlineInputBorder(),
+              ),
             ),
             const SizedBox(height: 16),
             Row(
@@ -212,14 +223,20 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _activityArController,
-                    decoration: const InputDecoration(labelText: 'النشاط (عربي)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'النشاط (عربي)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: TextFormField(
                     controller: _activityEnController,
-                    decoration: const InputDecoration(labelText: 'النشاط (إنجليزي)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'النشاط (إنجليزي)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
               ],
@@ -230,14 +247,20 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _commercialRegisterController,
-                    decoration: const InputDecoration(labelText: 'السجل التجاري (C.R)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'السجل التجاري (C.R)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: TextFormField(
                     controller: _taxNumberController,
-                    decoration: const InputDecoration(labelText: 'الرقم الضريبي (VAT)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'الرقم الضريبي (VAT)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
               ],
@@ -248,14 +271,20 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _addressArController,
-                    decoration: const InputDecoration(labelText: 'العنوان (عربي)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'العنوان (عربي)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: TextFormField(
                     controller: _addressEnController,
-                    decoration: const InputDecoration(labelText: 'العنوان (إنجليزي)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'العنوان (إنجليزي)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
               ],
@@ -266,28 +295,40 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _poBoxController,
-                    decoration: const InputDecoration(labelText: 'ص.ب (P.O Box)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'ص.ب (P.O Box)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: TextFormField(
                     controller: _telephoneController,
-                    decoration: const InputDecoration(labelText: 'هاتف (Telephone)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'هاتف (Telephone)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: TextFormField(
                     controller: _faxController,
-                    decoration: const InputDecoration(labelText: 'فاكس (Fax)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'فاكس (Fax)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: TextFormField(
                     controller: _mobileController,
-                    decoration: const InputDecoration(labelText: 'جوال (Mobile)', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                      labelText: 'جوال (Mobile)',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
                 ),
               ],
@@ -295,8 +336,15 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
               value: _selectedCurrency,
-              decoration: const InputDecoration(labelText: 'العملة الافتراضية', border: OutlineInputBorder()),
-              items: _currencies.map((curr) => DropdownMenuItem(value: curr, child: Text(curr))).toList(),
+              decoration: const InputDecoration(
+                labelText: 'العملة الافتراضية',
+                border: OutlineInputBorder(),
+              ),
+              items: _currencies
+                  .map(
+                    (curr) => DropdownMenuItem(value: curr, child: Text(curr)),
+                  )
+                  .toList(),
               onChanged: (val) {
                 setState(() {
                   _selectedCurrency = val;
@@ -307,9 +355,10 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             TextFormField(
               controller: _logoPathController,
               decoration: const InputDecoration(
-                labelText: 'مسار الشعار (Logo Path - مثلاً C:\\images\\logo.png)',
+                labelText:
+                    'مسار الشعار (Logo Path - مثلاً C:\\images\\logo.png)',
                 border: OutlineInputBorder(),
-                hintText: 'مسار ملف الشعار في الجهاز'
+                hintText: 'مسار ملف الشعار في الجهاز',
               ),
             ),
             const SizedBox(height: 16),
@@ -317,15 +366,20 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
               controller: _termsController,
               decoration: const InputDecoration(
                 labelText: 'الشروط والأحكام الافتراضية لعقد الإيجار',
-                border: OutlineInputBorder()
+                border: OutlineInputBorder(),
               ),
               maxLines: 4,
             ),
             const SizedBox(height: 32),
             ElevatedButton(
               onPressed: _saveCompanyInfo,
-              style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
-              child: const Text('حفظ التعديلات', style: TextStyle(fontSize: 18)),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.all(16),
+              ),
+              child: const Text(
+                'حفظ التعديلات',
+                style: TextStyle(fontSize: 18),
+              ),
             ),
           ],
         ),
@@ -366,7 +420,12 @@ class _UsersTabState extends State<UsersTab> {
     final passwordController = TextEditingController();
     String selectedRole = 'DataEntry';
 
-    final List<String> roles = ['SuperAdmin', 'Admin', 'Accountant', 'DataEntry'];
+    final List<String> roles = [
+      'SuperAdmin',
+      'Admin',
+      'Accountant',
+      'DataEntry',
+    ];
     final Map<String, String> roleLabels = {
       'SuperAdmin': 'SuperAdmin (مدير نظام)',
       'Admin': 'Admin (مدير)',
@@ -388,17 +447,23 @@ class _UsersTabState extends State<UsersTab> {
                   children: [
                     TextFormField(
                       controller: fullNameController,
-                      decoration: const InputDecoration(labelText: 'الاسم الكامل'),
+                      decoration: const InputDecoration(
+                        labelText: 'الاسم الكامل',
+                      ),
                       validator: (v) => v!.isEmpty ? 'مطلوب' : null,
                     ),
                     TextFormField(
                       controller: usernameController,
-                      decoration: const InputDecoration(labelText: 'اسم المستخدم'),
+                      decoration: const InputDecoration(
+                        labelText: 'اسم المستخدم',
+                      ),
                       validator: (v) => v!.isEmpty ? 'مطلوب' : null,
                     ),
                     TextFormField(
                       controller: passwordController,
-                      decoration: const InputDecoration(labelText: 'كلمة المرور'),
+                      decoration: const InputDecoration(
+                        labelText: 'كلمة المرور',
+                      ),
                       obscureText: true,
                       validator: (v) => v!.isEmpty ? 'مطلوب' : null,
                     ),
@@ -431,7 +496,9 @@ class _UsersTabState extends State<UsersTab> {
                 ElevatedButton(
                   onPressed: () async {
                     if (formKey.currentState!.validate()) {
-                      final hashedPassword = CryptoUtils.hashPassword(passwordController.text);
+                      final hashedPassword = CryptoUtils.hashPassword(
+                        passwordController.text,
+                      );
                       await DatabaseHelper.instance.insertUser({
                         'full_name': fullNameController.text,
                         'username': usernameController.text,
@@ -448,7 +515,7 @@ class _UsersTabState extends State<UsersTab> {
                 ),
               ],
             );
-          }
+          },
         );
       },
     );
@@ -466,7 +533,10 @@ class _UsersTabState extends State<UsersTab> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('إدارة المستخدمين', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+              const Text(
+                'إدارة المستخدمين',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
               ElevatedButton.icon(
                 onPressed: _showAddUserDialog,
                 icon: const Icon(Icons.add),
@@ -485,12 +555,14 @@ class _UsersTabState extends State<UsersTab> {
                   DataColumn(label: Text('الدور')),
                 ],
                 rows: _users.map((user) {
-                  return DataRow(cells: [
-                    DataCell(Text(user['id'].toString())),
-                    DataCell(Text(user['full_name'])),
-                    DataCell(Text(user['username'])),
-                    DataCell(Text(user['role'])),
-                  ]);
+                  return DataRow(
+                    cells: [
+                      DataCell(Text(user['id'].toString())),
+                      DataCell(Text(user['full_name'])),
+                      DataCell(Text(user['username'])),
+                      DataCell(Text(user['role'])),
+                    ],
+                  );
                 }).toList(),
               ),
             ),
@@ -501,7 +573,6 @@ class _UsersTabState extends State<UsersTab> {
   }
 }
 
-
 class MaintenanceTab extends StatefulWidget {
   const MaintenanceTab({super.key});
 
@@ -511,6 +582,7 @@ class MaintenanceTab extends StatefulWidget {
 
 class _MaintenanceTabState extends State<MaintenanceTab> {
   String _backupPath = '';
+  final _backupPathController = TextEditingController();
   final _confirmController = TextEditingController();
 
   @override
@@ -521,8 +593,10 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
 
   Future<void> _loadBackupPath() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _backupPath = prefs.getString('backup_path') ?? '';
+      _backupPathController.text = _backupPath;
     });
   }
 
@@ -533,28 +607,44 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
       await prefs.setString('backup_path', selectedDirectory);
       setState(() {
         _backupPath = selectedDirectory;
+        _backupPathController.text = selectedDirectory;
       });
     }
   }
 
   Future<void> _performBackup() async {
     if (_backupPath.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الرجاء اختيار مجلد النسخ الاحتياطي أولاً')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('الرجاء اختيار مجلد النسخ الاحتياطي أولاً'),
+        ),
+      );
       return;
     }
 
     try {
-      final dbPath = await DatabaseHelper.instance.getDbPath();
-      final File dbFile = File(dbPath);
+      final timestamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '')
+          .replaceAll('-', '')
+          .replaceAll('.', '');
+      final backupFilePath = p.join(
+        _backupPath,
+        'aqari_erp_backup_$timestamp.db',
+      );
+      await DatabaseHelper.instance.backupToFile(backupFilePath);
 
-      if (!dbFile.existsSync()) throw Exception("ملف قاعدة البيانات غير موجود");
-
-      final String backupFilePath = '$_backupPath${Platform.pathSeparator}aqari_erp_backup.db';
-      await dbFile.copy(backupFilePath);
-
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم النسخ الاحتياطي بنجاح إلى: $backupFilePath')));
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('تم النسخ الاحتياطي بنجاح إلى: $backupFilePath'),
+          ),
+        );
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('فشل النسخ الاحتياطي: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('فشل النسخ الاحتياطي: $e')));
     }
   }
 
@@ -567,20 +657,31 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
         return StatefulBuilder(
           builder: (context, setStateDialog) {
             return AlertDialog(
-              title: const Text('تحذير خطير: تهيئة النظام', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              title: const Text(
+                'تحذير خطير: تهيئة النظام',
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('هذا الإجراء سيمسح جميع البيانات المدخلة في النظام (عقود، مستأجرين، سندات، الخ) وسيعيده كأنه جديد.'),
+                  const Text(
+                    'هذا الإجراء سيمسح جميع البيانات المدخلة في النظام (عقود، مستأجرين، سندات، الخ) وسيعيده كأنه جديد.',
+                  ),
                   const SizedBox(height: 16),
                   const Text('لتأكيد الحذف، اكتب كلمة "تأكيد" في الحقل أدناه:'),
                   const SizedBox(height: 8),
                   TextFormField(
                     controller: _confirmController,
-                    decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'تأكيد'),
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      hintText: 'تأكيد',
+                    ),
                     onChanged: (val) => setStateDialog(() {}),
-                  )
+                  ),
                 ],
               ),
               actions: [
@@ -589,39 +690,50 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
                   child: const Text('إلغاء'),
                 ),
                 ElevatedButton(
-                  onPressed: _confirmController.text == 'تأكيد' ? () async {
-                    Navigator.pop(context);
-                    await _performFactoryReset();
-                  } : null,
+                  onPressed: _confirmController.text == 'تأكيد'
+                      ? () async {
+                          Navigator.pop(context);
+                          await _performFactoryReset();
+                        }
+                      : null,
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                  child: const Text('مسح البيانات نهائياً', style: TextStyle(color: Colors.white)),
+                  child: const Text(
+                    'مسح البيانات نهائياً',
+                    style: TextStyle(color: Colors.white),
+                  ),
                 ),
               ],
             );
           },
         );
-      }
+      },
     );
   }
 
   Future<void> _performFactoryReset() async {
     try {
+      await Provider.of<AuthProvider>(context, listen: false).logout();
       await DatabaseHelper.instance.factoryReset();
       if (mounted) {
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('تم بنجاح'),
-            content: const Text('تمت تهيئة النظام بالكامل. يرجى إعادة تشغيل التطبيق.'),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context), child: const Text('حسناً'))
-            ]
-          )
+        Provider.of<NavigationProvider>(context, listen: false).reset();
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (_) => false,
         );
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('فشل تهيئة النظام: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('فشل تهيئة النظام: $e')));
     }
+  }
+
+  @override
+  void dispose() {
+    _backupPathController.dispose();
+    _confirmController.dispose();
+    super.dispose();
   }
 
   @override
@@ -631,14 +743,20 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('النسخ الاحتياطي المستمر', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text(
+            'نسخة احتياطية يدوية متحقق منها',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 16),
           Row(
             children: [
               Expanded(
                 child: TextFormField(
-                  decoration: const InputDecoration(labelText: 'مسار مجلد النسخ الاحتياطي', border: OutlineInputBorder()),
-                  initialValue: _backupPath,
+                  decoration: const InputDecoration(
+                    labelText: 'مسار مجلد النسخ الاحتياطي',
+                    border: OutlineInputBorder(),
+                  ),
+                  controller: _backupPathController,
                   readOnly: true,
                 ),
               ),
@@ -647,7 +765,9 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
                 onPressed: _selectBackupFolder,
                 icon: const Icon(Icons.folder),
                 label: const Text('تحديد المجلد'),
-                style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.all(16),
+                ),
               ),
             ],
           ),
@@ -656,20 +776,38 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
             onPressed: _performBackup,
             icon: const Icon(Icons.backup),
             label: const Text('نسخ احتياطي الآن'),
-            style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16), backgroundColor: Colors.green),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.all(16),
+              backgroundColor: Colors.green,
+            ),
           ),
           const SizedBox(height: 48),
           const Divider(),
           const SizedBox(height: 24),
-          const Text('تهيئة وتصفير النظام (Factory Reset)', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.red)),
+          const Text(
+            'تهيئة وتصفير النظام (Factory Reset)',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              color: Colors.red,
+            ),
+          ),
           const SizedBox(height: 8),
-          const Text('احذر: هذه العملية ستمسح جميع قواعد البيانات الخاصة بالمؤسسة.'),
+          const Text(
+            'احذر: هذه العملية ستمسح جميع قواعد البيانات الخاصة بالمؤسسة.',
+          ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
             onPressed: _showFactoryResetDialog,
             icon: const Icon(Icons.warning, color: Colors.white),
-            label: const Text('تصفير النظام بالكامل', style: TextStyle(color: Colors.white)),
-            style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16), backgroundColor: Colors.red),
+            label: const Text(
+              'تصفير النظام بالكامل',
+              style: TextStyle(color: Colors.white),
+            ),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.all(16),
+              backgroundColor: Colors.red,
+            ),
           ),
         ],
       ),

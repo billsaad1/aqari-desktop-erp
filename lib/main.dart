@@ -41,10 +41,7 @@ class ERPApp extends StatelessWidget {
     return MaterialApp(
       title: 'مؤسسة عبدالله النقيب التجارية - ERP',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-        fontFamily: 'Tajawal', // Will add font later
-      ),
+      theme: ThemeData(primarySwatch: Colors.blue, fontFamily: 'Cairo'),
       // RTL Support for Arabic
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,

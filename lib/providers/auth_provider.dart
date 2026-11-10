@@ -24,9 +24,6 @@ class AuthProvider with ChangeNotifier {
       if (userMap != null) {
         final user = User.fromMap(userMap);
         if (CryptoUtils.verifyPassword(password, user.passwordHash)) {
-          _currentUser = user;
-
-          // Log audit
           await DatabaseHelper.instance.insertAuditLog({
             'user_id': user.id,
             'action': 'LOGIN',
@@ -34,14 +31,26 @@ class AuthProvider with ChangeNotifier {
             'timestamp': DateTime.now().toIso8601String(),
           });
 
+          if (CryptoUtils.isLegacyHash(user.passwordHash)) {
+            await DatabaseHelper.instance.updateUserPassword(
+              user.id!,
+              CryptoUtils.hashPassword(password),
+              mustChangePassword: user.mustChangePassword,
+            );
+          }
+
+          _currentUser = user;
+
           _isLoading = false;
           notifyListeners();
           return true;
         }
       }
       _errorMessage = 'اسم المستخدم أو كلمة المرور غير صحيحة';
-    } catch (e) {
-      _errorMessage = 'حدث خطأ أثناء تسجيل الدخول: \$e';
+    } catch (_) {
+      _currentUser = null;
+      _errorMessage =
+          'تعذر إتمام تسجيل الدخول. تحقق من قاعدة البيانات أو تواصل مع المسؤول.';
     }
 
     _isLoading = false;
@@ -50,15 +59,41 @@ class AuthProvider with ChangeNotifier {
   }
 
   Future<void> logout() async {
-    if (_currentUser != null) {
-      await DatabaseHelper.instance.insertAuditLog({
-        'user_id': _currentUser!.id,
-        'action': 'LOGOUT',
-        'details': 'تم تسجيل الخروج',
-        'timestamp': DateTime.now().toIso8601String(),
-      });
-    }
+    final user = _currentUser;
     _currentUser = null;
+    notifyListeners();
+    if (user != null) {
+      try {
+        await DatabaseHelper.instance.insertAuditLog({
+          'user_id': user.id,
+          'action': 'LOGOUT',
+          'details': 'تم تسجيل الخروج',
+          'timestamp': DateTime.now().toIso8601String(),
+        });
+      } catch (_) {
+        // Always clear the local session even when audit storage is unavailable.
+      }
+    }
+  }
+
+  Future<void> changePassword(String newPassword) async {
+    final user = _currentUser;
+    if (user == null || user.id == null)
+      throw StateError('لا توجد جلسة مستخدم صالحة');
+    if (newPassword.length < 12)
+      throw ArgumentError('كلمة المرور يجب ألا تقل عن 12 حرفاً');
+
+    final passwordHash = CryptoUtils.hashPassword(newPassword);
+    await DatabaseHelper.instance.updateUserPassword(user.id!, passwordHash);
+    _currentUser = User(
+      id: user.id,
+      username: user.username,
+      passwordHash: passwordHash,
+      fullName: user.fullName,
+      role: user.role,
+      cashBoxAccountId: user.cashBoxAccountId,
+      mustChangePassword: false,
+    );
     notifyListeners();
   }
 }

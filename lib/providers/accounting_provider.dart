@@ -5,19 +5,26 @@ class AccountingProvider with ChangeNotifier {
   List<Map<String, dynamic>> _accounts = [];
   List<Map<String, dynamic>> _costCenters = [];
   bool _isLoading = false;
+  String? _errorMessage;
 
   List<Map<String, dynamic>> get accounts => _accounts;
   List<Map<String, dynamic>> get costCenters => _costCenters;
   bool get isLoading => _isLoading;
+  String? get errorMessage => _errorMessage;
 
   Future<void> loadAccounts() async {
     _isLoading = true;
     notifyListeners();
 
-    _accounts = await DatabaseHelper.instance.getAllAccounts();
-
-    _isLoading = false;
-    notifyListeners();
+    try {
+      _accounts = await DatabaseHelper.instance.getAllAccounts();
+      _errorMessage = null;
+    } catch (e) {
+      _errorMessage = 'تعذر تحميل الحسابات: $e';
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
   }
 
   Future<void> loadCostCenters() async {
@@ -30,13 +37,33 @@ class AccountingProvider with ChangeNotifier {
     await loadAccounts();
   }
 
-  Future<void> saveJournalEntry(Map<String, dynamic> header, List<Map<String, dynamic>> lines) async {
-    await DatabaseHelper.instance.insertJournalEntryWithLines(header, lines);
+  Future<int> saveJournalEntry(
+    Map<String, dynamic> header,
+    List<Map<String, dynamic>> lines,
+  ) async {
+    final journalId = await DatabaseHelper.instance.insertJournalEntryWithLines(
+      header,
+      lines,
+    );
     await loadAccounts(); // Refresh balances
+    return journalId;
   }
 
-  Future<void> saveGeneralVoucher(Map<String, dynamic> voucher, int cashAccountId, int oppositeAccountId, int? costCenterId, String voucherType) async {
-    await DatabaseHelper.instance.insertGeneralVoucher(voucher, cashAccountId, oppositeAccountId, costCenterId, voucherType);
+  Future<int> saveGeneralVoucher(
+    Map<String, dynamic> voucher,
+    int cashAccountId,
+    int oppositeAccountId,
+    int? costCenterId,
+    String voucherType,
+  ) async {
+    final voucherId = await DatabaseHelper.instance.insertGeneralVoucher(
+      voucher,
+      cashAccountId,
+      oppositeAccountId,
+      costCenterId,
+      voucherType,
+    );
     await loadAccounts(); // Refresh balances
+    return voucherId;
   }
 }

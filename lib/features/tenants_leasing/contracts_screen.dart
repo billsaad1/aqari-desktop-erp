@@ -1,6 +1,4 @@
 import "../../core/print_utils.dart";
-import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
@@ -9,8 +7,6 @@ import '../../providers/property_provider.dart';
 import '../../database/database_helper.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart';
-import 'package:flutter/services.dart' show rootBundle;
 
 class ContractsScreen extends StatefulWidget {
   const ContractsScreen({super.key});
@@ -24,9 +20,16 @@ class _ContractsScreenState extends State<ContractsScreen> {
 
   int? _selectedTenantId;
   int? _selectedUnitId;
+  bool _isSavingContract = false;
 
-  final _startDateController = TextEditingController(text: DateFormat('yyyy-MM-dd').format(DateTime.now()));
-  final _endDateController = TextEditingController(text: DateFormat('yyyy-MM-dd').format(DateTime.now().add(const Duration(days: 365))));
+  final _startDateController = TextEditingController(
+    text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
+  );
+  final _endDateController = TextEditingController(
+    text: DateFormat(
+      'yyyy-MM-dd',
+    ).format(DateTime.now().add(const Duration(days: 365))),
+  );
   final _totalRentController = TextEditingController();
 
   String _paymentMethod = 'شهري';
@@ -37,8 +40,12 @@ class _ContractsScreenState extends State<ContractsScreen> {
   List<TextEditingController> _instDateControllers = [];
 
   void _disposeInstallmentControllers() {
-    for (var c in _instAmountControllers) { c.dispose(); }
-    for (var c in _instDateControllers) { c.dispose(); }
+    for (var c in _instAmountControllers) {
+      c.dispose();
+    }
+    for (var c in _instDateControllers) {
+      c.dispose();
+    }
     _instAmountControllers.clear();
     _instDateControllers.clear();
   }
@@ -61,7 +68,9 @@ class _ContractsScreenState extends State<ContractsScreen> {
         'status': 'Unpaid',
       });
       _instAmountControllers.add(TextEditingController(text: '0.0'));
-      _instDateControllers.add(TextEditingController(text: _startDateController.text));
+      _instDateControllers.add(
+        TextEditingController(text: _startDateController.text),
+      );
     });
   }
 
@@ -75,17 +84,69 @@ class _ContractsScreenState extends State<ContractsScreen> {
     });
   }
 
+  Future<void> _pickContractDate(bool start) async {
+    final controller = start ? _startDateController : _endDateController;
+    final current = DateTime.tryParse(controller.text) ?? DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: current,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      controller.text = DateFormat('yyyy-MM-dd').format(picked);
+      if (start) {
+        final currentEnd = DateTime.tryParse(_endDateController.text);
+        if (currentEnd == null || picked.isAfter(currentEnd))
+          _endDateController.text = controller.text;
+      }
+    });
+  }
+
+  Future<void> _pickInstallmentDate(int index) async {
+    final start =
+        DateTime.tryParse(_startDateController.text) ?? DateTime(2000);
+    final end = DateTime.tryParse(_endDateController.text) ?? DateTime(2100);
+    final current =
+        DateTime.tryParse(_instDateControllers[index].text) ?? start;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: current.isBefore(start)
+          ? start
+          : current.isAfter(end)
+          ? end
+          : current,
+      firstDate: start,
+      lastDate: end.isBefore(start) ? start : end,
+    );
+    if (picked != null && mounted) {
+      setState(() {
+        final value = DateFormat('yyyy-MM-dd').format(picked);
+        _instDateControllers[index].text = value;
+        _generatedInstallments[index]['due_date'] = value;
+      });
+    }
+  }
+
   void _generateInstallments() {
     if (_totalRentController.text.isEmpty) return;
 
     double totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
     if (totalRent <= 0) return;
 
-    DateTime startDate = DateFormat('yyyy-MM-dd').parse(_startDateController.text);
-    DateTime endDate = DateFormat('yyyy-MM-dd').parse(_endDateController.text).add(const Duration(days: 1));
-
-    int monthsDifference = (endDate.year - startDate.year) * 12 + endDate.month - startDate.month;
-    if (monthsDifference <= 0) monthsDifference = 12; // fallback
+    final startDate = DateTime.tryParse(_startDateController.text);
+    final endDate = DateTime.tryParse(_endDateController.text);
+    if (startDate == null || endDate == null || startDate.isAfter(endDate)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تاريخ بداية أو نهاية العقد غير صحيح')),
+      );
+      return;
+    }
+    final monthsDifference =
+        ((endDate.year - startDate.year) * 12 + endDate.month - startDate.month)
+            .clamp(1, 600)
+            .toInt();
 
     int numInstallments = 1;
     int monthsPerInstallment = 12;
@@ -116,18 +177,24 @@ class _ContractsScreenState extends State<ContractsScreen> {
         break;
     }
 
-    double amountPerInstallment = double.parse((totalRent / numInstallments).toStringAsFixed(2));
+    final amountPerInstallment = double.parse(
+      (totalRent / numInstallments).toStringAsFixed(2),
+    );
 
     // Adjust last installment to account for rounding issues
-    double totalCalculated = amountPerInstallment * (numInstallments - 1);
-    double lastInstallmentAmount = double.parse((totalRent - totalCalculated).toStringAsFixed(2));
+    final totalCalculated = amountPerInstallment * (numInstallments - 1);
+    final lastInstallmentAmount = double.parse(
+      (totalRent - totalCalculated).toStringAsFixed(2),
+    );
 
     List<Map<String, dynamic>> newInstallments = [];
     _disposeInstallmentControllers(); // Clear old controllers
 
     for (int i = 0; i < numInstallments; i++) {
-      DateTime dueDate = DateTime(startDate.year, startDate.month + (i * monthsPerInstallment), startDate.day);
-      double currentAmount = (i == numInstallments - 1) ? lastInstallmentAmount : amountPerInstallment;
+      final dueDate = _addMonthsClamped(startDate, i * monthsPerInstallment);
+      double currentAmount = (i == numInstallments - 1)
+          ? lastInstallmentAmount
+          : amountPerInstallment;
 
       String dateStr = DateFormat('yyyy-MM-dd').format(dueDate);
 
@@ -138,7 +205,9 @@ class _ContractsScreenState extends State<ContractsScreen> {
         'status': 'Unpaid',
       });
 
-      _instAmountControllers.add(TextEditingController(text: currentAmount.toString()));
+      _instAmountControllers.add(
+        TextEditingController(text: currentAmount.toString()),
+      );
       _instDateControllers.add(TextEditingController(text: dateStr));
     }
 
@@ -147,19 +216,61 @@ class _ContractsScreenState extends State<ContractsScreen> {
     });
   }
 
+  DateTime _addMonthsClamped(DateTime date, int months) {
+    final firstOfMonth = DateTime(date.year, date.month + months, 1);
+    final lastDay = DateTime(firstOfMonth.year, firstOfMonth.month + 1, 0).day;
+    return DateTime(
+      firstOfMonth.year,
+      firstOfMonth.month,
+      date.day > lastDay ? lastDay : date.day,
+    );
+  }
+
   void _saveContract() async {
-    if (_formKey.currentState!.validate() && _selectedTenantId != null && _selectedUnitId != null) {
+    if (_isSavingContract) return;
+    if (_formKey.currentState!.validate() &&
+        _selectedTenantId != null &&
+        _selectedUnitId != null) {
       if (_generatedInstallments.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الرجاء توليد الأقساط أولاً')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('الرجاء توليد الأقساط أولاً')),
+        );
         return;
       }
 
-      double totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
-      double sumInstallments = _generatedInstallments.fold(0.0, (sum, item) => sum + (item['amount'] as double));
+      final totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
+      final startDate = DateTime.tryParse(_startDateController.text);
+      final endDate = DateTime.tryParse(_endDateController.text);
+      final sumInstallments = _generatedInstallments.fold<double>(
+        0,
+        (sum, item) => sum + ((item['amount'] as num?)?.toDouble() ?? 0),
+      );
+      final datesValid =
+          startDate != null &&
+          endDate != null &&
+          !startDate.isAfter(endDate) &&
+          _generatedInstallments.every((item) {
+            final due = DateTime.tryParse(item['due_date']?.toString() ?? '');
+            return (item['amount'] as num? ?? 0) > 0 &&
+                due != null &&
+                !due.isBefore(startDate) &&
+                !due.isAfter(endDate);
+          });
 
-      // Allow minor floating point rounding differences (e.g., 0.01)
-      if ((totalRent - sumInstallments).abs() > 0.1) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('إجمالي مبلغ الأقساط (${sumInstallments.toStringAsFixed(2)}) لا يتطابق مع القيمة الإجمالية للعقد (${totalRent.toStringAsFixed(2)})')));
+      if (!datesValid) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تحقق من تواريخ الأقساط والمبالغ')),
+        );
+        return;
+      }
+      if ((totalRent * 100).round() != (sumInstallments * 100).round()) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'إجمالي مبلغ الأقساط (${sumInstallments.toStringAsFixed(2)}) لا يتطابق مع القيمة الإجمالية للعقد (${totalRent.toStringAsFixed(2)})',
+            ),
+          ),
+        );
         return;
       }
 
@@ -173,11 +284,20 @@ class _ContractsScreenState extends State<ContractsScreen> {
         'status': 'Active',
       };
 
+      setState(() => _isSavingContract = true);
       try {
-        await Provider.of<LeasingProvider>(context, listen: false).addContract(contract, _generatedInstallments);
+        final contractId = await Provider.of<LeasingProvider>(
+          context,
+          listen: false,
+        ).addContract(contract, _generatedInstallments);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ العقد وتحديث حالة الوحدة بنجاح')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('تم حفظ العقد رقم $contractId وتحديث حالة الوحدة'),
+            ),
+          );
           // Reset form
+          _disposeInstallmentControllers();
           setState(() {
             _selectedTenantId = null;
             _selectedUnitId = null;
@@ -186,10 +306,17 @@ class _ContractsScreenState extends State<ContractsScreen> {
           });
         }
       } catch (e) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ: $e')));
+        if (mounted)
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('خطأ: $e')));
+      } finally {
+        if (mounted) setState(() => _isSavingContract = false);
       }
     } else {
-       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الرجاء تعبئة جميع الحقول')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('الرجاء تعبئة جميع الحقول')));
     }
   }
 
@@ -215,38 +342,66 @@ class _ContractsScreenState extends State<ContractsScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        const Text('إنشاء عقد جديد', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                        const Text(
+                          'إنشاء عقد جديد',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                         const SizedBox(height: 16),
                         DropdownButtonFormField<int>(
                           value: _selectedTenantId,
-                          items: leasingProv.tenants.map((t) => DropdownMenuItem<int>(
-                            value: t['id'],
-                            child: Text(t['name']),
-                          )).toList(),
-                          onChanged: (val) => setState(() => _selectedTenantId = val),
-                          decoration: const InputDecoration(labelText: 'المستأجر', border: OutlineInputBorder()),
+                          items: leasingProv.tenants
+                              .map(
+                                (t) => DropdownMenuItem<int>(
+                                  value: t['id'],
+                                  child: Text(t['name']),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (val) =>
+                              setState(() => _selectedTenantId = val),
+                          decoration: const InputDecoration(
+                            labelText: 'المستأجر',
+                            border: OutlineInputBorder(),
+                          ),
                         ),
                         const SizedBox(height: 16),
                         DropdownButtonFormField<int>(
                           value: _selectedUnitId,
                           items: leasingProv.vacantUnits.map((u) {
-                            final propName = propProv.properties.firstWhere((p) => p['id'] == u['property_id'], orElse: () => {'name': ''})['name'];
+                            final propName = propProv.properties.firstWhere(
+                              (p) => p['id'] == u['property_id'],
+                              orElse: () => {'name': ''},
+                            )['name'];
                             return DropdownMenuItem<int>(
                               value: u['id'],
-                              child: Text('عقار: $propName - وحدة: ${u['unit_number']}'),
+                              child: Text(
+                                'عقار: $propName - وحدة: ${u['unit_number']}',
+                              ),
                             );
                           }).toList(),
                           onChanged: (val) {
                             setState(() {
                               _selectedUnitId = val;
-                              // Auto-fill rent if a unit is selected
-                              final unit = leasingProv.vacantUnits.firstWhere((u) => u['id'] == val);
-                              if (unit['default_rent'] != null) {
-                                _totalRentController.text = unit['default_rent'].toString();
+                              if (val == null) {
+                                _totalRentController.clear();
+                              } else {
+                                final unit = leasingProv.vacantUnits.firstWhere(
+                                  (u) => u['id'] == val,
+                                );
+                                if (unit['default_rent'] != null) {
+                                  _totalRentController.text =
+                                      unit['default_rent'].toString();
+                                }
                               }
                             });
                           },
-                          decoration: const InputDecoration(labelText: 'الوحدة الشاغرة', border: OutlineInputBorder()),
+                          decoration: const InputDecoration(
+                            labelText: 'الوحدة الشاغرة',
+                            border: OutlineInputBorder(),
+                          ),
                         ),
                         const SizedBox(height: 16),
                         Row(
@@ -254,16 +409,24 @@ class _ContractsScreenState extends State<ContractsScreen> {
                             Expanded(
                               child: TextFormField(
                                 controller: _startDateController,
-                                decoration: const InputDecoration(labelText: 'بداية العقد', border: OutlineInputBorder()),
+                                decoration: const InputDecoration(
+                                  labelText: 'بداية العقد',
+                                  border: OutlineInputBorder(),
+                                ),
                                 readOnly: true,
+                                onTap: () => _pickContractDate(true),
                               ),
                             ),
                             const SizedBox(width: 16),
                             Expanded(
                               child: TextFormField(
                                 controller: _endDateController,
-                                decoration: const InputDecoration(labelText: 'نهاية العقد', border: OutlineInputBorder()),
+                                decoration: const InputDecoration(
+                                  labelText: 'نهاية العقد',
+                                  border: OutlineInputBorder(),
+                                ),
                                 readOnly: true,
+                                onTap: () => _pickContractDate(false),
                               ),
                             ),
                           ],
@@ -272,18 +435,41 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         TextFormField(
                           controller: _totalRentController,
                           keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(labelText: 'القيمة الإجمالية للعقد', border: OutlineInputBorder()),
-                          validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+                          decoration: const InputDecoration(
+                            labelText: 'القيمة الإجمالية للعقد',
+                            border: OutlineInputBorder(),
+                          ),
+                          validator: (v) {
+                            final value = double.tryParse(v ?? '');
+                            return value == null || value <= 0
+                                ? 'أدخل قيمة عقد موجبة'
+                                : null;
+                          },
                         ),
                         const SizedBox(height: 16),
                         DropdownButtonFormField<String>(
                           value: _paymentMethod,
-                          items: ['شهري', 'ربع سنوي', 'نصف سنوي', 'سنوي', 'دفعة واحدة'].map((m) => DropdownMenuItem(
-                            value: m,
-                            child: Text(m),
-                          )).toList(),
-                          onChanged: (val) => setState(() => _paymentMethod = val!),
-                          decoration: const InputDecoration(labelText: 'طريقة الدفع', border: OutlineInputBorder()),
+                          items:
+                              [
+                                    'شهري',
+                                    'ربع سنوي',
+                                    'نصف سنوي',
+                                    'سنوي',
+                                    'دفعة واحدة',
+                                  ]
+                                  .map(
+                                    (m) => DropdownMenuItem(
+                                      value: m,
+                                      child: Text(m),
+                                    ),
+                                  )
+                                  .toList(),
+                          onChanged: (val) =>
+                              setState(() => _paymentMethod = val!),
+                          decoration: const InputDecoration(
+                            labelText: 'طريقة الدفع',
+                            border: OutlineInputBorder(),
+                          ),
                         ),
                         const SizedBox(height: 24),
                         ElevatedButton(
@@ -305,10 +491,19 @@ class _ContractsScreenState extends State<ContractsScreen> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('جدول الدفعات (الأقساط)', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                        const Text(
+                          'جدول الدفعات (الأقساط)',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                         if (_generatedInstallments.isNotEmpty)
                           IconButton(
-                            icon: const Icon(Icons.add_circle, color: Colors.blue),
+                            icon: const Icon(
+                              Icons.add_circle,
+                              color: Colors.blue,
+                            ),
                             tooltip: 'إضافة دفعة جديدة يدوياً',
                             onPressed: _addManualInstallment,
                           ),
@@ -317,41 +512,68 @@ class _ContractsScreenState extends State<ContractsScreen> {
                     const SizedBox(height: 16),
                     Expanded(
                       child: Container(
-                        decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300)),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey.shade300),
+                        ),
                         child: _generatedInstallments.isEmpty
-                            ? const Center(child: Text('لم يتم توليد الأقساط بعد'))
+                            ? const Center(
+                                child: Text('لم يتم توليد الأقساط بعد'),
+                              )
                             : ListView.builder(
                                 itemCount: _generatedInstallments.length,
                                 itemBuilder: (context, index) {
                                   return Card(
-                                    margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
                                     child: Padding(
                                       padding: const EdgeInsets.all(8.0),
                                       child: Row(
                                         children: [
-                                          CircleAvatar(child: Text('${index + 1}')),
+                                          CircleAvatar(
+                                            child: Text('${index + 1}'),
+                                          ),
                                           const SizedBox(width: 16),
                                           Expanded(
                                             child: TextFormField(
-                                              controller: _instDateControllers[index],
-                                              decoration: const InputDecoration(labelText: 'تاريخ الاستحقاق', isDense: true),
-                                              onChanged: (val) => _generatedInstallments[index]['due_date'] = val,
+                                              controller:
+                                                  _instDateControllers[index],
+                                              decoration: const InputDecoration(
+                                                labelText: 'تاريخ الاستحقاق',
+                                                isDense: true,
+                                              ),
+                                              readOnly: true,
+                                              onTap: () =>
+                                                  _pickInstallmentDate(index),
                                             ),
                                           ),
                                           const SizedBox(width: 16),
                                           Expanded(
                                             child: TextFormField(
-                                              controller: _instAmountControllers[index],
-                                              keyboardType: TextInputType.number,
-                                              decoration: const InputDecoration(labelText: 'المبلغ', isDense: true),
-                                              onChanged: (val) => _generatedInstallments[index]['amount'] = double.tryParse(val) ?? 0.0,
+                                              controller:
+                                                  _instAmountControllers[index],
+                                              keyboardType:
+                                                  TextInputType.number,
+                                              decoration: const InputDecoration(
+                                                labelText: 'المبلغ',
+                                                isDense: true,
+                                              ),
+                                              onChanged: (val) =>
+                                                  _generatedInstallments[index]['amount'] =
+                                                      double.tryParse(val) ??
+                                                      0.0,
                                             ),
                                           ),
                                           IconButton(
-                                            icon: const Icon(Icons.remove_circle, color: Colors.red),
+                                            icon: const Icon(
+                                              Icons.remove_circle,
+                                              color: Colors.red,
+                                            ),
                                             tooltip: 'حذف',
-                                            onPressed: () => _removeManualInstallment(index),
-                                          )
+                                            onPressed: () =>
+                                                _removeManualInstallment(index),
+                                          ),
                                         ],
                                       ),
                                     ),
@@ -362,42 +584,86 @@ class _ContractsScreenState extends State<ContractsScreen> {
                     ),
                     const SizedBox(height: 16),
                     ElevatedButton(
-                      onPressed: _generatedInstallments.isNotEmpty ? _saveContract : null,
+                      onPressed:
+                          _generatedInstallments.isNotEmpty &&
+                              !_isSavingContract
+                          ? _saveContract
+                          : null,
                       style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.all(16),
                         backgroundColor: Colors.green,
                       ),
-                      child: const Text('حفظ العقد واعتماد الأقساط', style: TextStyle(fontSize: 18)),
+                      child: const Text(
+                        'حفظ العقد واعتماد الأقساط',
+                        style: TextStyle(fontSize: 18),
+                      ),
                     ),
                     const SizedBox(height: 32),
                     const Divider(),
-                    const Text('إدارة العقود الحالية', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const Text(
+                      'إدارة العقود الحالية',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     const SizedBox(height: 16),
                     Expanded(
                       child: ListView.builder(
                         itemCount: leasingProv.contracts.length,
                         itemBuilder: (context, index) {
                           final contract = leasingProv.contracts[index];
-                          final tenantName = leasingProv.tenants.firstWhere((t) => t['id'] == contract['tenant_id'], orElse: () => {'name': 'غير معروف'})['name'];
+                          final tenantName = leasingProv.tenants.firstWhere(
+                            (t) => t['id'] == contract['tenant_id'],
+                            orElse: () => {'name': 'غير معروف'},
+                          )['name'];
                           return Card(
                             child: InkWell(
-                              onTap: () => _showContractDetailsDialog(contract, tenantName),
+                              onTap: () => _showContractDetailsDialog(
+                                contract,
+                                tenantName,
+                              ),
                               child: ListTile(
-                                title: Text('عقد رقم: ${contract['id']} - المستأجر: $tenantName'),
-                                subtitle: Text('الحالة: ${contract['status']} | الإجمالي: ${contract['rent_amount']}'),
+                                title: Text(
+                                  'عقد رقم: ${contract['id']} - المستأجر: $tenantName',
+                                ),
+                                subtitle: Text(
+                                  'الحالة: ${contract['status']} | الإجمالي: ${contract['rent_amount']}',
+                                ),
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     IconButton(
-                                      icon: const Icon(Icons.print, color: Colors.blue),
+                                      icon: const Icon(
+                                        Icons.print,
+                                        color: Colors.blue,
+                                      ),
                                       tooltip: 'طباعة العقد (PDF)',
-                                      onPressed: () => _printContract(contract),
+                                      onPressed: () => _printContract(
+                                        contract,
+                                        saveAsPdf: false,
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.picture_as_pdf,
+                                        color: Colors.deepOrange,
+                                      ),
+                                      tooltip: 'حفظ العقد PDF',
+                                      onPressed: () => _printContract(
+                                        contract,
+                                        saveAsPdf: true,
+                                      ),
                                     ),
                                     if (contract['status'] == 'Active')
                                       IconButton(
-                                        icon: const Icon(Icons.cancel, color: Colors.red),
+                                        icon: const Icon(
+                                          Icons.cancel,
+                                          color: Colors.red,
+                                        ),
                                         tooltip: 'إلغاء العقد',
-                                        onPressed: () => _cancelContract(contract['id']),
+                                        onPressed: () =>
+                                            _cancelContract(contract['id']),
                                       ),
                                   ],
                                 ),
@@ -417,9 +683,16 @@ class _ContractsScreenState extends State<ContractsScreen> {
     );
   }
 
-  void _showContractDetailsDialog(Map<String, dynamic> contract, String tenantName) async {
+  void _showContractDetailsDialog(
+    Map<String, dynamic> contract,
+    String tenantName,
+  ) async {
     final db = await DatabaseHelper.instance.database;
-    final installments = await db.query('contract_installments', where: 'contract_id = ?', whereArgs: [contract['id']]);
+    final installments = await db.query(
+      'contract_installments',
+      where: 'contract_id = ?',
+      whereArgs: [contract['id']],
+    );
 
     if (!mounted) return;
 
@@ -434,24 +707,37 @@ class _ContractsScreenState extends State<ContractsScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('المستأجر: $tenantName', style: const TextStyle(fontWeight: FontWeight.bold)),
-                Text('المدة: من ${contract['start_date']} إلى ${contract['end_date']}'),
+                Text(
+                  'المستأجر: $tenantName',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  'المدة: من ${contract['start_date']} إلى ${contract['end_date']}',
+                ),
                 Text('طريقة الدفع: ${contract['payment_method']}'),
                 Text('الإجمالي: ${contract['rent_amount']} ريال'),
                 const Divider(),
-                const Text('الأقساط:', style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text(
+                  'الأقساط:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
                 Expanded(
                   child: ListView.builder(
                     itemCount: installments.length,
                     itemBuilder: (context, idx) {
                       final inst = installments[idx];
                       return ListTile(
-                        leading: CircleAvatar(child: Text('${idx+1}')),
+                        leading: CircleAvatar(child: Text('${idx + 1}')),
                         title: Text('تاريخ: ${inst['due_date']}'),
-                        subtitle: Text('الحالة: ${inst['status']} | المدفوع: ${inst['paid_amount']}'),
-                        trailing: Text('${inst['amount']} ريال', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text(
+                          'الحالة: ${inst['status']} | المدفوع: ${inst['paid_amount']}',
+                        ),
+                        trailing: Text(
+                          '${inst['amount']} ريال',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
                       );
-                    }
+                    },
                   ),
                 ),
               ],
@@ -465,276 +751,339 @@ class _ContractsScreenState extends State<ContractsScreen> {
             ElevatedButton.icon(
               onPressed: () {
                 Navigator.pop(context);
-                _printContract(contract);
+                _printContract(contract, saveAsPdf: false);
               },
               icon: const Icon(Icons.print),
               label: const Text('طباعة العقد PDF'),
-            )
+            ),
+            OutlinedButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                _printContract(contract, saveAsPdf: true);
+              },
+              icon: const Icon(Icons.save_alt),
+              label: const Text('حفظ PDF'),
+            ),
           ],
         );
       },
     );
   }
 
-  Future<void> _printContract(Map<String, dynamic> contract) async {
-    // 1. Fetch Company Info
-    final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-    String termsConditions = companyInfo?['terms_conditions'] ?? '';
+  Future<void> _printContract(
+    Map<String, dynamic> contract, {
+    required bool saveAsPdf,
+  }) async {
+    try {
+      final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
+      final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+      var termsConditions = companyInfo?['terms_conditions']?.toString() ?? '';
+      if (termsConditions.trim().isEmpty) {
+        termsConditions =
+            '7. لا يجوز للمستأجر تأجير العين بالباطن أو التنازل عنها للغير.\n'
+            '8. يلتزم المستأجر بالمحافظة على العين المؤجرة واستخدامها للغرض المخصص لها.\n'
+            '9. يلتزم المستأجر بسداد قيمة استهلاك الكهرباء والمياه والخدمات خلال فترة العقد.\n'
+            '10. يلتزم المستأجر بإخلاء العين عند انتهاء مدة العقد وتسليمها بحالتها الأصلية.\n'
+            '11. عند عدم الرغبة في التجديد، يُشعر الطرف الأول قبل انتهاء العقد بـ30 يوماً.';
+      }
+      final currency = companyInfo?['default_currency']?.toString() ?? 'ريال';
+      final tenant = leasingProv.tenants.firstWhere(
+        (t) => t['id'] == contract['tenant_id'],
+        orElse: () => <String, dynamic>{},
+      );
+      if (tenant.isEmpty) throw StateError('بيانات المستأجر غير متاحة');
+      final nationality = leasingProv.nationalities.firstWhere(
+        (n) => n['id'] == tenant['nationality_id'],
+        orElse: () => <String, dynamic>{},
+      );
 
-    if (termsConditions.trim().isEmpty) {
-      termsConditions = '''7. لا يجوز للمستأجر تأجير العين بالباطن أو التنازل عنها للغير.
-8. يلتزم المستأجر بالمحافظة على العين المؤجرة واستخدامها للغرض المخصص لها.
-9. يلتزم المستأجر بسداد قيمة استهلاك الكهرباء والمياه وأي خدمات أخرى خلال فترة العقد.
-10. يلتزم المستأجر بإخلاء العين عند انتهاء مدة العقد وتسليمها بحالتها الأصلية.
-11. في حالة رغبة المستأجر في عدم التجديد، يجب إشعار الطرف الأول قبل انتهاء العقد بـ 30 يوماً.''';
-    }
+      final db = await DatabaseHelper.instance.database;
+      final unitRows = await db.query(
+        'units',
+        where: 'id = ?',
+        whereArgs: [contract['unit_id']],
+      );
+      if (unitRows.isEmpty) throw StateError('بيانات الوحدة غير متاحة');
+      final unit = unitRows.first;
+      final propertyRows = await db.query(
+        'properties',
+        where: 'id = ?',
+        whereArgs: [unit['property_id']],
+      );
+      if (propertyRows.isEmpty) throw StateError('بيانات العقار غير متاحة');
+      final property = propertyRows.first;
 
-    // 2. Fetch required details from providers
-    final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
-    final propProv = Provider.of<PropertyProvider>(context, listen: false);
+      var unitTypeName = 'غير محدد';
+      if (unit['unit_type_id'] != null) {
+        final unitTypes = await DatabaseHelper.instance.getLookupData(
+          'unit_types',
+        );
+        final matchingType = unitTypes.firstWhere(
+          (type) => type['id'] == unit['unit_type_id'],
+          orElse: () => <String, dynamic>{},
+        );
+        unitTypeName = matchingType['name']?.toString() ?? unitTypeName;
+      }
+      final installments = await db.query(
+        'contract_installments',
+        where: 'contract_id = ?',
+        whereArgs: [contract['id']],
+        orderBy: 'due_date ASC, id ASC',
+      );
 
-    final tenant = leasingProv.tenants.firstWhere((t) => t['id'] == contract['tenant_id'], orElse: () => {});
-    final unitId = contract['unit_id'];
-
-    // Find unit details directly from database to ensure we get it even if not vacant
-    final db = await DatabaseHelper.instance.database;
-    final unitList = await db.query('units', where: 'id = ?', whereArgs: [unitId]);
-    final unit = unitList.isNotEmpty ? unitList.first : {};
-
-    final property = propProv.properties.firstWhere((p) => p['id'] == unit['property_id'], orElse: () => {});
-
-    // Fetch Unit Type
-    String unitTypeName = 'غير محدد';
-    if (unit['unit_type_id'] != null) {
-      final unitTypeData = await DatabaseHelper.instance.getLookupData('unit_types');
-      final matchedType = unitTypeData.firstWhere((t) => t['id'] == unit['unit_type_id'], orElse: () => {});
-      unitTypeName = matchedType['name'] ?? 'غير محدد';
-    }
-
-    // Fetch installments for this contract
-    final installments = await db.query('contract_installments', where: 'contract_id = ?', whereArgs: [contract['id']]);
-
-    // 3. Setup PDF Fonts (Arabic support)
-    final fontData = await rootBundle.load("assets/fonts/Cairo-Regular.ttf").catchError((_) => ByteData.view(Uint8List(0).buffer));
-    final ttf = fontData.lengthInBytes > 0 ? pw.Font.ttf(fontData) : pw.Font.helvetica();
-    final fontBoldData = await rootBundle.load("assets/fonts/Cairo-Bold.ttf").catchError((_) => ByteData.view(Uint8List(0).buffer));
-    final ttfBold = fontBoldData.lengthInBytes > 0 ? pw.Font.ttf(fontBoldData) : pw.Font.helveticaBold();
-
-    // 4. Generate PDF
-    final pdf = pw.Document();
-
-    pdf.addPage(
-      pw.MultiPage(pageTheme: pw.PageTheme(buildBackground: (pw.Context context) => PrintUtils.buildWatermark(companyInfo)),
-        pageFormat: PdfPageFormat.a4,
-        textDirection: pw.TextDirection.rtl,
-        theme: pw.ThemeData.withFont(base: ttf, bold: ttfBold),
-
-        header: (pw.Context context) {
-          return pw.Column(
+      final theme = await PrintUtils.loadArabicTheme();
+      final pdf = pw.Document();
+      final rentAmount = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
+      final formattedRent = NumberFormat(
+        '#,##0.00',
+        'en_US',
+      ).format(rentAmount);
+      pdf.addPage(
+        pw.MultiPage(
+          pageTheme: pw.PageTheme(
+            buildBackground: (_) => PrintUtils.buildWatermark(companyInfo),
+          ),
+          pageFormat: PdfPageFormat.a4,
+          textDirection: pw.TextDirection.rtl,
+          theme: theme,
+          header: (_) => pw.Column(
             children: [
               PrintUtils.buildHeader(companyInfo, true),
-              pw.SizedBox(height: 10),
+              pw.SizedBox(height: 8),
             ],
-          );
-        },
-        footer: (pw.Context context) {
-          return PrintUtils.buildFooter(companyInfo);
-        },
-        build: (pw.Context context) {
-
-          // Calculate contract duration roughly in months
-          DateTime start = DateTime.parse(contract['start_date']);
-          DateTime end = DateTime.parse(contract['end_date']);
-          int months = ((end.year - start.year) * 12) + end.month - start.month;
-          if (end.day > start.day) months++; // Approximate
-
-          return [
+          ),
+          footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
+          build: (_) => [
             pw.Center(
-              child: pw.Text('عقد إيجار', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold)),
+              child: pw.Text(
+                'عقد إيجار عقار',
+                textDirection: pw.TextDirection.rtl,
+                style: pw.TextStyle(
+                  fontSize: 22,
+                  fontWeight: pw.FontWeight.bold,
+                  decoration: pw.TextDecoration.underline,
+                ),
+              ),
             ),
-            pw.SizedBox(height: 10),
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.end,
-              children: [
-                pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    pw.Text('التاريخ: ${DateFormat('yyyy-MM-dd').format(DateTime.now())}م', style: const pw.TextStyle(fontSize: 12)),
-                    // Typically Hijri date can be added here if supported by intl, otherwise fallback to Gregorian
-                  ]
-                )
-              ]
+            pw.SizedBox(height: 16),
+            pw.Text(
+              'رقم العقد: ${contract['id']} | تاريخ تحرير العقد: ${DateFormat('yyyy-MM-dd').format(DateTime.now())}',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 11),
             ),
-            pw.SizedBox(height: 20),
-
-            // Section 2: Parties Data
-            pw.Text('إنه في يوم (${DateFormat('EEEE', 'ar').format(DateTime.now())}) الموافق ${DateFormat('yyyy-MM-dd').format(DateTime.now())}م، تم إبرام هذا العقد بين كل من:', style: const pw.TextStyle(fontSize: 14)),
-            pw.SizedBox(height: 10),
-
-            pw.Container(
-              padding: const pw.EdgeInsets.all(10),
-              decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300), borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5))),
-              child: pw.Row(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Expanded(
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        pw.Text('1. الطرف الأول (المؤجر):', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
-                        pw.SizedBox(height: 5),
-                        pw.Text('الاسم: ${companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية'}', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
-                        pw.Text('السجل التجاري: ${companyInfo?['commercial_register'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
-                      ]
-                    )
-                  ),
-                  pw.Expanded(
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        pw.Text('2. الطرف الثاني (المستأجر):', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
-                        pw.SizedBox(height: 5),
-                        pw.Text('الاسم: ${tenant['name'] ?? ''}', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
-                        pw.Text('رقم الهوية: ${tenant['identity_number'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
-                        pw.Text('رقم الهاتف: ${tenant['mobile'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
-                      ]
-                    )
-                  ),
-                ]
-              )
+            pw.Text(
+              'الطرف الأول (المؤجر): ${companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية'}',
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
             ),
-
-            pw.SizedBox(height: 15),
-
-            // Section 3: Essential Clauses
-            pw.Text('البنود الأساسية:', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
-            pw.SizedBox(height: 10),
-
-            pw.Padding(
-              padding: const pw.EdgeInsets.only(right: 15),
-              child: pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Text('3. مقدار الإيجار: ( ${contract['rent_amount']} ) ريال سعودي فقط.', style: const pw.TextStyle(fontSize: 12)),
-                  pw.SizedBox(height: 5),
-                  pw.Text('4. مدة الإيجار: ( $months أشهر ) تبدأ من ${contract['start_date']} إلى ${contract['end_date']}.', style: const pw.TextStyle(fontSize: 12)),
-                  pw.SizedBox(height: 5),
-                  pw.Text('5. طريقة دفع الإيجار: ( ${contract['payment_method']} ).', style: const pw.TextStyle(fontSize: 12)),
-                  pw.SizedBox(height: 5),
-                  pw.Text('6. نوع العقار المستأجر والغرض من استئجاره: ( وحدة رقم ${unit['unit_number']} في ${property['name']} / $unitTypeName ).', style: const pw.TextStyle(fontSize: 12)),
-                ]
-              )
+            pw.Text(
+              'السجل التجاري: ${companyInfo?['commercial_register'] ?? ''}',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 10),
             ),
-
-            pw.SizedBox(height: 20),
-
-            // Section 4: Terms and Conditions
-            pw.Text('الشروط والأحكام:', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
-            pw.SizedBox(height: 10),
-            pw.Padding(
-              padding: const pw.EdgeInsets.only(right: 15),
-              child: pw.Text(termsConditions, style: const pw.TextStyle(fontSize: 12, lineSpacing: 1.5)),
+            pw.Text(
+              'الطرف الثاني (المستأجر): ${tenant['name'] ?? ''}',
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
             ),
-
-            pw.SizedBox(height: 20),
-
-            // Section 5: Installments Table
-            pw.Text('جدول الدفعات المالية (الأقساط):', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
-            pw.SizedBox(height: 10),
+            pw.Text(
+              'رقم الهوية: ${tenant['identity_number'] ?? ''} | الجوال: ${tenant['mobile'] ?? ''} | الجنسية: ${nationality['name'] ?? ''}',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 10),
+            ),
+            pw.SizedBox(height: 12),
+            pw.Text(
+              'بيانات العين المؤجرة',
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.Text(
+              'العقار: ${property['name'] ?? ''} | الوحدة: ${unit['unit_number'] ?? ''} | النوع: $unitTypeName',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 11),
+            ),
+            if ((property['address']?.toString() ?? '').isNotEmpty)
+              pw.Text(
+                'العنوان: ${property['address']}',
+                textDirection: pw.TextDirection.rtl,
+                style: const pw.TextStyle(fontSize: 10),
+              ),
+            pw.SizedBox(height: 12),
+            pw.Text(
+              'تفاصيل العقد',
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.Text(
+              'مدة الإيجار: من ${contract['start_date']} إلى ${contract['end_date']}',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 11),
+            ),
+            pw.Text(
+              'القيمة الإيجارية الإجمالية: $formattedRent $currency',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 11),
+            ),
+            pw.Text(
+              'طريقة الدفع: ${contract['payment_method'] ?? ''}',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 11),
+            ),
+            pw.SizedBox(height: 14),
+            pw.Text(
+              'البنود والشروط',
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.Text(
+              termsConditions,
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 10, lineSpacing: 1.3),
+            ),
+            pw.SizedBox(height: 14),
+            pw.Text(
+              'جدول الدفعات (الأقساط)',
+              textDirection: pw.TextDirection.rtl,
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
+            ),
             pw.TableHelper.fromTextArray(
-              headers: ['رقم القسط', 'تاريخ الاستحقاق', 'المبلغ (ريال)'],
-              data: installments.asMap().entries.map((e) => [
-                (e.key + 1).toString(),
-                e.value['due_date'].toString(),
-                e.value['amount'].toString()
-              ]).toList(),
-              cellStyle: const pw.TextStyle(fontSize: 12),
-              headerStyle: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.white),
-              headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey800),
+              headers: ['رقم القسط', 'تاريخ الاستحقاق', 'المبلغ ($currency)'],
+              data: installments
+                  .asMap()
+                  .entries
+                  .map(
+                    (entry) => [
+                      (entry.key + 1).toString(),
+                      entry.value['due_date']?.toString() ?? '',
+                      '${((entry.value['amount'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)} $currency',
+                    ],
+                  )
+                  .toList(),
+              cellStyle: const pw.TextStyle(fontSize: 9),
+              headerStyle: pw.TextStyle(
+                fontSize: 9,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration: const pw.BoxDecoration(
+                color: PdfColors.blueGrey800,
+              ),
               border: pw.TableBorder.all(color: PdfColors.grey400),
               cellAlignment: pw.Alignment.center,
             ),
-
-            pw.SizedBox(height: 40),
-
-            // Section 6: Signatures
+            pw.SizedBox(height: 28),
             pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
-                pw.Expanded(
-                  child: pw.Column(
-                    children: [
-                      pw.Text('الطرف الأول (المؤجر)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
-                      pw.SizedBox(height: 40),
-                      pw.Text('_________________________'),
-                    ]
-                  ),
+                pw.Column(
+                  children: [
+                    pw.Text(
+                      'توقيع المؤجر',
+                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                    ),
+                    pw.SizedBox(height: 30),
+                    pw.Text('_____________________'),
+                  ],
                 ),
-                pw.Expanded(
-                  child: pw.Column(
-                    children: [
-                      pw.Text('الختم الرسمي', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
-                      pw.SizedBox(height: 40),
-                      pw.Text('_________________________'),
-                    ]
-                  ),
+                pw.Column(
+                  children: [
+                    pw.Text(
+                      'الختم الرسمي',
+                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                    ),
+                    pw.SizedBox(height: 30),
+                    pw.Text('_____________________'),
+                  ],
                 ),
-                pw.Expanded(
-                  child: pw.Column(
-                    children: [
-                      pw.Text('الطرف الثاني (المستأجر)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
-                      pw.SizedBox(height: 40),
-                      pw.Text('_________________________'),
-                    ]
-                  ),
+                pw.Column(
+                  children: [
+                    pw.Text(
+                      'توقيع المستأجر',
+                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                    ),
+                    pw.SizedBox(height: 30),
+                    pw.Text('_____________________'),
+                  ],
                 ),
-              ]
-            )
-          ];
-        },
-      )
-    );
+              ],
+            ),
+          ],
+        ),
+      );
 
-    await Printing.layoutPdf(
-      onLayout: (PdfPageFormat format) async => pdf.save(),
-      name: 'Contract_${contract['id']}',
-    );
+      final bytes = await pdf.save();
+      if (saveAsPdf) {
+        final saved = await PrintUtils.savePdf(
+          bytes,
+          'عقد_إيجار_${contract['id']}',
+        );
+        if (mounted && saved) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
+        }
+      } else {
+        await PrintUtils.printPdf(bytes, 'عقد_إيجار_${contract['id']}');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تعذر تجهيز/طباعة عقد الإيجار: $e')),
+        );
+      }
+    }
   }
 
   void _cancelContract(int contractId) async {
-    bool confirm = await showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('تأكيد الإلغاء'),
-        content: const Text('هل أنت متأكد من إلغاء هذا العقد؟ إذا كان هناك دفعات مسددة سيرفض النظام الإلغاء.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('تراجع')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('نعم، إلغاء'),
+    final leasingProvider = Provider.of<LeasingProvider>(
+      context,
+      listen: false,
+    );
+    bool confirm =
+        await showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('تأكيد الإلغاء'),
+            content: const Text(
+              'هل أنت متأكد من إلغاء هذا العقد؟ إذا كان هناك دفعات مسددة سيرفض النظام الإلغاء.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('تراجع'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                child: const Text('نعم، إلغاء'),
+              ),
+            ],
           ),
-        ],
-      )
-    ) ?? false;
+        ) ??
+        false;
 
-    if (confirm) {
-      try {
-        await Provider.of<LeasingProvider>(context, listen: false).cancelContract(contractId);
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إلغاء العقد بنجاح')));
-      } catch (e) {
-        if (mounted) {
-           showDialog(
-             context: context,
-             builder: (context) => AlertDialog(
-               title: const Text('لا يمكن الإلغاء'),
-               content: Text(e.toString()),
-               actions: [
-                 TextButton(onPressed: () => Navigator.pop(context), child: const Text('حسناً'))
-               ]
-             )
-           );
-        }
+    if (!mounted || !confirm) return;
+    try {
+      await leasingProvider.cancelContract(contractId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('تم إلغاء العقد بنجاح')));
+    } catch (e) {
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('لا يمكن الإلغاء'),
+            content: Text(e.toString()),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('حسناً'),
+              ),
+            ],
+          ),
+        );
       }
     }
   }
