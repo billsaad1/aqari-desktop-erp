@@ -4,23 +4,12 @@ import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
+import 'lease_contract_terms.dart';
 import 'print_utils.dart';
 
-/// Builds the exact, two-page Arabic lease form supplied by the company.
-/// Data is passed from the selected property owner, tenant, unit and contract;
-/// vector letterhead details and the locally uploaded logo come from settings.
+/// Builds a data-driven Arabic lease document from the saved company settings
+/// and the selected owner, tenant, property, unit and contract records.
 class LeaseContractPdf {
-  static const List<String> _clauses = [
-    'لا يجوز للطرف الثاني أن يؤجر العقار بهذا العقد لأي شخص من جانبه.',
-    'الطرف الأول غير ملزم بأي تعويض عما قد يقوم به الطرف الثاني من إصلاح أو تحسين في العقار المؤجر.',
-    'عند رغبة أحد الطرفين في إخلاء العقار المؤجر فيجب إبلاغ الطرف الآخر قبل ذلك بمدة شهرين كتابياً ولأي سبب من الأسباب، وبدون معارضة من الطرف الثاني إذا كانت الرغبة من الطرف الأول.',
-    'على الطرف الثاني التحلي بالأخلاق الحميدة مع من يشتركون معه في المبنى، وعدم صدور أي شكاوى من قبل جيرانه لتعريضهم لأي أذى من قبله.',
-    'عند خروج الطرف الثاني من العقار عليه إصلاح أو دفع قيمة الإصلاح لأي تلف حصل في العقار نتيجة استعماله خلال فترة استئجاره.',
-    'على الطرف الثاني عدم ترك أي نوع من المتروكات أو الأثاث التالف أو البضاعة خارج حدود العقار المؤجر له، مثل مدخل العمارة أو السلم أو السطح أو ارتدادات العقار أو الرصيف.',
-    'قراءة عداد الكهرباء عند بدء الإيجار.',
-    'حرر هذا العقد من نسختين، مع كل طرف نسخة، والتزم الطرفان باحترام بنوده كاملة، والله الموفق.',
-  ];
-
   static Future<Uint8List> build({
     required Map<String, dynamic>? companyInfo,
     required Map<String, dynamic> contract,
@@ -32,118 +21,281 @@ class LeaseContractPdf {
     String? unitTypeName,
   }) async {
     final theme = await PrintUtils.loadArabicTheme();
-    final contractId = _value(contract['id']);
-    final date = DateFormat('yyyy/MM/dd').format(DateTime.now());
+    final contractId = _value(contract['id'], fallback: '—');
+    final issueDate = DateFormat('yyyy/MM/dd').format(DateTime.now());
     final startDate = _formatDate(contract['start_date']);
     final endDate = _formatDate(contract['end_date']);
     final rent = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
-    final rentDigits = NumberFormat('#,##0.00', 'en_US').format(rent);
     final currency = PrintUtils.currencyInArabic(
       companyInfo?['default_currency'],
       fallback: 'عملة المنشأة',
     );
-    final purpose = _value(contract['purpose'], fallback: 'سكني');
-    final propertyAddress = [
-      _value(property['address'], fallback: ''),
-      _value(cityName, fallback: ''),
-      'العقار ${_value(property['name'])}',
-      'الوحدة ${_value(unit['unit_number'])}',
-    ].where((part) => part.trim().isNotEmpty).join(' - ');
-    final unitType = _value(unitTypeName, fallback: '........................');
-    final ownerName = _value(owner['name']);
+    final purpose = _value(contract['purpose'], fallback: 'غير محدد');
+    final unitType = _value(unitTypeName, fallback: 'غير محدد');
+    final clauses = LeaseContractTerms.resolve(
+      companyInfo?['terms_conditions'],
+    );
+    final electricityReading = _value(
+      contract['electricity_reading'],
+      fallback: 'غير مدونة',
+    );
+    final ownerName = _value(owner['name'], fallback: 'غير محدد');
+    final tenantName = _value(tenant['name'], fallback: 'غير محدد');
     final pdf = pw.Document();
+    final documentPageTheme = PrintUtils.pageTheme(
+      theme: theme,
+      companyInfo: companyInfo,
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.fromLTRB(28, 24, 28, 32),
+    );
 
     pdf.addPage(
-      pw.Page(
-        pageTheme: _pageTheme(theme, companyInfo),
-        build: (_) => _pageFrame(
-          pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      pw.MultiPage(
+        pageTheme: documentPageTheme,
+        maxPages: 20,
+        header: (_) => PrintUtils.buildHeader(companyInfo, false),
+        footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
+        build: (_) => [
+          _documentTitle('عقد إيجار'),
+          _metadata(contractId, issueDate),
+          pw.SizedBox(height: 7),
+          _sectionTitle('بيانات الطرفين'),
+          pw.SizedBox(height: 5),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              PrintUtils.buildHeader(companyInfo, false),
-              pw.SizedBox(height: 2),
-              _metadata(contractId, date),
-              pw.SizedBox(height: 4),
-              pw.Center(
-                child: pw.Text(
-                  'عقد إيجار',
-                  textDirection: pw.TextDirection.rtl,
-                  textAlign: pw.TextAlign.center,
-                  style: pw.TextStyle(
-                    fontSize: 18,
-                    fontWeight: pw.FontWeight.bold,
-                    decoration: pw.TextDecoration.underline,
-                  ),
+              pw.Expanded(
+                child: _partyCard(
+                  number: 1,
+                  title: 'الطرف الأول (المؤجر)',
+                  fields: [
+                    _field('الاسم', ownerName),
+                    _field('الصفة', 'المالك / الوكيل الشرعي'),
+                    _field(
+                      'رقم الهوية',
+                      _value(owner['identity_number'], fallback: 'غير مدون'),
+                      valueDirection: pw.TextDirection.ltr,
+                    ),
+                    _field(
+                      'تاريخ إصدار الهوية',
+                      _formatOptionalDate(owner['identity_issue_date']),
+                      valueDirection: pw.TextDirection.ltr,
+                    ),
+                    _field(
+                      'جهة الإصدار',
+                      _value(owner['identity_source'], fallback: 'غير مدون'),
+                    ),
+                  ],
                 ),
               ),
-              pw.SizedBox(height: 7),
-              _sectionTitle('١. الطرف الأول (المؤجر)'),
-              _line('الاسم: $ownerName   —   الصفة: المالك / الوكيل الشرعي'),
-              _line(
-                'رقم الهوية: ${_value(owner['identity_number'])}   تاريخها: ${_value(owner['identity_issue_date'])}   مصدرها: ${_value(owner['identity_source'])}',
-              ),
-              pw.SizedBox(height: 3),
-              _sectionTitle('٢. الطرف الثاني (المستأجر)'),
-              _line('الاسم: ${_value(tenant['name'])}'),
-              _line(
-                'رقم الهوية: ${_value(tenant['identity_number'])}   تاريخها: ${_value(tenant['identity_issue_date'])}   مصدرها: ${_value(tenant['identity_source'])}',
-              ),
-              _line(
-                'رقم الهاتف: ${_value(tenant['mobile'])}   المهنة: ${_value(tenant['profession'])}',
-              ),
-              pw.SizedBox(height: 4),
-              _clause(
-                '٣',
-                'مقدار الإيجار: $rentDigits $currency فقط، كتابة: ${formatAmountInWords(rent, companyInfo?['default_currency'])} فقط لا غير.',
-              ),
-              _clause('٤', 'مدة الإيجار: من $startDate إلى $endDate.'),
-              _clause(
-                '٥',
-                'طريقة دفع الإيجار: ${_value(contract['payment_method'])}.',
-              ),
-              _clause(
-                '٦',
-                'نوع العقار المستأجر والغرض من استئجاره: $unitType / $purpose.',
-              ),
-              _clause('٧', 'عنوان العقار المستأجر: $propertyAddress.'),
-              for (var i = 0; i < _clauses.length; i++)
-                _clause(
-                  '${i + 8}',
-                  i == 6
-                      ? 'قراءة عداد الكهرباء عند بدء الإيجار: ${_value(contract['electricity_reading'])}.'
-                      : _clauses[i],
+              pw.SizedBox(width: 8),
+              pw.Expanded(
+                child: _partyCard(
+                  number: 2,
+                  title: 'الطرف الثاني (المستأجر)',
+                  fields: [
+                    _field('الاسم', tenantName),
+                    if (_value(
+                      tenant['nationality_name'],
+                      fallback: '',
+                    ).isNotEmpty)
+                      _field('الجنسية', _value(tenant['nationality_name'])),
+                    _field(
+                      'رقم الهوية',
+                      _value(tenant['identity_number'], fallback: 'غير مدون'),
+                      valueDirection: pw.TextDirection.ltr,
+                    ),
+                    _field(
+                      'تاريخ إصدار الهوية',
+                      _formatOptionalDate(tenant['identity_issue_date']),
+                      valueDirection: pw.TextDirection.ltr,
+                    ),
+                    _field(
+                      'جهة الإصدار',
+                      _value(tenant['identity_source'], fallback: 'غير مدون'),
+                    ),
+                    _field(
+                      'رقم الهاتف',
+                      _value(tenant['mobile'], fallback: 'غير مدون'),
+                      valueDirection: pw.TextDirection.ltr,
+                    ),
+                    if (_value(tenant['profession'], fallback: '').isNotEmpty)
+                      _field('المهنة', _value(tenant['profession'])),
+                  ],
                 ),
-              pw.Spacer(),
-              PrintUtils.buildFooter(companyInfo),
+              ),
             ],
           ),
-        ),
+          pw.SizedBox(height: 7),
+          _sectionTitle('بيانات العين المؤجرة والاتفاق المالي'),
+          pw.SizedBox(height: 5),
+          _detailCard([
+            _numberedItem(
+              3,
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                children: [
+                  _amountField(rent, currency),
+                  _field(
+                    'كتابةً',
+                    formatAmountInWords(rent, companyInfo?['default_currency']),
+                  ),
+                ],
+              ),
+            ),
+            _numberedItem(
+              4,
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                children: [
+                  pw.Text(
+                    'مدة الإيجار',
+                    textDirection: pw.TextDirection.rtl,
+                    textAlign: pw.TextAlign.right,
+                    style: const pw.TextStyle(
+                      fontSize: 9,
+                      color: PdfColors.grey700,
+                    ),
+                  ),
+                  pw.Row(
+                    children: [
+                      pw.Expanded(
+                        child: _field(
+                          'من',
+                          startDate,
+                          valueDirection: pw.TextDirection.ltr,
+                        ),
+                      ),
+                      pw.SizedBox(width: 8),
+                      pw.Expanded(
+                        child: _field(
+                          'إلى',
+                          endDate,
+                          valueDirection: pw.TextDirection.ltr,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            _numberedItem(
+              5,
+              _field(
+                'طريقة دفع الإيجار',
+                _value(contract['payment_method'], fallback: 'غير محددة'),
+              ),
+            ),
+            _numberedItem(
+              6,
+              pw.Row(
+                children: [
+                  pw.Expanded(child: _field('نوع العقار', unitType)),
+                  pw.SizedBox(width: 8),
+                  pw.Expanded(child: _field('الغرض من الاستئجار', purpose)),
+                ],
+              ),
+            ),
+            _numberedItem(
+              7,
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                children: [
+                  pw.Row(
+                    children: [
+                      pw.Expanded(
+                        child: _field(
+                          'العقار',
+                          _value(property['name'], fallback: 'غير محدد'),
+                        ),
+                      ),
+                      pw.SizedBox(width: 8),
+                      pw.Expanded(
+                        child: _field(
+                          'الوحدة',
+                          _value(unit['unit_number'], fallback: 'غير محدد'),
+                          valueDirection: pw.TextDirection.ltr,
+                        ),
+                      ),
+                    ],
+                  ),
+                  _field(
+                    'العنوان',
+                    [
+                      _value(property['address'], fallback: 'غير مدون'),
+                      if (cityName != null && cityName.trim().isNotEmpty)
+                        cityName.trim(),
+                    ].join('، '),
+                  ),
+                ],
+              ),
+            ),
+          ]),
+          pw.SizedBox(height: 7),
+          _sectionTitle('الشروط والأحكام'),
+          pw.SizedBox(height: 2),
+          for (var index = 0; index < clauses.length; index++)
+            _clause(
+              index + 8,
+              clauses[index].contains('عداد الكهرباء')
+                  ? '${clauses[index]} القراءة المسجلة: $electricityReading'
+                  : clauses[index],
+            ),
+        ],
       ),
     );
 
     pdf.addPage(
       pw.Page(
-        pageTheme: _pageTheme(theme, companyInfo),
-        build: (_) => _pageFrame(
-          pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-            children: [
-              PrintUtils.buildHeader(companyInfo, false),
-              pw.SizedBox(height: 2),
-              _metadata(contractId, date),
-              pw.SizedBox(height: 38),
-              pw.Row(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  _signatureColumn('الطرف الثاني المستأجر'),
-                  _signatureColumn('الختم الرسمي'),
-                  _signatureColumn('الطرف الأول المؤجر'),
-                ],
-              ),
-              pw.Spacer(),
-              PrintUtils.buildFooter(companyInfo),
-            ],
-          ),
+        pageTheme: documentPageTheme,
+        build: (_) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+          children: [
+            PrintUtils.buildHeader(companyInfo, false),
+            _documentTitle('اعتماد وتوقيعات الأطراف'),
+            pw.SizedBox(height: 9),
+            _metadata(contractId, issueDate),
+            pw.SizedBox(height: 20),
+            pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Expanded(
+                  child: _signatureParty(
+                    role: 'الطرف الثاني — المستأجر',
+                    name: tenantName,
+                    identity: _value(
+                      tenant['identity_number'],
+                      fallback: 'غير مدون',
+                    ),
+                  ),
+                ),
+                pw.SizedBox(width: 10),
+                _stampArea(),
+                pw.SizedBox(width: 10),
+                pw.Expanded(
+                  child: _signatureParty(
+                    role: 'الطرف الأول — المؤجر',
+                    name: ownerName,
+                    identity: _value(
+                      owner['identity_number'],
+                      fallback: 'غير مدون',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            pw.Spacer(),
+            pw.Container(height: 0.7, color: PrintUtils.softBorder),
+            pw.SizedBox(height: 7),
+            pw.Text(
+              'توقيع الطرفين وختم المنشأة',
+              textDirection: pw.TextDirection.rtl,
+              textAlign: pw.TextAlign.center,
+              style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
+            ),
+            pw.SizedBox(height: 12),
+            PrintUtils.buildFooter(companyInfo),
+          ],
         ),
       ),
     );
@@ -151,82 +303,394 @@ class LeaseContractPdf {
     return pdf.save();
   }
 
-  static pw.PageTheme _pageTheme(
-    pw.ThemeData theme,
-    Map<String, dynamic>? companyInfo,
-  ) => pw.PageTheme(
-    pageFormat: PdfPageFormat.a4,
-    textDirection: pw.TextDirection.rtl,
-    theme: theme,
-    margin: const pw.EdgeInsets.all(22),
-    buildBackground: (_) => PrintUtils.buildWatermark(companyInfo),
+  static pw.Widget _documentTitle(String title) => pw.Center(
+    child: pw.Padding(
+      padding: const pw.EdgeInsets.only(top: 4, bottom: 8),
+      child: pw.Column(
+        mainAxisSize: pw.MainAxisSize.min,
+        crossAxisAlignment: pw.CrossAxisAlignment.center,
+        children: [
+          pw.Text(
+            title,
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.center,
+            style: pw.TextStyle(
+              fontSize: 17,
+              fontWeight: pw.FontWeight.bold,
+              color: PrintUtils.brandNavy,
+            ),
+          ),
+          pw.SizedBox(height: 5),
+          pw.Container(width: 72, height: 2, color: PrintUtils.brandEmerald),
+        ],
+      ),
+    ),
   );
 
-  static pw.Widget _pageFrame(pw.Widget child) => pw.Container(
+  static pw.Widget _metadata(String number, String date) => pw.Container(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 12, vertical: 8),
     decoration: pw.BoxDecoration(
-      border: pw.Border.all(color: PdfColors.grey600, width: 0.55),
+      color: PrintUtils.softSurface,
+      border: pw.Border.all(color: PrintUtils.softBorder),
+      borderRadius: pw.BorderRadius.circular(5),
     ),
-    padding: const pw.EdgeInsets.fromLTRB(14, 10, 14, 18),
-    child: child,
-  );
-
-  static pw.Widget _metadata(String number, String date) => pw.Row(
-    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-    children: [
-      _line('رقم العقد: $number', size: 8),
-      _line('التاريخ: $date', size: 8),
-    ],
-  );
-
-  static pw.Widget _sectionTitle(String text) => pw.Padding(
-    padding: const pw.EdgeInsets.only(top: 2, bottom: 1),
-    child: pw.Text(
-      text,
-      textDirection: pw.TextDirection.rtl,
-      textAlign: pw.TextAlign.right,
-      style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
-    ),
-  );
-
-  static pw.Widget _line(String text, {double size = 13}) => pw.Padding(
-    padding: const pw.EdgeInsets.only(bottom: 3),
-    child: pw.Text(
-      text,
-      textDirection: pw.TextDirection.rtl,
-      textAlign: pw.TextAlign.right,
-      style: pw.TextStyle(fontSize: size, lineSpacing: 3),
-    ),
-  );
-
-  static pw.Widget _clause(String number, String text) => pw.Padding(
-    padding: const pw.EdgeInsets.only(bottom: 5),
-    child: pw.Text(
-      '$number. $text',
-      textDirection: pw.TextDirection.rtl,
-      textAlign: pw.TextAlign.right,
-      style: const pw.TextStyle(fontSize: 12.5, lineSpacing: 3),
-    ),
-  );
-
-  static pw.Widget _signatureColumn(String label) => pw.Expanded(
-    child: pw.Column(
+    child: pw.Row(
       children: [
-        pw.Text(
-          label,
-          textDirection: pw.TextDirection.rtl,
-          textAlign: pw.TextAlign.center,
-          style: const pw.TextStyle(fontSize: 10),
+        pw.Expanded(
+          child: _metadataItem('رقم العقد', number, pw.TextDirection.ltr),
         ),
-        pw.SizedBox(height: 31),
-        pw.Container(height: 0.65, color: PdfColors.grey700),
+        pw.SizedBox(width: 12),
+        pw.Expanded(
+          child: _metadataItem(
+            'تاريخ إصدار النسخة',
+            date,
+            pw.TextDirection.ltr,
+          ),
+        ),
       ],
     ),
   );
 
-  static String _value(
-    Object? value, {
-    String fallback = '....................',
-  }) {
+  static pw.Widget _metadataItem(
+    String label,
+    String value,
+    pw.TextDirection direction,
+  ) => pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+    mainAxisSize: pw.MainAxisSize.min,
+    children: [
+      pw.Text(
+        label,
+        textDirection: pw.TextDirection.rtl,
+        textAlign: pw.TextAlign.center,
+        style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+      ),
+      pw.SizedBox(height: 2),
+      pw.Text(
+        value,
+        textDirection: direction,
+        textAlign: pw.TextAlign.center,
+        style: pw.TextStyle(
+          fontSize: 10,
+          fontWeight: pw.FontWeight.bold,
+          color: PrintUtils.brandNavy,
+        ),
+      ),
+    ],
+  );
+
+  static pw.Widget _sectionTitle(String text) => pw.Container(
+    padding: const pw.EdgeInsets.only(bottom: 4),
+    decoration: const pw.BoxDecoration(
+      border: pw.Border(
+        bottom: pw.BorderSide(color: PrintUtils.brandEmerald, width: 1),
+      ),
+    ),
+    child: pw.Text(
+      text,
+      textDirection: pw.TextDirection.rtl,
+      textAlign: pw.TextAlign.right,
+      style: pw.TextStyle(
+        fontSize: 11.5,
+        fontWeight: pw.FontWeight.bold,
+        color: PrintUtils.brandNavy,
+      ),
+    ),
+  );
+
+  static pw.Widget _partyCard({
+    required int number,
+    required String title,
+    required List<pw.Widget> fields,
+  }) => pw.Container(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+    decoration: pw.BoxDecoration(
+      border: pw.Border.all(color: PrintUtils.softBorder),
+      borderRadius: pw.BorderRadius.circular(5),
+    ),
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      children: [
+        pw.Container(
+          height: 15,
+          child: pw.Stack(
+            children: [
+              pw.Positioned(
+                top: 0,
+                right: 0,
+                child: pw.Container(
+                  width: 22,
+                  alignment: pw.Alignment.centerRight,
+                  child: pw.Text(
+                    '$number.',
+                    textDirection: pw.TextDirection.ltr,
+                    textAlign: pw.TextAlign.right,
+                    style: pw.TextStyle(
+                      fontSize: 10,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PrintUtils.brandEmerald,
+                    ),
+                  ),
+                ),
+              ),
+              pw.Positioned(
+                top: 0,
+                left: 0,
+                right: 26,
+                child: pw.Text(
+                  title,
+                  textDirection: pw.TextDirection.rtl,
+                  textAlign: pw.TextAlign.right,
+                  style: pw.TextStyle(
+                    fontSize: 10,
+                    fontWeight: pw.FontWeight.bold,
+                    color: PrintUtils.brandEmerald,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        pw.SizedBox(height: 2),
+        ...fields,
+      ],
+    ),
+  );
+
+  static pw.Widget _detailCard(List<pw.Widget> fields) => pw.Container(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+    decoration: pw.BoxDecoration(
+      color: PrintUtils.softSurface,
+      border: pw.Border.all(color: PrintUtils.softBorder),
+      borderRadius: pw.BorderRadius.circular(5),
+    ),
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      children: fields,
+    ),
+  );
+
+  static pw.Widget _field(
+    String label,
+    String value, {
+    pw.TextDirection valueDirection = pw.TextDirection.rtl,
+  }) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 1.2),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.SizedBox(
+          width: 112,
+          child: pw.Text(
+            label,
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.right,
+            style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
+          ),
+        ),
+        pw.SizedBox(width: 7),
+        pw.Expanded(
+          child: pw.Text(
+            value,
+            textDirection: valueDirection,
+            textAlign: pw.TextAlign.right,
+            style: const pw.TextStyle(fontSize: 9.5),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static pw.Widget _numberedItem(int number, pw.Widget child) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 1.5),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Container(
+          width: 22,
+          alignment: pw.Alignment.topRight,
+          child: pw.Text(
+            '${_arabicDigits(number.toString())}.',
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.right,
+            style: pw.TextStyle(
+              fontSize: 9.5,
+              fontWeight: pw.FontWeight.bold,
+              color: PrintUtils.brandEmerald,
+            ),
+          ),
+        ),
+        pw.SizedBox(width: 4),
+        pw.Expanded(child: child),
+      ],
+    ),
+  );
+
+  static pw.Widget _amountField(double amount, String currency) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 1.2),
+    child: pw.Row(
+      children: [
+        pw.SizedBox(
+          width: 112,
+          child: pw.Text(
+            'مقدار الإيجار رقماً',
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.right,
+            style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
+          ),
+        ),
+        pw.SizedBox(width: 7),
+        pw.Expanded(
+          child: pw.Row(
+            children: [
+              pw.Text(
+                PrintUtils.formatPdfAmount(amount),
+                textDirection: pw.TextDirection.ltr,
+                style: pw.TextStyle(
+                  fontSize: 10,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PrintUtils.brandNavy,
+                ),
+              ),
+              pw.SizedBox(width: 5),
+              pw.Text(
+                currency,
+                textDirection: pw.TextDirection.rtl,
+                style: const pw.TextStyle(fontSize: 9.5),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static pw.Widget _clause(int number, String text) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 2.5),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Container(
+          width: 22,
+          alignment: pw.Alignment.topRight,
+          child: pw.Text(
+            '${_arabicDigits(number.toString())}.',
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.right,
+            style: pw.TextStyle(
+              fontSize: 9.5,
+              fontWeight: pw.FontWeight.bold,
+              color: PrintUtils.brandEmerald,
+            ),
+          ),
+        ),
+        pw.SizedBox(width: 5),
+        pw.Expanded(
+          child: pw.Text(
+            text,
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.right,
+            style: const pw.TextStyle(fontSize: 9.5, lineSpacing: 3),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static pw.Widget _signatureParty({
+    required String role,
+    required String name,
+    required String identity,
+  }) => pw.Container(
+    height: 205,
+    padding: const pw.EdgeInsets.all(11),
+    decoration: pw.BoxDecoration(
+      border: pw.Border.all(color: PrintUtils.softBorder),
+      borderRadius: pw.BorderRadius.circular(6),
+    ),
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      children: [
+        pw.Text(
+          role,
+          textDirection: pw.TextDirection.rtl,
+          textAlign: pw.TextAlign.right,
+          style: pw.TextStyle(
+            fontSize: 10,
+            fontWeight: pw.FontWeight.bold,
+            color: PrintUtils.brandNavy,
+          ),
+        ),
+        pw.SizedBox(height: 13),
+        _signatureInfo('الاسم', name, pw.TextDirection.rtl),
+        pw.SizedBox(height: 6),
+        _signatureInfo('رقم الهوية', identity, pw.TextDirection.ltr),
+        pw.Spacer(),
+        pw.Text(
+          'التوقيع',
+          textDirection: pw.TextDirection.rtl,
+          textAlign: pw.TextAlign.right,
+          style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+        ),
+        pw.SizedBox(height: 3),
+        pw.Container(height: 0.8, color: PdfColors.grey700),
+        pw.SizedBox(height: 12),
+        pw.Row(
+          children: [
+            pw.Text(
+              'تاريخ التوقيع',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+            ),
+            pw.SizedBox(width: 5),
+            pw.Expanded(
+              child: pw.Container(height: 0.6, color: PrintUtils.softBorder),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+
+  static pw.Widget _signatureInfo(
+    String label,
+    String value,
+    pw.TextDirection direction,
+  ) => pw.Row(
+    children: [
+      pw.Text(
+        '$label: ',
+        textDirection: pw.TextDirection.rtl,
+        style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+      ),
+      pw.Expanded(
+        child: pw.Text(
+          value,
+          textDirection: direction,
+          textAlign: pw.TextAlign.right,
+          style: const pw.TextStyle(fontSize: 8.5),
+        ),
+      ),
+    ],
+  );
+
+  static pw.Widget _stampArea() => pw.Container(
+    width: 102,
+    height: 150,
+    alignment: pw.Alignment.center,
+    decoration: pw.BoxDecoration(
+      border: pw.Border.all(color: PrintUtils.softBorder, width: 0.8),
+      borderRadius: pw.BorderRadius.circular(6),
+    ),
+    child: pw.Text(
+      'الختم الرسمي',
+      textDirection: pw.TextDirection.rtl,
+      textAlign: pw.TextAlign.center,
+      style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
+    ),
+  );
+
+  static String _value(Object? value, {String fallback = 'غير مدون'}) {
     final text = value?.toString().trim();
     return text == null || text.isEmpty ? fallback : text;
   }
@@ -237,6 +701,16 @@ class LeaseContractPdf {
         ? _value(raw)
         : DateFormat('yyyy/MM/dd').format(parsed);
   }
+
+  static String _formatOptionalDate(Object? raw) {
+    if (raw == null || raw.toString().trim().isEmpty) return 'غير مدون';
+    return _formatDate(raw);
+  }
+
+  static String _arabicDigits(String value) => value.replaceAllMapped(
+    RegExp(r'\d'),
+    (match) => String.fromCharCode(0x0660 + int.parse(match.group(0)!)),
+  );
 
   static String formatAmountInWords(double amount, Object? rawCurrency) {
     final currency = PrintUtils.currencyInArabic(

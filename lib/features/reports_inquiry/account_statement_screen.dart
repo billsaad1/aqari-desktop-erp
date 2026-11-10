@@ -82,31 +82,35 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
       final theme = await PrintUtils.loadArabicTheme();
       final debitNormal = accountType == 'Asset' || accountType == 'Expense';
       var runningBalance = openingBalance;
-      final tableData = <List<String>>[
-        ['', '', 'الرصيد الافتتاحي', '', '', openingBalance.toStringAsFixed(2)],
-        ...statement.map((s) {
-          final debit = (s['debit'] as num).toDouble();
-          final credit = (s['credit'] as num).toDouble();
-          runningBalance += debitNormal ? debit - credit : credit - debit;
-          return [
-            s['date'].toString(),
-            s['voucher_no'].toString(),
-            s['description']?.toString() ?? '',
-            debit.toStringAsFixed(2),
-            credit.toStringAsFixed(2),
-            runningBalance.toStringAsFixed(2),
-          ];
-        }),
-      ];
+      final tableData = statement.map((s) {
+        final debit = (s['debit'] as num).toDouble();
+        final credit = (s['credit'] as num).toDouble();
+        runningBalance += debitNormal ? debit - credit : credit - debit;
+        return [
+          s['date'].toString(),
+          s['voucher_no'].toString(),
+          s['description']?.toString() ?? '',
+          PrintUtils.formatPdfAmount(debit),
+          PrintUtils.formatPdfAmount(credit),
+          PrintUtils.formatPdfAmount(runningBalance),
+        ];
+      }).toList();
+      final closingBalance = runningBalance;
+      final accountTypeArabic = switch (accountType) {
+        'Asset' => 'أصول',
+        'Liability' => 'التزامات',
+        'Equity' => 'حقوق ملكية',
+        'Revenue' => 'إيرادات',
+        'Expense' => 'مصروفات',
+        _ => accountType,
+      };
 
       pdf.addPage(
         pw.MultiPage(
-          pageTheme: pw.PageTheme(
-            pageFormat: PdfPageFormat.a4,
-            textDirection: pw.TextDirection.rtl,
+          pageTheme: PrintUtils.pageTheme(
             theme: theme,
-            buildBackground: (pw.Context context) =>
-                PrintUtils.buildWatermark(companyInfo),
+            companyInfo: companyInfo,
+            margin: const pw.EdgeInsets.fromLTRB(32, 30, 32, 34),
           ),
           header: (_) => PrintUtils.buildHeader(companyInfo, true),
           footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
@@ -115,27 +119,103 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
               child: pw.Text(
                 'كشف حساب تفصيلي',
                 textDirection: pw.TextDirection.rtl,
+                textAlign: pw.TextAlign.center,
                 style: pw.TextStyle(
-                  fontSize: 20,
+                  fontSize: 17,
                   fontWeight: pw.FontWeight.bold,
+                  color: PrintUtils.brandNavy,
                 ),
               ),
             ),
-            pw.SizedBox(height: 14),
-            pw.Text(
-              'الحساب: $accountName',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold),
+            pw.SizedBox(height: 8),
+            pw.Container(
+              padding: const pw.EdgeInsets.all(10),
+              decoration: pw.BoxDecoration(
+                color: PrintUtils.softSurface,
+                border: pw.Border.all(color: PrintUtils.softBorder),
+                borderRadius: pw.BorderRadius.circular(5),
+              ),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                children: [
+                  PrintUtils.buildLabelValue(
+                    'الحساب',
+                    accountName,
+                    labelWidth: 76,
+                  ),
+                  pw.Row(
+                    children: [
+                      pw.Expanded(
+                        child: PrintUtils.buildLabelValue(
+                          'نوع الحساب',
+                          accountTypeArabic,
+                          labelWidth: 76,
+                        ),
+                      ),
+                      pw.SizedBox(width: 12),
+                      pw.Expanded(
+                        child: PrintUtils.buildLabelValue(
+                          'العملة',
+                          currency,
+                          labelWidth: 55,
+                        ),
+                      ),
+                    ],
+                  ),
+                  pw.Row(
+                    children: [
+                      pw.Expanded(
+                        child: PrintUtils.buildLabelValue(
+                          'من تاريخ',
+                          _startDateController.text,
+                          valueDirection: pw.TextDirection.ltr,
+                          labelWidth: 76,
+                        ),
+                      ),
+                      pw.SizedBox(width: 12),
+                      pw.Expanded(
+                        child: PrintUtils.buildLabelValue(
+                          'إلى تاريخ',
+                          _endDateController.text,
+                          valueDirection: pw.TextDirection.ltr,
+                          labelWidth: 76,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-            pw.Text(
-              'العملة: $currency',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 10),
-            ),
-            pw.Text(
-              'من تاريخ: ${_startDateController.text} إلى تاريخ: ${_endDateController.text}',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 10),
+            pw.SizedBox(height: 8),
+            pw.Container(
+              padding: const pw.EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 7,
+              ),
+              decoration: pw.BoxDecoration(
+                border: pw.Border.all(color: PrintUtils.softBorder),
+                borderRadius: pw.BorderRadius.circular(5),
+              ),
+              child: pw.Row(
+                children: [
+                  pw.Expanded(
+                    child: PrintUtils.buildLabelValue(
+                      'الرصيد الافتتاحي',
+                      PrintUtils.formatPdfAmount(openingBalance),
+                      valueDirection: pw.TextDirection.ltr,
+                      labelWidth: 110,
+                    ),
+                  ),
+                  pw.Expanded(
+                    child: PrintUtils.buildLabelValue(
+                      'الرصيد الختامي',
+                      PrintUtils.formatPdfAmount(closingBalance),
+                      valueDirection: pw.TextDirection.ltr,
+                      labelWidth: 110,
+                    ),
+                  ),
+                ],
+              ),
             ),
             pw.SizedBox(height: 12),
             pw.TableHelper.fromTextArray(
@@ -153,10 +233,26 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
                 fontWeight: pw.FontWeight.bold,
                 color: PdfColors.white,
               ),
-              headerDecoration: const pw.BoxDecoration(
-                color: PdfColors.blueGrey800,
+              headerDecoration: pw.BoxDecoration(color: PrintUtils.brandNavy),
+              cellStyle: const pw.TextStyle(fontSize: 8.5, lineSpacing: 2),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 4,
+                vertical: 6,
               ),
-              cellStyle: const pw.TextStyle(fontSize: 8),
+              tableDirection: pw.TextDirection.rtl,
+              headerDirection: pw.TextDirection.rtl,
+              columnWidths: const {
+                0: pw.FixedColumnWidth(65),
+                1: pw.FixedColumnWidth(54),
+                2: pw.FlexColumnWidth(2.5),
+                3: pw.FixedColumnWidth(65),
+                4: pw.FixedColumnWidth(65),
+                5: pw.FixedColumnWidth(75),
+              },
+              border: pw.TableBorder.all(
+                color: PrintUtils.softBorder,
+                width: 0.5,
+              ),
               cellAlignments: {
                 0: pw.Alignment.center,
                 1: pw.Alignment.center,
@@ -166,6 +262,16 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
                 5: pw.Alignment.center,
               },
             ),
+            if (statement.isEmpty)
+              pw.Padding(
+                padding: const pw.EdgeInsets.all(12),
+                child: pw.Text(
+                  'لا توجد حركات خلال الفترة المحددة.',
+                  textDirection: pw.TextDirection.rtl,
+                  textAlign: pw.TextAlign.center,
+                  style: const pw.TextStyle(color: PdfColors.grey700),
+                ),
+              ),
           ],
         ),
       );

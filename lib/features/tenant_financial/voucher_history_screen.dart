@@ -310,41 +310,20 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
           (line) => Map<String, dynamic>.from(line as Map),
         ),
       );
-      final accountNames = lines
-          .map((line) => line['account_name']?.toString() ?? '')
-          .where((name) => name.isNotEmpty)
-          .toSet()
-          .join(' / ');
-      final lineDescriptions = lines.map((line) {
-        final debit = (line['debit'] as num? ?? 0).toDouble();
-        final credit = (line['credit'] as num? ?? 0).toDouble();
-        return '${line['account_name']} — مدين: ${debit.toStringAsFixed(2)}، دائن: ${credit.toStringAsFixed(2)}';
-      }).toList();
-      final allocatedTotal = installments.fold<double>(
-        0,
-        (total, installment) =>
-            total + (installment['allocated_amount'] as num).toDouble(),
-      );
-      final descriptionParts = <String>[
-        if ((voucher['description'] as String?)?.trim().isNotEmpty == true)
-          'البيان: ${voucher['description']}',
-        if (lineDescriptions.isNotEmpty)
-          'تفاصيل الحسابات: ${lineDescriptions.join('؛ ')}',
-        if (installments.isNotEmpty)
-          'توزيع المبلغ على ${installments.length} قسط/أقساط بإجمالي ${allocatedTotal.toStringAsFixed(2)}.',
-      ];
+      final voucherType = voucher['voucher_type']?.toString() ?? '';
+      final isGeneralVoucher = voucherType.contains('عام');
+      final partyName = voucher['party_name']?.toString().trim() ?? '';
       final pdfBytes = await PrintUtils.buildVoucherPdf(
-        voucherType: 'سند ${voucher['voucher_type']}',
+        voucherType: 'سند $voucherType',
         voucherNo: widget.voucherId,
         date: voucher['voucher_date'].toString(),
-        targetName:
-            (voucher['party_name'] as String?)?.trim().isNotEmpty == true
-            ? voucher['party_name'].toString()
-            : (voucher['description']?.toString() ?? '—'),
+        targetName: isGeneralVoucher || partyName.isEmpty ? null : partyName,
         amount: (voucher['amount'] as num).toDouble(),
-        paymentMethod: 'حسب الحسابات المرحلة',
-        accountName: accountNames.isEmpty ? '—' : accountNames,
-        description: descriptionParts.join('\n'),
+        paymentMethod: null,
+        accountName: '',
+        description: voucher['description']?.toString(),
+        journalLines: lines,
+        installmentAllocations: installments,
       );
       if (saveAsPdf) {
         final saved = await PrintUtils.savePdf(

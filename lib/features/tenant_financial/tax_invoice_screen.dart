@@ -160,8 +160,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   }) async {
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
     final String companyTax = companyInfo?['tax_number'] ?? '';
-    final String companyName =
-        companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية';
+    final String companyName = companyInfo?['name_ar'] ?? '';
     final currency = PrintUtils.currencyInArabic(
       companyInfo?['default_currency'],
     );
@@ -170,12 +169,10 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     final theme = await PrintUtils.loadArabicTheme();
     pdf.addPage(
       pw.MultiPage(
-        pageTheme: pw.PageTheme(
-          pageFormat: PdfPageFormat.a4,
-          textDirection: pw.TextDirection.rtl,
+        pageTheme: PrintUtils.pageTheme(
           theme: theme,
-          buildBackground: (pw.Context context) =>
-              PrintUtils.buildWatermark(companyInfo),
+          companyInfo: companyInfo,
+          margin: const pw.EdgeInsets.fromLTRB(32, 30, 32, 34),
         ),
         header: (_) => PrintUtils.buildHeader(companyInfo, true),
         footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
@@ -184,81 +181,164 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
             child: pw.Text(
               'فاتورة ضريبية',
               textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
+              textAlign: pw.TextAlign.center,
+              style: pw.TextStyle(
+                fontSize: 17,
+                fontWeight: pw.FontWeight.bold,
+                color: PrintUtils.brandNavy,
+              ),
             ),
           ),
-          pw.SizedBox(height: 16),
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              pw.Text(
-                'رقم الفاتورة: $invoiceNo',
-                textDirection: pw.TextDirection.rtl,
-              ),
-              pw.Text('التاريخ: $date', textDirection: pw.TextDirection.rtl),
-            ],
-          ),
-          pw.Text(
-            'رقم العقد: $contractNo',
-            textDirection: pw.TextDirection.rtl,
-          ),
-          pw.Text(
-            'العميل / المستأجر: $tenantName',
-            textDirection: pw.TextDirection.rtl,
-          ),
-          pw.Text(
-            'الرقم الضريبي للمنشأة: $companyTax',
-            textDirection: pw.TextDirection.rtl,
-          ),
-          pw.SizedBox(height: 24),
-          pw.TableHelper.fromTextArray(
-            headers: ['الوصف', 'المبلغ'],
-            data: [
-              ['قيمة الإيجار (الصافي)', '${net.toStringAsFixed(2)} $currency'],
-              [
-                'ضريبة القيمة المضافة (VAT)',
-                '${tax.toStringAsFixed(2)} $currency',
+          pw.SizedBox(height: 8),
+          pw.Container(
+            padding: const pw.EdgeInsets.all(10),
+            decoration: pw.BoxDecoration(
+              color: PrintUtils.softSurface,
+              border: pw.Border.all(color: PrintUtils.softBorder),
+              borderRadius: pw.BorderRadius.circular(5),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+              children: [
+                pw.Row(
+                  children: [
+                    pw.Expanded(
+                      child: _invoiceMeta('رقم الفاتورة', invoiceNo.toString()),
+                    ),
+                    pw.SizedBox(width: 10),
+                    pw.Expanded(child: _invoiceMeta('التاريخ', date)),
+                    pw.SizedBox(width: 10),
+                    pw.Expanded(
+                      child: _invoiceMeta('رقم العقد', contractNo.toString()),
+                    ),
+                  ],
+                ),
+                PrintUtils.buildLabelValue(
+                  'اسم المستأجر',
+                  tenantName,
+                  labelWidth: 90,
+                ),
+                PrintUtils.buildLabelValue(
+                  'الرقم الضريبي للمنشأة',
+                  companyTax.isEmpty ? 'غير مضبوط في الإعدادات' : companyTax,
+                  valueDirection: pw.TextDirection.ltr,
+                  labelWidth: 120,
+                ),
               ],
-              ['الإجمالي مستحق الدفع', '${gross.toStringAsFixed(2)} $currency'],
+            ),
+          ),
+          pw.SizedBox(height: 12),
+          pw.TableHelper.fromTextArray(
+            headers: ['الوصف', 'العملة', 'المبلغ'],
+            data: [
+              [
+                'قيمة الإيجار (الصافي)',
+                currency,
+                PrintUtils.formatPdfAmount(net),
+              ],
+              [
+                'ضريبة القيمة المضافة',
+                currency,
+                PrintUtils.formatPdfAmount(tax),
+              ],
+              ['الإجمالي المستحق', currency, PrintUtils.formatPdfAmount(gross)],
             ],
             headerStyle: pw.TextStyle(
               fontSize: 10,
               fontWeight: pw.FontWeight.bold,
               color: PdfColors.white,
             ),
-            headerDecoration: const pw.BoxDecoration(
-              color: PdfColors.blueGrey800,
+            headerDecoration: pw.BoxDecoration(color: PrintUtils.brandNavy),
+            cellStyle: const pw.TextStyle(fontSize: 10, lineSpacing: 2),
+            cellPadding: const pw.EdgeInsets.symmetric(
+              horizontal: 7,
+              vertical: 8,
             ),
-            cellStyle: const pw.TextStyle(fontSize: 10),
+            tableDirection: pw.TextDirection.rtl,
+            headerDirection: pw.TextDirection.rtl,
+            columnWidths: const {
+              0: pw.FlexColumnWidth(2.5),
+              1: pw.FlexColumnWidth(1.2),
+              2: pw.FixedColumnWidth(100),
+            },
+            border: pw.TableBorder.all(
+              color: PrintUtils.softBorder,
+              width: 0.5,
+            ),
+            oddRowDecoration: pw.BoxDecoration(color: PrintUtils.softSurface),
           ),
-          pw.SizedBox(height: 32),
-          pw.Center(
-            child: pw.BarcodeWidget(
-              barcode: pw.Barcode.qrCode(),
-              data:
-                  'Invoice: $invoiceNo\nSupplier: $companyName\nVAT: $companyTax\nTenant: $tenantName\nNet: ${net.toStringAsFixed(2)}\nTax: ${tax.toStringAsFixed(2)}\nTotal: ${gross.toStringAsFixed(2)}\nCurrency: $currency\nDate: $date',
-              width: 90,
-              height: 90,
+          pw.SizedBox(height: 18),
+          pw.Container(
+            padding: const pw.EdgeInsets.all(9),
+            decoration: pw.BoxDecoration(
+              border: pw.Border.all(color: PrintUtils.softBorder),
+              borderRadius: pw.BorderRadius.circular(5),
+            ),
+            child: pw.Row(
+              children: [
+                pw.Expanded(
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                    children: [
+                      pw.Text(
+                        'إجمالي المبلغ المستحق',
+                        textDirection: pw.TextDirection.rtl,
+                        textAlign: pw.TextAlign.right,
+                        style: const pw.TextStyle(
+                          fontSize: 9,
+                          color: PdfColors.grey700,
+                        ),
+                      ),
+                      pw.SizedBox(height: 4),
+                      pw.Text(
+                        PrintUtils.formatPdfAmount(gross),
+                        textDirection: pw.TextDirection.ltr,
+                        textAlign: pw.TextAlign.right,
+                        style: pw.TextStyle(
+                          fontSize: 17,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PrintUtils.brandNavy,
+                        ),
+                      ),
+                      pw.Text(
+                        currency,
+                        textDirection: pw.TextDirection.rtl,
+                        textAlign: pw.TextAlign.right,
+                        style: pw.TextStyle(
+                          fontSize: 10,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PrintUtils.brandEmerald,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                pw.SizedBox(width: 12),
+                pw.Column(
+                  children: [
+                    pw.Text(
+                      'رمز بيانات الفاتورة',
+                      textDirection: pw.TextDirection.rtl,
+                      style: const pw.TextStyle(fontSize: 8),
+                    ),
+                    pw.SizedBox(height: 4),
+                    pw.BarcodeWidget(
+                      barcode: pw.Barcode.qrCode(),
+                      data:
+                          'رقم الفاتورة: $invoiceNo\nالمنشأة: $companyName\nالرقم الضريبي: $companyTax\nالمستأجر: $tenantName\nالصافي: ${PrintUtils.formatPdfAmount(net)}\nالضريبة: ${PrintUtils.formatPdfAmount(tax)}\nالإجمالي: ${PrintUtils.formatPdfAmount(gross)}\nالعملة: $currency\nالتاريخ: $date',
+                      width: 76,
+                      height: 76,
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
-          pw.SizedBox(height: 28),
+          pw.SizedBox(height: 20),
           pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
             children: [
-              pw.Column(
-                children: [
-                  pw.Text('المحاسب'),
-                  pw.SizedBox(height: 28),
-                  pw.Text('________________'),
-                ],
-              ),
-              pw.Column(
-                children: [
-                  pw.Text('استلمت أصل الفاتورة'),
-                  pw.SizedBox(height: 28),
-                  pw.Text('________________'),
-                ],
-              ),
+              _invoiceSignature('توقيع المحاسب'),
+              _invoiceSignature('توقيع المستلم'),
             ],
           ),
         ],
@@ -280,6 +360,52 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
       return 'تعذر تجهيز/طباعة المستند: $e';
     }
   }
+
+  pw.Widget _invoiceMeta(String label, String value) => pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+    children: [
+      pw.Text(
+        label,
+        textDirection: pw.TextDirection.rtl,
+        textAlign: pw.TextAlign.center,
+        style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+      ),
+      pw.SizedBox(height: 2),
+      pw.Text(
+        value,
+        textDirection: pw.TextDirection.ltr,
+        textAlign: pw.TextAlign.center,
+        style: pw.TextStyle(
+          fontSize: 10,
+          fontWeight: pw.FontWeight.bold,
+          color: PrintUtils.brandNavy,
+        ),
+      ),
+    ],
+  );
+
+  pw.Widget _invoiceSignature(String title) => pw.Expanded(
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      children: [
+        pw.Text(
+          title,
+          textDirection: pw.TextDirection.rtl,
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(
+            fontSize: 9,
+            fontWeight: pw.FontWeight.bold,
+            color: PrintUtils.brandNavy,
+          ),
+        ),
+        pw.SizedBox(height: 23),
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 35),
+          child: pw.Container(height: 0.7, color: PdfColors.grey700),
+        ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -363,7 +489,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                       children: [
                         Expanded(
                           child: DropdownButtonFormField<int>(
-                            value: _revenueAccountId,
+                            initialValue: _revenueAccountId,
                             items: accProv.accounts
                                 .where(
                                   (a) =>
@@ -388,7 +514,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                         const SizedBox(width: 16),
                         Expanded(
                           child: DropdownButtonFormField<int>(
-                            value: _taxAccountId,
+                            initialValue: _taxAccountId,
                             items: accProv.accounts
                                 .where(
                                   (a) =>
@@ -430,12 +556,13 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                           firstDate: DateTime(2000),
                           lastDate: DateTime(2100),
                         );
-                        if (picked != null && mounted)
+                        if (picked != null && mounted) {
                           setState(
                             () => _dateController.text = DateFormat(
                               'yyyy-MM-dd',
                             ).format(picked),
                           );
+                        }
                       },
                     ),
                     const SizedBox(height: 16),

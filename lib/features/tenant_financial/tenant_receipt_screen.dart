@@ -177,7 +177,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         date: _dateController.text,
         targetName: tenantName,
         amount: amountCents / 100,
-        paymentMethod: 'نقداً/بنكي',
+        paymentMethod: null,
         accountName: accountName,
         description: 'تحصيل دفعة إيجار',
       );
