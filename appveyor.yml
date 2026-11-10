@@ -8,13 +8,18 @@ environment:
 install:
   - git clone https://github.com/flutter/flutter.git --depth 1 -b %FLUTTER_CHANNEL% C:\flutter_sdk
   - set PATH=C:\flutter_sdk\bin;%PATH%
+  - choco install innosetup --no-progress -y
   - flutter config --enable-windows-desktop
   - flutter doctor
   - flutter pub get
 
 build_script:
-  - flutter build windows
+  - flutter build windows --release
+  - if not exist build\windows\installer mkdir build\windows\installer
+  - '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\aqari_setup.iss'
 
 artifacts:
+  - path: build\windows\installer\Aqari-ERP-Setup.exe
+    name: AqariERPInstaller
   - path: build\windows\x64\runner\Release
     name: DesktopERP

@@ -48,6 +48,19 @@ class PrintUtils {
   static String formatPdfAmount(num amount) =>
       NumberFormat('#,##0.00', 'en_US').format(amount);
 
+  static pw.TextDirection resolveTextDirection(
+    String text, {
+    pw.TextDirection? preferred,
+  }) {
+    if (RegExp(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]').hasMatch(text)) {
+      return pw.TextDirection.rtl;
+    }
+    if (preferred != null) return preferred;
+    return RegExp(r'[A-Za-z0-9]').hasMatch(text)
+        ? pw.TextDirection.ltr
+        : pw.TextDirection.rtl;
+  }
+
   static void clearLogoCache() {
     _cachedLogoPath = null;
     _cachedLogoModified = null;
@@ -404,7 +417,7 @@ class PrintUtils {
     final fax = _firstNonEmpty(info?['fax']);
     final mobile = _firstNonEmpty(info?['mobile']);
     final englishParts = <String>[
-      if (addressEn != null) addressEn,
+      ?addressEn,
       if (poBox != null) 'P.O. Box $poBox',
       if (telephone != null) 'Tel. $telephone',
       if (fax != null) 'Fax $fax',
@@ -636,7 +649,7 @@ class PrintUtils {
                 if (hasParty)
                   buildLabelValue(
                     isReceipt ? 'اسم المستلم منه' : 'اسم المستفيد',
-                    targetName!.trim(),
+                    targetName.trim(),
                     labelWidth: 100,
                     fontSize: 10,
                   ),
@@ -811,22 +824,25 @@ class PrintUtils {
     return pdf.save();
   }
 
-  static pw.Widget _documentTitle(String title) => pw.Column(
-    mainAxisSize: pw.MainAxisSize.min,
-    children: [
-      pw.Text(
-        title,
-        textDirection: pw.TextDirection.rtl,
-        textAlign: pw.TextAlign.center,
-        style: pw.TextStyle(
-          fontSize: 16,
-          fontWeight: pw.FontWeight.bold,
-          color: brandNavy,
+  static pw.Widget _documentTitle(String title) => pw.Center(
+    child: pw.Column(
+      mainAxisSize: pw.MainAxisSize.min,
+      crossAxisAlignment: pw.CrossAxisAlignment.center,
+      children: [
+        pw.Text(
+          title,
+          textDirection: pw.TextDirection.rtl,
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(
+            fontSize: 16,
+            fontWeight: pw.FontWeight.bold,
+            color: brandNavy,
+          ),
         ),
-      ),
-      pw.SizedBox(height: 4),
-      pw.Container(width: 58, height: 2, color: brandEmerald),
-    ],
+        pw.SizedBox(height: 4),
+        pw.Container(width: 58, height: 2, color: brandEmerald),
+      ],
+    ),
   );
 
   static pw.Widget _metadataItem(
@@ -860,7 +876,7 @@ class PrintUtils {
   static pw.Widget buildLabelValue(
     String label,
     String value, {
-    pw.TextDirection valueDirection = pw.TextDirection.rtl,
+    pw.TextDirection? valueDirection,
     double labelWidth = 100,
     double fontSize = 10,
   }) => pw.Padding(
@@ -881,7 +897,10 @@ class PrintUtils {
         pw.Expanded(
           child: pw.Text(
             value,
-            textDirection: valueDirection,
+            textDirection: resolveTextDirection(
+              value,
+              preferred: valueDirection,
+            ),
             textAlign: pw.TextAlign.right,
             style: pw.TextStyle(fontSize: fontSize),
           ),

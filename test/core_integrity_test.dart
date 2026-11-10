@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:provider/provider.dart';
+import 'package:pdf/widgets.dart' as pw;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -146,11 +147,25 @@ void main() {
     );
   });
 
+  test('PDF direction preserves RTL Arabic fallbacks and LTR dates', () {
+    expect(
+      PrintUtils.resolveTextDirection(
+        'غير مدون',
+        preferred: pw.TextDirection.ltr,
+      ),
+      pw.TextDirection.rtl,
+    );
+    expect(PrintUtils.resolveTextDirection('2026/11/10'), pw.TextDirection.ltr);
+  });
+
   test('lease terms prefer saved settings and strip display numbering', () {
     expect(LeaseContractTerms.defaultClauses, hasLength(8));
     expect(LeaseContractTerms.resolve('شرط خاص للمؤسسة\n2. شرط ثانٍ'), [
       'شرط خاص للمؤسسة',
       'شرط ثانٍ',
+    ]);
+    expect(LeaseContractTerms.resolve('١. بند مرقم بالأرقام العربية'), [
+      'بند مرقم بالأرقام العربية',
     ]);
     expect(LeaseContractTerms.resolve('  '), LeaseContractTerms.defaultClauses);
   });
@@ -254,7 +269,7 @@ void main() {
   );
 
   test(
-    'default lease template embeds the settings logo and fits two pages',
+    'default lease template embeds the settings logo and fits one page',
     () async {
       final logoFile = File(
         '${Directory.systemTemp.path}/aqari-test-logo-${DateTime.now().microsecondsSinceEpoch}.png',
@@ -307,10 +322,36 @@ void main() {
         final source = latin1.decode(pdf);
         expect(source, contains('Tajawal'));
         expect(RegExp(r'/Subtype\s*/Image').hasMatch(source), isTrue);
-        expect(RegExp(r'/Type\s*/Page\b').allMatches(source).length, 2);
+        expect(RegExp(r'/Type\s*/Page\b').allMatches(source).length, 1);
       } finally {
         if (await logoFile.exists()) await logoFile.delete();
       }
+    },
+  );
+
+  test(
+    'long lease terms add pages and keep signatures in the document flow',
+    () async {
+      final longTerms = List.generate(
+        28,
+        (index) =>
+            'شرط ${index + 1}: يلتزم الطرفان بتنفيذ الالتزامات الواردة في هذا العقد '
+            'بما يحفظ حقوق الطرفين ويضمن سلامة العقار وتسوية الالتزامات المالية '
+            'وفق الأنظمة والتعليمات المعمول بها طوال مدة الإيجار.',
+      ).join('\n');
+      final pdf = await LeaseContractPdf.build(
+        companyInfo: {'terms_conditions': longTerms},
+        contract: {'rent_amount': 1200.0},
+        owner: {'name': 'المؤجر'},
+        tenant: {'name': 'المستأجر'},
+        property: {'name': 'العقار'},
+        unit: {'unit_number': '1'},
+      );
+      final source = latin1.decode(pdf);
+      expect(
+        RegExp(r'/Type\s*/Page\b').allMatches(source).length,
+        greaterThan(1),
+      );
     },
   );
 

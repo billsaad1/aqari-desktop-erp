@@ -21,7 +21,7 @@ class LeaseContractTerms {
         .split(RegExp(r'\r?\n'))
         .map(
           (line) => line
-              .replaceFirst(RegExp(r'^\s*(?:\d+\s*[.)-]|[•\-])\s*'), '')
+              .replaceFirst(RegExp(r'^\s*(?:[\d٠-٩۰-۹]+\s*[.)-]|[•\-])\s*'), '')
               .trim(),
         )
         .where((line) => line.isNotEmpty)

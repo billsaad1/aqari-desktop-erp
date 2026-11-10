@@ -52,8 +52,14 @@ class LeaseContractPdf {
     pdf.addPage(
       pw.MultiPage(
         pageTheme: documentPageTheme,
-        maxPages: 20,
-        header: (_) => PrintUtils.buildHeader(companyInfo, false),
+        maxPages: 80,
+        header: (context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+          children: [
+            PrintUtils.buildHeader(companyInfo, false),
+            if (context.pageNumber > 1) _documentTitle('عقد إيجار — تابع'),
+          ],
+        ),
         footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
         build: (_) => [
           _documentTitle('عقد إيجار'),
@@ -241,62 +247,16 @@ class LeaseContractPdf {
                   ? '${clauses[index]} القراءة المسجلة: $electricityReading'
                   : clauses[index],
             ),
+          pw.SizedBox(height: 7),
+          _sectionTitle('اعتماد وتوقيعات الأطراف'),
+          pw.SizedBox(height: 4),
+          _signatureRow(
+            ownerName: ownerName,
+            ownerIdentity: _value(owner['identity_number']),
+            tenantName: tenantName,
+            tenantIdentity: _value(tenant['identity_number']),
+          ),
         ],
-      ),
-    );
-
-    pdf.addPage(
-      pw.Page(
-        pageTheme: documentPageTheme,
-        build: (_) => pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-          children: [
-            PrintUtils.buildHeader(companyInfo, false),
-            _documentTitle('اعتماد وتوقيعات الأطراف'),
-            pw.SizedBox(height: 9),
-            _metadata(contractId, issueDate),
-            pw.SizedBox(height: 20),
-            pw.Row(
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
-              children: [
-                pw.Expanded(
-                  child: _signatureParty(
-                    role: 'الطرف الثاني — المستأجر',
-                    name: tenantName,
-                    identity: _value(
-                      tenant['identity_number'],
-                      fallback: 'غير مدون',
-                    ),
-                  ),
-                ),
-                pw.SizedBox(width: 10),
-                _stampArea(),
-                pw.SizedBox(width: 10),
-                pw.Expanded(
-                  child: _signatureParty(
-                    role: 'الطرف الأول — المؤجر',
-                    name: ownerName,
-                    identity: _value(
-                      owner['identity_number'],
-                      fallback: 'غير مدون',
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            pw.Spacer(),
-            pw.Container(height: 0.7, color: PrintUtils.softBorder),
-            pw.SizedBox(height: 7),
-            pw.Text(
-              'توقيع الطرفين وختم المنشأة',
-              textDirection: pw.TextDirection.rtl,
-              textAlign: pw.TextAlign.center,
-              style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
-            ),
-            pw.SizedBox(height: 12),
-            PrintUtils.buildFooter(companyInfo),
-          ],
-        ),
       ),
     );
 
@@ -473,7 +433,7 @@ class LeaseContractPdf {
   static pw.Widget _field(
     String label,
     String value, {
-    pw.TextDirection valueDirection = pw.TextDirection.rtl,
+    pw.TextDirection? valueDirection,
   }) => pw.Padding(
     padding: const pw.EdgeInsets.symmetric(vertical: 1.2),
     child: pw.Row(
@@ -492,7 +452,10 @@ class LeaseContractPdf {
         pw.Expanded(
           child: pw.Text(
             value,
-            textDirection: valueDirection,
+            textDirection: PrintUtils.resolveTextDirection(
+              value,
+              preferred: valueDirection,
+            ),
             textAlign: pw.TextAlign.right,
             style: const pw.TextStyle(fontSize: 9.5),
           ),
@@ -597,52 +560,93 @@ class LeaseContractPdf {
     ),
   );
 
+  static pw.Widget _signatureRow({
+    required String ownerName,
+    required String ownerIdentity,
+    required String tenantName,
+    required String tenantIdentity,
+  }) => pw.Container(
+    padding: const pw.EdgeInsets.all(5),
+    decoration: pw.BoxDecoration(
+      border: pw.Border.all(color: PrintUtils.softBorder),
+      borderRadius: pw.BorderRadius.circular(5),
+    ),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Expanded(
+          child: _signatureParty(
+            role: 'الطرف الأول — المؤجر',
+            name: ownerName,
+            identity: ownerIdentity,
+          ),
+        ),
+        pw.SizedBox(width: 8),
+        _stampArea(),
+        pw.SizedBox(width: 8),
+        pw.Expanded(
+          child: _signatureParty(
+            role: 'الطرف الثاني — المستأجر',
+            name: tenantName,
+            identity: tenantIdentity,
+          ),
+        ),
+      ],
+    ),
+  );
+
   static pw.Widget _signatureParty({
     required String role,
     required String name,
     required String identity,
   }) => pw.Container(
-    height: 205,
-    padding: const pw.EdgeInsets.all(11),
-    decoration: pw.BoxDecoration(
-      border: pw.Border.all(color: PrintUtils.softBorder),
-      borderRadius: pw.BorderRadius.circular(6),
-    ),
     child: pw.Column(
       crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      mainAxisSize: pw.MainAxisSize.min,
       children: [
         pw.Text(
           role,
           textDirection: pw.TextDirection.rtl,
-          textAlign: pw.TextAlign.right,
+          textAlign: pw.TextAlign.center,
           style: pw.TextStyle(
-            fontSize: 10,
+            fontSize: 8.5,
             fontWeight: pw.FontWeight.bold,
             color: PrintUtils.brandNavy,
           ),
         ),
-        pw.SizedBox(height: 13),
-        _signatureInfo('الاسم', name, pw.TextDirection.rtl),
-        pw.SizedBox(height: 6),
-        _signatureInfo('رقم الهوية', identity, pw.TextDirection.ltr),
-        pw.Spacer(),
-        pw.Text(
-          'التوقيع',
-          textDirection: pw.TextDirection.rtl,
-          textAlign: pw.TextAlign.right,
-          style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
-        ),
         pw.SizedBox(height: 3),
-        pw.Container(height: 0.8, color: PdfColors.grey700),
-        pw.SizedBox(height: 12),
+        _signatureInfo('الاسم', name, PrintUtils.resolveTextDirection(name)),
+        _signatureInfo(
+          'رقم الهوية',
+          identity,
+          PrintUtils.resolveTextDirection(identity),
+        ),
+        pw.SizedBox(height: 5),
         pw.Row(
           children: [
             pw.Text(
-              'تاريخ التوقيع',
+              'التوقيع',
               textDirection: pw.TextDirection.rtl,
               style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
             ),
-            pw.SizedBox(width: 5),
+            pw.SizedBox(width: 4),
+            pw.Expanded(
+              child: pw.Container(height: 0.7, color: PdfColors.grey700),
+            ),
+          ],
+        ),
+        pw.SizedBox(height: 4),
+        pw.Row(
+          children: [
+            pw.Text(
+              'التاريخ',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(
+                fontSize: 7.5,
+                color: PdfColors.grey700,
+              ),
+            ),
+            pw.SizedBox(width: 4),
             pw.Expanded(
               child: pw.Container(height: 0.6, color: PrintUtils.softBorder),
             ),
@@ -675,8 +679,8 @@ class LeaseContractPdf {
   );
 
   static pw.Widget _stampArea() => pw.Container(
-    width: 102,
-    height: 150,
+    width: 74,
+    height: 48,
     alignment: pw.Alignment.center,
     decoration: pw.BoxDecoration(
       border: pw.Border.all(color: PrintUtils.softBorder, width: 0.8),
