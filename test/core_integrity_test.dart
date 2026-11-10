@@ -233,7 +233,7 @@ void main() {
         description: 'دفعة إيجار اختبارية',
       );
       expect(String.fromCharCodes(pdf.take(5)), '%PDF-');
-      expect(latin1.decode(pdf), contains('Tajawal'));
+      expect(latin1.decode(pdf), contains('AqariPDFArabic'));
       final detailedVoucherPdf = await PrintUtils.buildVoucherPdf(
         voucherType: 'سند قبض مستأجر',
         voucherNo: 18,
@@ -334,7 +334,7 @@ void main() {
           unitTypeName: 'غرفة',
         );
         final source = latin1.decode(pdf);
-        expect(source, contains('Tajawal'));
+        expect(source, contains('AqariPDFArabic'));
         expect(RegExp(r'/Subtype\s*/Image').hasMatch(source), isTrue);
         expect(RegExp(r'/Type\s*/Page\b').allMatches(source).length, 1);
       } finally {

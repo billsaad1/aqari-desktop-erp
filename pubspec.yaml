@@ -74,6 +74,8 @@ flutter:
   assets:
     - assets/fonts/Cairo-Regular.ttf
     - assets/fonts/Cairo-Bold.ttf
+    - assets/fonts/AqariPDFArabic-Regular.ttf
+    - assets/fonts/AqariPDFArabic-Bold.ttf
   fonts:
     - family: Cairo
       fonts:

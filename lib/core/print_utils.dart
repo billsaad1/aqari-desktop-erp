@@ -25,8 +25,12 @@ class PrintUtils {
       : 'تم حفظ ملف PDF';
 
   static Future<pw.ThemeData> loadArabicTheme() async {
-    final regularData = await rootBundle.load('assets/fonts/Cairo-Regular.ttf');
-    final boldData = await rootBundle.load('assets/fonts/Cairo-Bold.ttf');
+    final regularData = await rootBundle.load(
+      'assets/fonts/AqariPDFArabic-Regular.ttf',
+    );
+    final boldData = await rootBundle.load(
+      'assets/fonts/AqariPDFArabic-Bold.ttf',
+    );
     return pw.ThemeData.withFont(
       base: pw.Font.ttf(regularData),
       bold: pw.Font.ttf(boldData),
@@ -315,24 +319,36 @@ class PrintUtils {
                   pw.Text(
                     nameAr,
                     textDirection: pw.TextDirection.rtl,
-                    textAlign: pw.TextAlign.right,
+                    textAlign: pw.TextAlign.start,
+                    overflow: pw.TextOverflow.visible,
                     style: pw.TextStyle(
                       fontSize: 14,
                       fontWeight: pw.FontWeight.bold,
                       color: brandNavy,
                     ),
                   ),
-                  if (activityAr != null)
-                    pw.Text(
-                      activityAr,
-                      textDirection: pw.TextDirection.rtl,
-                      textAlign: pw.TextAlign.right,
-                      style: const pw.TextStyle(fontSize: 8.5),
+                  if (activityAr != null) ...[
+                    pw.SizedBox(height: 2.5),
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.only(left: 2, right: 4),
+                      child: pw.Text(
+                        activityAr,
+                        textDirection: pw.TextDirection.rtl,
+                        textAlign: pw.TextAlign.start,
+                        overflow: pw.TextOverflow.visible,
+                        style: const pw.TextStyle(fontSize: 8.5),
+                      ),
                     ),
+                  ],
+                  if (commercialRegister != null ||
+                      (isFinancialDocument && taxNumber != null))
+                    pw.SizedBox(height: 2.5),
                   if (commercialRegister != null)
                     _companyNumberLine('س.ت:', commercialRegister),
-                  if (isFinancialDocument && taxNumber != null)
+                  if (isFinancialDocument && taxNumber != null) ...[
+                    if (commercialRegister != null) pw.SizedBox(height: 1.5),
                     _companyNumberLine('الرقم الضريبي:', taxNumber),
+                  ],
                 ],
               ),
             ),
@@ -367,20 +383,26 @@ class PrintUtils {
                         color: brandNavy,
                       ),
                     ),
-                  if (activityEn != null)
+                  if (activityEn != null) ...[
+                    pw.SizedBox(height: 2.5),
                     pw.Text(
                       activityEn,
                       textDirection: pw.TextDirection.ltr,
                       textAlign: pw.TextAlign.left,
+                      overflow: pw.TextOverflow.visible,
                       style: const pw.TextStyle(fontSize: 8.5),
                     ),
-                  if (commercialRegister != null)
+                  ],
+                  if (commercialRegister != null) ...[
+                    if (activityEn != null) pw.SizedBox(height: 1.5),
                     pw.Text(
                       'C.R. $commercialRegister',
                       textDirection: pw.TextDirection.ltr,
                       textAlign: pw.TextAlign.left,
+                      overflow: pw.TextOverflow.visible,
                       style: const pw.TextStyle(fontSize: 8),
                     ),
+                  ],
                 ],
               ),
             ),
@@ -396,16 +418,25 @@ class PrintUtils {
   static pw.Widget _companyNumberLine(String label, String value) => pw.Row(
     mainAxisSize: pw.MainAxisSize.min,
     children: [
-      pw.Text(
-        label,
-        textDirection: pw.TextDirection.rtl,
-        style: const pw.TextStyle(fontSize: 8),
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 2),
+        child: pw.Text(
+          label,
+          textDirection: pw.TextDirection.rtl,
+          textAlign: pw.TextAlign.start,
+          overflow: pw.TextOverflow.visible,
+          style: const pw.TextStyle(fontSize: 8),
+        ),
       ),
       pw.SizedBox(width: 3),
-      pw.Text(
-        value,
-        textDirection: pw.TextDirection.ltr,
-        style: const pw.TextStyle(fontSize: 8),
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 2),
+        child: pw.Text(
+          value,
+          textDirection: pw.TextDirection.ltr,
+          overflow: pw.TextOverflow.visible,
+          style: const pw.TextStyle(fontSize: 8),
+        ),
       ),
     ],
   );
@@ -424,7 +455,6 @@ class PrintUtils {
       if (fax != null) 'Fax $fax',
       if (mobile != null) 'Mobile $mobile',
     ];
-
     final contactFields = <(String, String)>[
       if (telephone != null) ('هاتف', telephone),
       if (fax != null) ('فاكس', fax),
@@ -436,25 +466,23 @@ class PrintUtils {
       mainAxisSize: pw.MainAxisSize.min,
       children: [
         pw.Container(height: 1, color: brandEmerald),
-        pw.SizedBox(height: 4),
+        pw.SizedBox(height: 5),
         if (addressAr != null || poBox != null)
           pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            crossAxisAlignment: pw.CrossAxisAlignment.center,
             children: [
               if (addressAr != null)
                 pw.Expanded(
                   flex: 3,
-                  child: _footerField(
+                  child: _footerInlineField(
                     'العنوان',
                     addressAr,
                     valueDirection: pw.TextDirection.rtl,
-                    valueAlignment: pw.TextAlign.right,
-                    labelAlignment: pw.TextAlign.right,
                   ),
                 ),
               if (poBox != null)
                 pw.Expanded(
-                  child: _footerField(
+                  child: _footerInlineField(
                     'ص.ب',
                     poBox,
                     valueDirection: pw.TextDirection.ltr,
@@ -462,13 +490,14 @@ class PrintUtils {
                 ),
             ],
           ),
-        if (contactFields.isNotEmpty)
+        if (contactFields.isNotEmpty) ...[
+          pw.SizedBox(height: 4),
           pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            crossAxisAlignment: pw.CrossAxisAlignment.center,
             children: [
               for (final field in contactFields)
                 pw.Expanded(
-                  child: _footerField(
+                  child: _footerInlineField(
                     field.$1,
                     field.$2,
                     valueDirection: pw.TextDirection.ltr,
@@ -476,49 +505,54 @@ class PrintUtils {
                 ),
             ],
           ),
-        if (englishParts.isNotEmpty)
-          pw.Padding(
-            padding: const pw.EdgeInsets.only(top: 2),
-            child: pw.Text(
-              englishParts.join('   |   '),
-              textDirection: pw.TextDirection.ltr,
-              textAlign: pw.TextAlign.center,
-              style: const pw.TextStyle(
-                fontSize: 6.5,
-                color: PdfColors.grey700,
-              ),
-            ),
+        ],
+        if (englishParts.isNotEmpty) ...[
+          pw.SizedBox(height: 4),
+          pw.Text(
+            englishParts.join('   |   '),
+            textDirection: pw.TextDirection.ltr,
+            textAlign: pw.TextAlign.center,
+            overflow: pw.TextOverflow.visible,
+            style: const pw.TextStyle(fontSize: 7.2, color: PdfColors.grey700),
           ),
+        ],
       ],
     );
   }
 
-  static pw.Widget _footerField(
+  static pw.Widget _footerInlineField(
     String label,
     String value, {
     required pw.TextDirection valueDirection,
     pw.TextAlign valueAlignment = pw.TextAlign.center,
-    pw.TextAlign labelAlignment = pw.TextAlign.center,
-  }) => pw.Padding(
-    padding: const pw.EdgeInsets.symmetric(horizontal: 3),
-    child: pw.Column(
-      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-      mainAxisSize: pw.MainAxisSize.min,
-      children: [
-        pw.Text(
-          label,
+  }) => pw.Row(
+    crossAxisAlignment: pw.CrossAxisAlignment.center,
+    children: [
+      pw.Padding(
+        padding: const pw.EdgeInsets.only(left: 2, right: 4),
+        child: pw.Text(
+          '$label:',
           textDirection: pw.TextDirection.rtl,
-          textAlign: labelAlignment,
-          style: const pw.TextStyle(fontSize: 6.8, color: PdfColors.grey700),
+          textAlign: pw.TextAlign.start,
+          overflow: pw.TextOverflow.visible,
+          style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey700),
         ),
-        pw.Text(
-          value,
-          textDirection: valueDirection,
-          textAlign: valueAlignment,
-          style: const pw.TextStyle(fontSize: 7.6, color: PdfColors.grey900),
+      ),
+      pw.Expanded(
+        child: pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 4),
+          child: pw.Text(
+            value,
+            textDirection: valueDirection,
+            textAlign: valueDirection == pw.TextDirection.rtl
+                ? pw.TextAlign.start
+                : valueAlignment,
+            overflow: pw.TextOverflow.visible,
+            style: const pw.TextStyle(fontSize: 8.2, color: PdfColors.grey900),
+          ),
         ),
-      ],
-    ),
+      ),
+    ],
   );
 
   static pw.Widget buildPageFooter(
@@ -529,15 +563,20 @@ class PrintUtils {
       mainAxisSize: pw.MainAxisSize.min,
       children: [
         buildFooter(info),
-        pw.SizedBox(height: 3),
-        pw.Align(
-          alignment: pw.Alignment.center,
-          child: pw.Text(
-            'صفحة ${context.pageNumber} من ${context.pagesCount}',
-            textDirection: pw.TextDirection.rtl,
-            style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey700),
+        if (context.pagesCount > 1) ...[
+          pw.SizedBox(height: 4),
+          pw.Align(
+            alignment: pw.Alignment.center,
+            child: pw.Text(
+              'صفحة ${context.pageNumber} من ${context.pagesCount}',
+              textDirection: pw.TextDirection.rtl,
+              style: const pw.TextStyle(
+                fontSize: 7.5,
+                color: PdfColors.grey700,
+              ),
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -648,12 +687,31 @@ class PrintUtils {
               crossAxisAlignment: pw.CrossAxisAlignment.stretch,
               children: [
                 if (hasParty)
-                  buildLabelValue(
-                    isReceipt ? 'استلمنا من الأخ/الأخت' : 'اسم المستفيد',
-                    targetName.trim(),
-                    labelWidth: 100,
-                    fontSize: 10.5,
-                  ),
+                  isReceipt
+                      ? pw.Padding(
+                          padding: const pw.EdgeInsets.only(
+                            left: 4,
+                            right: 5,
+                            bottom: 7,
+                          ),
+                          child: pw.Text(
+                            'استلمنا من الأخ/الأخت ${targetName.trim()}',
+                            textDirection: pw.TextDirection.rtl,
+                            textAlign: pw.TextAlign.start,
+                            overflow: pw.TextOverflow.visible,
+                            style: pw.TextStyle(
+                              fontSize: 11,
+                              fontWeight: pw.FontWeight.bold,
+                              color: brandNavy,
+                            ),
+                          ),
+                        )
+                      : buildLabelValue(
+                          'اسم المستفيد',
+                          targetName.trim(),
+                          labelWidth: 100,
+                          fontSize: 10.5,
+                        ),
                 pw.Row(
                   children: [
                     pw.Text(
@@ -669,19 +727,24 @@ class PrintUtils {
                       formatPdfAmount(amount),
                       textDirection: pw.TextDirection.ltr,
                       style: pw.TextStyle(
-                        fontSize: 20,
+                        fontSize: 16,
                         fontWeight: pw.FontWeight.bold,
                         color: brandNavy,
                       ),
                     ),
                     pw.SizedBox(width: 7),
-                    pw.Text(
-                      currencyLabel,
-                      textDirection: pw.TextDirection.rtl,
-                      style: pw.TextStyle(
-                        fontSize: 11,
-                        fontWeight: pw.FontWeight.bold,
-                        color: brandEmerald,
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.symmetric(horizontal: 3),
+                      child: pw.Text(
+                        currencyLabel,
+                        textDirection: pw.TextDirection.rtl,
+                        textAlign: pw.TextAlign.start,
+                        overflow: pw.TextOverflow.visible,
+                        style: pw.TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: pw.FontWeight.bold,
+                          color: brandEmerald,
+                        ),
                       ),
                     ),
                   ],
@@ -889,35 +952,45 @@ class PrintUtils {
     pw.TextDirection? valueDirection,
     double labelWidth = 100,
     double fontSize = 10,
-  }) => pw.Padding(
-    padding: const pw.EdgeInsets.symmetric(vertical: 4),
-    child: pw.Row(
-      crossAxisAlignment: pw.CrossAxisAlignment.start,
-      children: [
-        pw.SizedBox(
-          width: labelWidth,
-          child: pw.Text(
-            label,
-            textDirection: pw.TextDirection.rtl,
-            textAlign: pw.TextAlign.right,
-            style: const pw.TextStyle(color: PdfColors.grey700),
-          ),
-        ),
-        pw.SizedBox(width: 6),
-        pw.Expanded(
-          child: pw.Text(
-            value,
-            textDirection: resolveTextDirection(
-              value,
-              preferred: valueDirection,
+  }) {
+    final direction = resolveTextDirection(value, preferred: valueDirection);
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 4.5),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: labelWidth,
+            child: pw.Padding(
+              padding: const pw.EdgeInsets.only(left: 2, right: 4),
+              child: pw.Text(
+                label,
+                textDirection: pw.TextDirection.rtl,
+                textAlign: pw.TextAlign.start,
+                overflow: pw.TextOverflow.visible,
+                style: const pw.TextStyle(color: PdfColors.grey700),
+              ),
             ),
-            textAlign: pw.TextAlign.right,
-            style: pw.TextStyle(fontSize: fontSize, wordSpacing: 1.12),
           ),
-        ),
-      ],
-    ),
-  );
+          pw.SizedBox(width: 6),
+          pw.Expanded(
+            child: pw.Padding(
+              padding: const pw.EdgeInsets.only(left: 3, right: 5),
+              child: pw.Text(
+                value,
+                textDirection: direction,
+                textAlign: direction == pw.TextDirection.rtl
+                    ? pw.TextAlign.start
+                    : pw.TextAlign.right,
+                overflow: pw.TextOverflow.visible,
+                style: pw.TextStyle(fontSize: fontSize, lineSpacing: 2),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   static pw.Widget _signature(String title) => pw.Expanded(
     child: pw.Column(
