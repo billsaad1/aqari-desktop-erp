@@ -10,11 +10,6 @@ import 'print_utils.dart';
 /// Data is passed from the selected property owner, tenant, unit and contract;
 /// vector letterhead details and the locally uploaded logo come from settings.
 class LeaseContractPdf {
-  static const _defaultOwnerName = 'عبدالله محمد أحمد النقيب';
-  static const _defaultOwnerIdentity = '1029836135';
-  static const _defaultOwnerIdentityDate = '1998/01/17';
-  static const _defaultOwnerIdentitySource = 'البيت';
-
   static const List<String> _clauses = [
     'لا يجوز للطرف الثاني أن يؤجر العقار بهذا العقد لأي شخص من جانبه.',
     'الطرف الأول غير ملزم بأي تعويض عما قد يقوم به الطرف الثاني من إصلاح أو تحسين في العقار المؤجر.',
@@ -43,6 +38,10 @@ class LeaseContractPdf {
     final endDate = _formatDate(contract['end_date']);
     final rent = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
     final rentDigits = NumberFormat('#,##0.00', 'en_US').format(rent);
+    final currency = PrintUtils.currencyInArabic(
+      companyInfo?['default_currency'],
+      fallback: 'عملة المنشأة',
+    );
     final purpose = _value(contract['purpose'], fallback: 'سكني');
     final propertyAddress = [
       _value(property['address'], fallback: ''),
@@ -51,7 +50,7 @@ class LeaseContractPdf {
       'الوحدة ${_value(unit['unit_number'])}',
     ].where((part) => part.trim().isNotEmpty).join(' - ');
     final unitType = _value(unitTypeName, fallback: '........................');
-    final ownerName = _value(owner['name'], fallback: _defaultOwnerName);
+    final ownerName = _value(owner['name']);
     final pdf = pw.Document();
 
     pdf.addPage(
@@ -81,7 +80,7 @@ class LeaseContractPdf {
               _sectionTitle('١. الطرف الأول (المؤجر)'),
               _line('الاسم: $ownerName   —   الصفة: المالك / الوكيل الشرعي'),
               _line(
-                'رقم الهوية: ${_value(owner['identity_number'], fallback: _defaultOwnerIdentity)}   تاريخها: ${_value(owner['identity_issue_date'], fallback: _defaultOwnerIdentityDate)}   مصدرها: ${_value(owner['identity_source'], fallback: _defaultOwnerIdentitySource)}',
+                'رقم الهوية: ${_value(owner['identity_number'])}   تاريخها: ${_value(owner['identity_issue_date'])}   مصدرها: ${_value(owner['identity_source'])}',
               ),
               pw.SizedBox(height: 3),
               _sectionTitle('٢. الطرف الثاني (المستأجر)'),
@@ -95,7 +94,7 @@ class LeaseContractPdf {
               pw.SizedBox(height: 4),
               _clause(
                 '٣',
-                'مقدار الإيجار: $rentDigits ريال سعودي فقط، كتابة: ${_amountInWords(rent)} ريال سعودي فقط لا غير.',
+                'مقدار الإيجار: $rentDigits $currency فقط، كتابة: ${formatAmountInWords(rent, companyInfo?['default_currency'])} فقط لا غير.',
               ),
               _clause('٤', 'مدة الإيجار: من $startDate إلى $endDate.'),
               _clause(
@@ -239,13 +238,36 @@ class LeaseContractPdf {
         : DateFormat('yyyy/MM/dd').format(parsed);
   }
 
-  static String _amountInWords(double amount) {
+  static String formatAmountInWords(double amount, Object? rawCurrency) {
+    final currency = PrintUtils.currencyInArabic(
+      rawCurrency,
+      fallback: 'عملة المنشأة',
+    );
+    return _amountInWords(amount, currency);
+  }
+
+  static String _amountInWords(double amount, String currency) {
     final cents = (amount.abs() * 100).round();
-    final riyals = cents ~/ 100;
-    final halalas = cents % 100;
-    final riyalsText = _integerInWords(riyals);
-    if (halalas == 0) return riyalsText;
-    return '$riyalsText و${_integerInWords(halalas)} هللة';
+    final majorUnits = cents ~/ 100;
+    final minorUnits = cents % 100;
+    final majorText = '${_integerInWords(majorUnits)} $currency';
+    if (minorUnits == 0) return majorText;
+    return '$majorText و${_integerInWords(minorUnits)} ${_fractionName(currency)}';
+  }
+
+  static String _fractionName(String currency) {
+    if (currency.contains('سعودي')) return 'هللة';
+    if (currency.contains('دولار') || currency == 'يورو') return 'سنت';
+    if (currency.contains('كويتي') ||
+        currency.contains('إماراتي') ||
+        currency.contains('بحريني') ||
+        currency.contains('يمني')) {
+      return 'فلس';
+    }
+    if (currency.contains('عماني')) return 'بيسة';
+    if (currency.contains('قطري')) return 'درهم';
+    if (currency.contains('مصري')) return 'قرش';
+    return 'جزء من مئة $currency';
   }
 
   static String _integerInWords(int value) {

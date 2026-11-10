@@ -53,9 +53,10 @@ class MainShellScreen extends StatelessWidget {
     switch (index) {
       case 0:
         return role.isNotEmpty;
-      case 1:
       case 9:
         return admin;
+      case 1:
+        return role == 'SuperAdmin';
       case 2:
       case 3:
         return admin || dataEntry;
@@ -144,7 +145,7 @@ class AppSidebar extends StatelessWidget {
                       0,
                       navProvider,
                     ),
-                    if (isSuperOrAdmin)
+                    if (role == 'SuperAdmin')
                       _buildNavItem(
                         context,
                         'إعدادات النظام',

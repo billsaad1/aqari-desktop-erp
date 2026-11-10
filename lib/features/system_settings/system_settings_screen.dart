@@ -596,10 +596,14 @@ class _UsersTabState extends State<UsersTab> {
     final fullNameController = TextEditingController();
     final usernameController = TextEditingController();
     final passwordController = TextEditingController();
+    final currentRole = Provider.of<AuthProvider>(
+      context,
+      listen: false,
+    ).currentUser?.role;
     String selectedRole = 'DataEntry';
 
     final List<String> roles = [
-      'SuperAdmin',
+      if (currentRole == 'SuperAdmin') 'SuperAdmin',
       'Admin',
       'Accountant',
       'DataEntry',
@@ -647,7 +651,7 @@ class _UsersTabState extends State<UsersTab> {
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
-                      value: selectedRole,
+                      initialValue: selectedRole,
                       decoration: const InputDecoration(labelText: 'الدور'),
                       items: roles.map((role) {
                         return DropdownMenuItem<String>(
@@ -674,6 +678,17 @@ class _UsersTabState extends State<UsersTab> {
                 ElevatedButton(
                   onPressed: () async {
                     if (formKey.currentState!.validate()) {
+                      if (selectedRole == 'SuperAdmin' &&
+                          currentRole != 'SuperAdmin') {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'لا تملك صلاحية إنشاء مدير نظام أعلى.',
+                            ),
+                          ),
+                        );
+                        return;
+                      }
                       final hashedPassword = CryptoUtils.hashPassword(
                         passwordController.text,
                       );

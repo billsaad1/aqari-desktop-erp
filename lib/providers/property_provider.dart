@@ -26,7 +26,9 @@ class PropertyProvider with ChangeNotifier {
     _owners = await DatabaseHelper.instance.getAllOwners();
     _properties = await DatabaseHelper.instance.getProperties();
     _cities = await DatabaseHelper.instance.getLookupData('cities');
-    _propertyTypes = await DatabaseHelper.instance.getLookupData('property_types');
+    _propertyTypes = await DatabaseHelper.instance.getLookupData(
+      'property_types',
+    );
     _unitTypes = await DatabaseHelper.instance.getLookupData('unit_types');
     _costCenters = await DatabaseHelper.instance.getLookupData('cost_centers');
 
@@ -39,8 +41,22 @@ class PropertyProvider with ChangeNotifier {
     await loadInitialData();
   }
 
+  Future<void> updateOwner(Map<String, dynamic> owner) async {
+    await DatabaseHelper.instance.updateOwner(owner);
+    await loadInitialData();
+  }
+
   Future<void> addProperty(Map<String, dynamic> property) async {
     await DatabaseHelper.instance.insertProperty(property);
     await loadInitialData();
+  }
+
+  Future<void> updateProperty(Map<String, dynamic> property) async {
+    await DatabaseHelper.instance.updateProperty(property);
+    await loadInitialData();
+  }
+
+  Future<void> updateUnit(Map<String, dynamic> unit) async {
+    await DatabaseHelper.instance.updateUnit(unit);
   }
 }

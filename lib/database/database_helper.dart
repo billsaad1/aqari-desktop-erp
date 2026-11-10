@@ -1117,9 +1117,111 @@ class DatabaseHelper {
     return await db.query('owners');
   }
 
+  Future<void> updateOwner(Map<String, dynamic> owner) async {
+    final ownerId = owner['id'];
+    final name = (owner['name'] as String?)?.trim() ?? '';
+    final commission = (owner['commission_rate'] as num?)?.toDouble() ?? 0;
+    if (ownerId is! int || ownerId <= 0 || name.isEmpty) {
+      throw ArgumentError('معرف المالك والاسم حقول مطلوبة');
+    }
+    if (!commission.isFinite || commission < 0 || commission > 100) {
+      throw ArgumentError('نسبة العمولة يجب أن تكون بين صفر و100');
+    }
+
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'owners',
+        columns: ['id', 'account_id'],
+        where: 'id = ?',
+        whereArgs: [ownerId],
+        limit: 1,
+      );
+      if (existing.isEmpty) throw StateError('المالك المطلوب غير موجود');
+
+      final changed = await txn.update(
+        'owners',
+        {
+          'name': name,
+          'identity_number': owner['identity_number'],
+          'identity_issue_date': owner['identity_issue_date'],
+          'identity_source': owner['identity_source'],
+          'profession': owner['profession'],
+          'mobile': owner['mobile'],
+          'iban': owner['iban'],
+          'commission_rate': commission,
+        },
+        where: 'id = ?',
+        whereArgs: [ownerId],
+      );
+      if (changed != 1) throw StateError('تعذر تحديث بيانات المالك');
+
+      final accountId = existing.first['account_id'] as int?;
+      if (accountId != null) {
+        await txn.update(
+          'accounts',
+          {'name': name},
+          where: 'id = ?',
+          whereArgs: [accountId],
+        );
+      }
+    });
+  }
+
   Future<int> insertProperty(Map<String, dynamic> property) async {
     final db = await instance.database;
     return await db.insert('properties', property);
+  }
+
+  Future<void> updateProperty(Map<String, dynamic> property) async {
+    final propertyId = property['id'];
+    final name = (property['name'] as String?)?.trim() ?? '';
+    final ownerId = property['owner_id'];
+    if (propertyId is! int ||
+        propertyId <= 0 ||
+        name.isEmpty ||
+        ownerId is! int) {
+      throw ArgumentError('معرف العقار والاسم والمالك حقول مطلوبة');
+    }
+
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'properties',
+        columns: ['id', 'owner_id'],
+        where: 'id = ?',
+        whereArgs: [propertyId],
+        limit: 1,
+      );
+      if (existing.isEmpty) throw StateError('العقار المطلوب غير موجود');
+      final previousOwnerId = existing.first['owner_id'] as int;
+      if (previousOwnerId != ownerId) {
+        final history = await txn.rawQuery(
+          'SELECT COUNT(*) AS count FROM units u JOIN contracts c ON c.unit_id = u.id WHERE u.property_id = ?',
+          [propertyId],
+        );
+        if ((history.first['count'] as int) > 0) {
+          throw StateError(
+            'لا يمكن تغيير مالك عقار له عقود محفوظة؛ سجّل نقل الملكية كإجراء مستقل حتى لا يتغير تاريخ العقود.',
+          );
+        }
+      }
+      final changed = await txn.update(
+        'properties',
+        {
+          'name': name,
+          'owner_id': ownerId,
+          'city_id': property['city_id'],
+          'property_type_id': property['property_type_id'],
+          'cost_center_id': property['cost_center_id'],
+          'address': property['address'],
+          'deed_number': property['deed_number'],
+        },
+        where: 'id = ?',
+        whereArgs: [propertyId],
+      );
+      if (changed != 1) throw StateError('تعذر تحديث بيانات العقار');
+    });
   }
 
   Future<List<Map<String, dynamic>>> getProperties() async {
@@ -1144,7 +1246,55 @@ class DatabaseHelper {
 
   Future<void> updateUnit(Map<String, dynamic> unit) async {
     final db = await instance.database;
-    await db.update('units', unit, where: 'id = ?', whereArgs: [unit['id']]);
+    final unitId = unit['id'];
+    final number = (unit['unit_number'] as String?)?.trim() ?? '';
+    final rent = unit['default_rent'] as num?;
+    if (unitId is! int || unitId <= 0 || number.isEmpty) {
+      throw ArgumentError('معرف الوحدة ورقمها حقول مطلوبة');
+    }
+    if (rent != null &&
+        (!rent.toDouble().isFinite ||
+            rent < 0 ||
+            !_hasCentPrecision(rent.toDouble()))) {
+      throw ArgumentError(
+        'الإيجار الافتراضي يجب أن يكون موجبًا وبمنزلتين عشريتين',
+      );
+    }
+
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'units',
+        columns: ['id', 'property_id'],
+        where: 'id = ?',
+        whereArgs: [unitId],
+        limit: 1,
+      );
+      if (existing.isEmpty) throw StateError('الوحدة المطلوبة غير موجودة');
+      final duplicate = await txn.query(
+        'units',
+        columns: ['id'],
+        where: 'property_id = ? AND unit_number = ? AND id != ?',
+        whereArgs: [existing.first['property_id'], number, unitId],
+        limit: 1,
+      );
+      if (duplicate.isNotEmpty) {
+        throw StateError('رقم الوحدة مستخدم في هذا العقار مسبقًا');
+      }
+      final changed = await txn.update(
+        'units',
+        {
+          'unit_number': number,
+          'unit_type_id': unit['unit_type_id'],
+          'floor': unit['floor'],
+          'elec_meter': unit['elec_meter'],
+          'water_meter': unit['water_meter'],
+          'default_rent': rent?.toDouble(),
+        },
+        where: 'id = ?',
+        whereArgs: [unitId],
+      );
+      if (changed != 1) throw StateError('تعذر تحديث بيانات الوحدة');
+    });
   }
 
   Future<void> deleteUnit(int id) async {
@@ -1209,6 +1359,54 @@ class DatabaseHelper {
   Future<List<Map<String, dynamic>>> getAllTenants() async {
     final db = await instance.database;
     return await db.query('tenants');
+  }
+
+  Future<void> updateTenant(Map<String, dynamic> tenant) async {
+    final tenantId = tenant['id'];
+    final name = (tenant['name'] as String?)?.trim() ?? '';
+    final mobile = (tenant['mobile'] as String?)?.trim() ?? '';
+    if (tenantId is! int || tenantId <= 0 || name.isEmpty || mobile.isEmpty) {
+      throw ArgumentError('معرف المستأجر والاسم والجوال حقول مطلوبة');
+    }
+
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'tenants',
+        columns: ['id', 'account_id'],
+        where: 'id = ?',
+        whereArgs: [tenantId],
+        limit: 1,
+      );
+      if (existing.isEmpty) throw StateError('المستأجر المطلوب غير موجود');
+
+      final accountId = existing.first['account_id'] as int?;
+      final values = <String, Object?>{
+        'name': name,
+        'mobile': mobile,
+        'identity_number': tenant['identity_number'],
+        'identity_issue_date': tenant['identity_issue_date'],
+        'identity_source': tenant['identity_source'],
+        'profession': tenant['profession'],
+        'nationality_id': tenant['nationality_id'],
+      };
+      final changed = await txn.update(
+        'tenants',
+        values,
+        where: 'id = ?',
+        whereArgs: [tenantId],
+      );
+      if (changed != 1) throw StateError('تعذر تحديث بيانات المستأجر');
+
+      if (accountId != null) {
+        await txn.update(
+          'accounts',
+          {'name': name},
+          where: 'id = ?',
+          whereArgs: [accountId],
+        );
+      }
+    });
   }
 
   Future<int> insertContractWithInstallments(
@@ -1658,8 +1856,9 @@ class DatabaseHelper {
         where: "id = ? AND tenant_id = ? AND status = 'Active'",
         whereArgs: [contractId, tenantId],
       );
-      if (contractRows.isEmpty)
+      if (contractRows.isEmpty) {
         throw StateError('العقد المحدد لا يتبع المستأجر المختار');
+      }
       final duplicates = await txn.query(
         'tax_invoices',
         where:
@@ -1672,10 +1871,11 @@ class DatabaseHelper {
         ],
         limit: 1,
       );
-      if (duplicates.isNotEmpty)
+      if (duplicates.isNotEmpty) {
         throw StateError(
           'هذه الفاتورة صادرة مسبقاً لهذا العقد والتاريخ والمبلغ',
         );
+      }
       final tenantRows = await txn.query(
         'tenants',
         where: 'id = ?',
@@ -1735,8 +1935,9 @@ class DatabaseHelper {
       }
       await _updateBalanceTx(txn, tenantAccountId, grossAmount, 0.0);
       await _updateBalanceTx(txn, revenueAccountId, 0.0, totalAmount);
-      if (taxAmount > 0)
+      if (taxAmount > 0) {
         await _updateBalanceTx(txn, taxAccountId, 0.0, taxAmount);
+      }
 
       return txn.insert('tax_invoices', {
         'contract_id': contractId,
@@ -1750,7 +1951,16 @@ class DatabaseHelper {
   Future<void> cancelContract(int contractId) async {
     final db = await instance.database;
     await db.transaction((txn) async {
-      // 1. Check if any installments are paid
+      final contractResult = await txn.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [contractId],
+        limit: 1,
+      );
+      if (contractResult.isEmpty) throw StateError('العقد غير موجود');
+      if (contractResult.first['status'] == 'Cancelled') return;
+
+      // Never erase a financial schedule or leave an invoice without reversal.
       final installments = await txn.query(
         'contract_installments',
         where: 'contract_id = ?',
@@ -1760,28 +1970,32 @@ class DatabaseHelper {
         (inst) => (inst['paid_amount'] as num) > 0,
       );
       if (hasPaid) {
-        throw Exception(
+        throw StateError(
           'لا يمكن إلغاء العقد بشكل مباشر. يوجد دفعات مسددة، يتطلب عمل تسوية أو إشعار دائن.',
         );
       }
-
-      // 2. Get Unit ID before deleting/updating
-      final contractResult = await txn.query(
-        'contracts',
-        where: 'id = ?',
+      final invoices = await txn.query(
+        'tax_invoices',
+        columns: ['id'],
+        where: 'contract_id = ?',
         whereArgs: [contractId],
+        limit: 1,
       );
-      if (contractResult.isEmpty) throw Exception('العقد غير موجود');
+      if (invoices.isNotEmpty) {
+        throw StateError(
+          'لا يمكن إلغاء العقد بعد إصدار فاتورة؛ أصدر إشعاراً دائناً أو تسوية موثقة أولاً.',
+        );
+      }
       final unitId = contractResult.first['unit_id'] as int;
 
-      // 3. Delete unpaid installments
-      await txn.delete(
+      // Retain the original schedule for audit and mark it cancelled.
+      await txn.update(
         'contract_installments',
+        {'status': 'Cancelled'},
         where: 'contract_id = ?',
         whereArgs: [contractId],
       );
 
-      // 4. Update Contract Status
       await txn.update(
         'contracts',
         {'status': 'Cancelled'},
@@ -1789,13 +2003,18 @@ class DatabaseHelper {
         whereArgs: [contractId],
       );
 
-      // 5. Update Unit Status back to 'شاغرة'
-      await txn.update(
-        'units',
-        {'status': 'شاغرة'},
-        where: 'id = ?',
-        whereArgs: [unitId],
+      final otherActiveContracts = await txn.rawQuery(
+        "SELECT COUNT(*) AS count FROM contracts WHERE unit_id = ? AND status = 'Active'",
+        [unitId],
       );
+      if ((otherActiveContracts.first['count'] as int) == 0) {
+        await txn.update(
+          'units',
+          {'status': 'شاغرة'},
+          where: 'id = ?',
+          whereArgs: [unitId],
+        );
+      }
     });
   }
 
@@ -1931,7 +2150,9 @@ class DatabaseHelper {
       FROM contract_installments ci
       JOIN contracts c ON ci.contract_id = c.id
       JOIN tenants t ON c.tenant_id = t.id
-      WHERE ci.status != 'Paid' AND ci.due_date <= ?
+      WHERE ci.status != 'Paid'
+        AND c.status = 'Active'
+        AND ci.due_date <= ?
       ORDER BY ci.due_date ASC
     ''',
       [targetDateStr],

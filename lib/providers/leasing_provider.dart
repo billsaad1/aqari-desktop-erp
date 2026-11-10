@@ -35,6 +35,11 @@ class LeasingProvider with ChangeNotifier {
     await loadInitialData();
   }
 
+  Future<void> updateTenant(Map<String, dynamic> tenant) async {
+    await DatabaseHelper.instance.updateTenant(tenant);
+    await loadInitialData();
+  }
+
   Future<int> addContract(
     Map<String, dynamic> contract,
     List<Map<String, dynamic>> installments,
