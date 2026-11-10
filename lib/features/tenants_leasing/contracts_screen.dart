@@ -479,7 +479,15 @@ class _ContractsScreenState extends State<ContractsScreen> {
   Future<void> _printContract(Map<String, dynamic> contract) async {
     // 1. Fetch Company Info
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-    final String termsConditions = companyInfo?['terms_conditions'] ?? '';
+    String termsConditions = companyInfo?['terms_conditions'] ?? '';
+
+    if (termsConditions.trim().isEmpty) {
+      termsConditions = '''7. لا يجوز للمستأجر تأجير العين بالباطن أو التنازل عنها للغير.
+8. يلتزم المستأجر بالمحافظة على العين المؤجرة واستخدامها للغرض المخصص لها.
+9. يلتزم المستأجر بسداد قيمة استهلاك الكهرباء والمياه وأي خدمات أخرى خلال فترة العقد.
+10. يلتزم المستأجر بإخلاء العين عند انتهاء مدة العقد وتسليمها بحالتها الأصلية.
+11. في حالة رغبة المستأجر في عدم التجديد، يجب إشعار الطرف الأول قبل انتهاء العقد بـ 30 يوماً.''';
+    }
 
     // 2. Fetch required details from providers
     final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
@@ -494,6 +502,14 @@ class _ContractsScreenState extends State<ContractsScreen> {
     final unit = unitList.isNotEmpty ? unitList.first : {};
 
     final property = propProv.properties.firstWhere((p) => p['id'] == unit['property_id'], orElse: () => {});
+
+    // Fetch Unit Type
+    String unitTypeName = 'غير محدد';
+    if (unit['unit_type_id'] != null) {
+      final unitTypeData = await DatabaseHelper.instance.getLookupData('unit_types');
+      final matchedType = unitTypeData.firstWhere((t) => t['id'] == unit['unit_type_id'], orElse: () => {});
+      unitTypeName = matchedType['name'] ?? 'غير محدد';
+    }
 
     // Fetch installments for this contract
     final installments = await db.query('contract_installments', where: 'contract_id = ?', whereArgs: [contract['id']]);
@@ -524,80 +540,158 @@ class _ContractsScreenState extends State<ContractsScreen> {
         footer: (pw.Context context) {
           return PrintUtils.buildFooter(companyInfo);
         },
-        build: (pw.Context context) => [
-          pw.Center(
-            child: pw.Text('عقد إيجار عقار', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold, decoration: pw.TextDecoration.underline)),
-          ),
-          pw.SizedBox(height: 20),
+        build: (pw.Context context) {
 
-          pw.Text('تم إبرام هذا العقد بتاريخ ${DateFormat('yyyy-MM-dd').format(DateTime.now())} بين كل من:', style: const pw.TextStyle(fontSize: 14)),
-          pw.SizedBox(height: 10),
+          // Calculate contract duration roughly in months
+          DateTime start = DateTime.parse(contract['start_date']);
+          DateTime end = DateTime.parse(contract['end_date']);
+          int months = ((end.year - start.year) * 12) + end.month - start.month;
+          if (end.day > start.day) months++; // Approximate
 
-          pw.Text('الطرف الأول (المؤجر): ${companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية'}', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-          pw.Text('الطرف الثاني (المستأجر): ${tenant['name'] ?? ''}', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-          pw.Text('الجنسية: ${tenant['nationality'] ?? ''} | رقم الهوية: ${tenant['id_number'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
-
-          pw.SizedBox(height: 15),
-          pw.Text('بيانات العين المؤجرة:', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-          pw.Text('العقار: ${property['name'] ?? ''} - الوحدة: ${unit['unit_number'] ?? ''}', style: const pw.TextStyle(fontSize: 14)),
-
-          pw.SizedBox(height: 15),
-          pw.Text('تفاصيل العقد:', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-          pw.Text('تاريخ البداية: ${contract['start_date']}', style: const pw.TextStyle(fontSize: 14)),
-          pw.Text('تاريخ النهاية: ${contract['end_date']}', style: const pw.TextStyle(fontSize: 14)),
-          pw.Text('القيمة الإيجارية الإجمالية: ${contract['rent_amount']}', style: const pw.TextStyle(fontSize: 14)),
-          pw.Text('طريقة الدفع: ${contract['payment_method']}', style: const pw.TextStyle(fontSize: 14)),
-
-          pw.SizedBox(height: 20),
-          pw.Text('جدول الدفعات (الأقساط):', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 5),
-          pw.TableHelper.fromTextArray(
-            headers: ['رقم القسط', 'تاريخ الاستحقاق', 'المبلغ'],
-            data: installments.asMap().entries.map((e) => [
-              (e.key + 1).toString(),
-              e.value['due_date'].toString(),
-              e.value['amount'].toString()
-            ]).toList(),
-            cellStyle: const pw.TextStyle(fontSize: 12),
-            headerStyle: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.white),
-            headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey800),
-            border: pw.TableBorder.all(color: PdfColors.grey),
-          ),
-
-          if (termsConditions.isNotEmpty) ...[
+          return [
+            pw.Center(
+              child: pw.Text('عقد إيجار', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold)),
+            ),
+            pw.SizedBox(height: 10),
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.end,
+              children: [
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text('التاريخ: ${DateFormat('yyyy-MM-dd').format(DateTime.now())}م', style: const pw.TextStyle(fontSize: 12)),
+                    // Typically Hijri date can be added here if supported by intl, otherwise fallback to Gregorian
+                  ]
+                )
+              ]
+            ),
             pw.SizedBox(height: 20),
-            pw.Text('الشروط والأحكام:', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-            pw.Text(termsConditions, style: const pw.TextStyle(fontSize: 12)),
-          ],
 
-          pw.SizedBox(height: 40),
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              pw.Column(
+            // Section 2: Parties Data
+            pw.Text('إنه في يوم (${DateFormat('EEEE', 'ar').format(DateTime.now())}) الموافق ${DateFormat('yyyy-MM-dd').format(DateTime.now())}م، تم إبرام هذا العقد بين كل من:', style: const pw.TextStyle(fontSize: 14)),
+            pw.SizedBox(height: 10),
+
+            pw.Container(
+              padding: const pw.EdgeInsets.all(10),
+              decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300), borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5))),
+              child: pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
                 children: [
-                  pw.Text('توقيع الطرف الأول (المؤجر)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                  pw.SizedBox(height: 30),
-                  pw.Text('_________________________'),
+                  pw.Expanded(
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        pw.Text('1. الطرف الأول (المؤجر):', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
+                        pw.SizedBox(height: 5),
+                        pw.Text('الاسم: ${companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية'}', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+                        pw.Text('السجل التجاري: ${companyInfo?['commercial_register'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
+                      ]
+                    )
+                  ),
+                  pw.Expanded(
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        pw.Text('2. الطرف الثاني (المستأجر):', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
+                        pw.SizedBox(height: 5),
+                        pw.Text('الاسم: ${tenant['name'] ?? ''}', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+                        pw.Text('رقم الهوية: ${tenant['identity_number'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
+                        pw.Text('رقم الهاتف: ${tenant['mobile'] ?? ''}', style: const pw.TextStyle(fontSize: 12)),
+                      ]
+                    )
+                  ),
                 ]
-              ),
-              pw.Column(
+              )
+            ),
+
+            pw.SizedBox(height: 15),
+
+            // Section 3: Essential Clauses
+            pw.Text('البنود الأساسية:', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
+            pw.SizedBox(height: 10),
+
+            pw.Padding(
+              padding: const pw.EdgeInsets.only(right: 15),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
                 children: [
-                  pw.Text('الختم الرسمي', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                  pw.SizedBox(height: 30),
-                  pw.Text('_________________________'),
+                  pw.Text('3. مقدار الإيجار: ( ${contract['rent_amount']} ) ريال سعودي فقط.', style: const pw.TextStyle(fontSize: 12)),
+                  pw.SizedBox(height: 5),
+                  pw.Text('4. مدة الإيجار: ( $months أشهر ) تبدأ من ${contract['start_date']} إلى ${contract['end_date']}.', style: const pw.TextStyle(fontSize: 12)),
+                  pw.SizedBox(height: 5),
+                  pw.Text('5. طريقة دفع الإيجار: ( ${contract['payment_method']} ).', style: const pw.TextStyle(fontSize: 12)),
+                  pw.SizedBox(height: 5),
+                  pw.Text('6. نوع العقار المستأجر والغرض من استئجاره: ( وحدة رقم ${unit['unit_number']} في ${property['name']} / $unitTypeName ).', style: const pw.TextStyle(fontSize: 12)),
                 ]
-              ),
-              pw.Column(
-                children: [
-                  pw.Text('توقيع الطرف الثاني (المستأجر)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                  pw.SizedBox(height: 30),
-                  pw.Text('_________________________'),
-                ]
-              ),
-            ]
-          )
-        ],
+              )
+            ),
+
+            pw.SizedBox(height: 20),
+
+            // Section 4: Terms and Conditions
+            pw.Text('الشروط والأحكام:', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
+            pw.SizedBox(height: 10),
+            pw.Padding(
+              padding: const pw.EdgeInsets.only(right: 15),
+              child: pw.Text(termsConditions, style: const pw.TextStyle(fontSize: 12, lineSpacing: 1.5)),
+            ),
+
+            pw.SizedBox(height: 20),
+
+            // Section 5: Installments Table
+            pw.Text('جدول الدفعات المالية (الأقساط):', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
+            pw.SizedBox(height: 10),
+            pw.TableHelper.fromTextArray(
+              headers: ['رقم القسط', 'تاريخ الاستحقاق', 'المبلغ (ريال)'],
+              data: installments.asMap().entries.map((e) => [
+                (e.key + 1).toString(),
+                e.value['due_date'].toString(),
+                e.value['amount'].toString()
+              ]).toList(),
+              cellStyle: const pw.TextStyle(fontSize: 12),
+              headerStyle: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey800),
+              border: pw.TableBorder.all(color: PdfColors.grey400),
+              cellAlignment: pw.Alignment.center,
+            ),
+
+            pw.SizedBox(height: 40),
+
+            // Section 6: Signatures
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Expanded(
+                  child: pw.Column(
+                    children: [
+                      pw.Text('الطرف الأول (المؤجر)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
+                      pw.SizedBox(height: 40),
+                      pw.Text('_________________________'),
+                    ]
+                  ),
+                ),
+                pw.Expanded(
+                  child: pw.Column(
+                    children: [
+                      pw.Text('الختم الرسمي', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
+                      pw.SizedBox(height: 40),
+                      pw.Text('_________________________'),
+                    ]
+                  ),
+                ),
+                pw.Expanded(
+                  child: pw.Column(
+                    children: [
+                      pw.Text('الطرف الثاني (المستأجر)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
+                      pw.SizedBox(height: 40),
+                      pw.Text('_________________________'),
+                    ]
+                  ),
+                ),
+              ]
+            )
+          ];
+        },
       )
     );
 
