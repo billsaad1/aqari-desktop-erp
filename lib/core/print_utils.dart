@@ -10,6 +10,9 @@ import '../database/database_helper.dart';
 
 class PrintUtils {
   static const String _defaultCompanyName = 'مؤسسة عبدالله النقيب التجارية';
+  static pw.MemoryImage? _letterheadHeaderImage;
+  static pw.MemoryImage? _letterheadFooterImage;
+  static pw.MemoryImage? _embeddedLogoImage;
   static bool get usesShareSheet => Platform.isAndroid || Platform.isIOS;
   static String get savedPdfMessage => usesShareSheet
       ? 'تم تجهيز PDF؛ اختر تطبيق الملفات لحفظه من قائمة المشاركة'
@@ -18,6 +21,21 @@ class PrintUtils {
   static Future<pw.ThemeData> loadArabicTheme() async {
     final regularData = await rootBundle.load('assets/fonts/Cairo-Regular.ttf');
     final boldData = await rootBundle.load('assets/fonts/Cairo-Bold.ttf');
+    _letterheadHeaderImage ??= pw.MemoryImage(
+      (await rootBundle.load(
+        'assets/images/naqib_letterhead_header.png',
+      )).buffer.asUint8List(),
+    );
+    _letterheadFooterImage ??= pw.MemoryImage(
+      (await rootBundle.load(
+        'assets/images/naqib_letterhead_footer.png',
+      )).buffer.asUint8List(),
+    );
+    _embeddedLogoImage ??= pw.MemoryImage(
+      (await rootBundle.load(
+        'assets/images/naqib_logo.png',
+      )).buffer.asUint8List(),
+    );
     return pw.ThemeData.withFont(
       base: pw.Font.ttf(regularData),
       bold: pw.Font.ttf(boldData),
@@ -29,6 +47,43 @@ class PrintUtils {
         .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
         .replaceAll(RegExp(r'\s+'), '_');
     return safeName.toLowerCase().endsWith('.pdf') ? safeName : '$safeName.pdf';
+  }
+
+  static String currencyInArabic(Object? raw, {String fallback = 'ريال'}) {
+    final value = raw?.toString().trim() ?? '';
+    if (value.isEmpty) return fallback;
+    final normalized = value.toLowerCase();
+    if (normalized.contains('sar') || normalized.contains('سعودي')) {
+      return 'ريال سعودي';
+    }
+    if (normalized.contains('yer') || normalized.contains('يمني')) {
+      return 'ريال يمني';
+    }
+    if (normalized.contains('usd') || normalized.contains('دولار')) {
+      return 'دولار أمريكي';
+    }
+    if (normalized.contains('aed') || normalized.contains('إمارات')) {
+      return 'درهم إماراتي';
+    }
+    if (normalized.contains('kwd') || normalized.contains('كويتي')) {
+      return 'دينار كويتي';
+    }
+    if (normalized.contains('omr') || normalized.contains('عماني')) {
+      return 'ريال عماني';
+    }
+    if (normalized.contains('qar') || normalized.contains('قطري')) {
+      return 'ريال قطري';
+    }
+    if (normalized.contains('bhd') || normalized.contains('بحريني')) {
+      return 'دينار بحريني';
+    }
+    if (normalized.contains('egp') || normalized.contains('مصري')) {
+      return 'جنيه مصري';
+    }
+    if (normalized.contains('eur') || normalized.contains('يورو')) {
+      return 'يورو';
+    }
+    return value.replaceAll(RegExp(r'\s*\([A-Za-z]{3}\)\s*'), '').trim();
   }
 
   static Future<bool> savePdf(Uint8List bytes, String name) async {
@@ -62,7 +117,7 @@ class PrintUtils {
     required List<Map<String, dynamic>> lines,
   }) async {
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-    final currency = companyInfo?['default_currency']?.toString() ?? 'ريال';
+    final currency = currencyInArabic(companyInfo?['default_currency']);
     final pdf = pw.Document();
     final theme = await loadArabicTheme();
     final debitTotal = lines.fold<double>(
@@ -77,11 +132,11 @@ class PrintUtils {
     pdf.addPage(
       pw.MultiPage(
         pageTheme: pw.PageTheme(
+          pageFormat: PdfPageFormat.a4,
+          textDirection: pw.TextDirection.rtl,
+          theme: theme,
           buildBackground: (_) => buildWatermark(companyInfo),
         ),
-        pageFormat: PdfPageFormat.a4,
-        textDirection: pw.TextDirection.rtl,
-        theme: theme,
         header: (_) => buildHeader(companyInfo, true),
         footer: (context) => buildPageFooter(context, companyInfo),
         build: (_) => [
@@ -166,6 +221,17 @@ class PrintUtils {
     Map<String, dynamic>? info,
     bool isFinancialDocument,
   ) {
+    final letterhead = _letterheadHeaderImage;
+    if (letterhead != null) {
+      return pw.Center(
+        child: pw.Image(
+          letterhead,
+          width: 520,
+          height: 90,
+          fit: pw.BoxFit.contain,
+        ),
+      );
+    }
     final nameAr = (info?['name_ar'] as String?)?.trim();
     final nameEn = (info?['name_en'] as String?)?.trim();
     final activityAr = (info?['activity_name_ar'] as String?)?.trim();
@@ -278,6 +344,17 @@ class PrintUtils {
   }
 
   static pw.Widget buildFooter(Map<String, dynamic>? info) {
+    final letterhead = _letterheadFooterImage;
+    if (letterhead != null) {
+      return pw.Center(
+        child: pw.Image(
+          letterhead,
+          width: 520,
+          height: 32,
+          fit: pw.BoxFit.contain,
+        ),
+      );
+    }
     final addressAr = _firstNonEmpty(info?['address_ar'], info?['address']);
     final addressEn = _firstNonEmpty(info?['address_en']);
     final poBox = _firstNonEmpty(info?['po_box']);
@@ -357,7 +434,9 @@ class PrintUtils {
   }
 
   static pw.Widget buildWatermark(Map<String, dynamic>? info) {
-    final logo = _readLogo((info?['logo_path'] as String?)?.trim());
+    final logo =
+        _readLogo((info?['logo_path'] as String?)?.trim()) ??
+        _embeddedLogoImage;
     if (logo == null) return pw.SizedBox();
     return pw.Center(
       child: pw.Opacity(
@@ -400,10 +479,7 @@ class PrintUtils {
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
     final pdf = pw.Document();
     final theme = await loadArabicTheme();
-    final currency = (companyInfo?['default_currency'] as String?)?.trim();
-    final currencyLabel = currency == null || currency.isEmpty
-        ? 'ريال'
-        : currency;
+    final currencyLabel = currencyInArabic(companyInfo?['default_currency']);
 
     pdf.addPage(
       pw.Page(

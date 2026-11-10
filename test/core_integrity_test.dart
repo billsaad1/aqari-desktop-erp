@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:app/core/crypto_utils.dart';
+import 'package:app/core/lease_contract_pdf.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:flutter/services.dart';
@@ -62,6 +64,24 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       final info = await DatabaseHelper.instance.getCompanyInfo();
       expect(info?['name_ar'], isNotEmpty);
+      final tenantColumns = (await db.rawQuery(
+        'PRAGMA table_info(tenants)',
+      )).map((row) => row['name']).toSet();
+      final ownerColumns = (await db.rawQuery(
+        'PRAGMA table_info(owners)',
+      )).map((row) => row['name']).toSet();
+      final contractColumns = (await db.rawQuery(
+        'PRAGMA table_info(contracts)',
+      )).map((row) => row['name']).toSet();
+      expect(
+        tenantColumns,
+        containsAll(['identity_issue_date', 'identity_source', 'profession']),
+      );
+      expect(
+        ownerColumns,
+        containsAll(['identity_issue_date', 'identity_source']),
+      );
+      expect(contractColumns, containsAll(['purpose', 'electricity_reading']));
 
       final summary = await DatabaseHelper.instance.getDashboardSummary();
       expect(summary['properties_count'], 0);
@@ -78,7 +98,10 @@ void main() {
         description: 'دفعة إيجار اختبارية',
       );
       expect(String.fromCharCodes(pdf.take(5)), '%PDF-');
+      expect(latin1.decode(pdf), contains('Tajawal'));
       expect(PrintUtils.suggestedPdfName('سند قبض/17'), 'سند_قبض_17.pdf');
+      expect(PrintUtils.currencyInArabic('YER'), 'ريال يمني');
+      expect(PrintUtils.currencyInArabic('ريال سعودي (SAR)'), 'ريال سعودي');
 
       final backupPath = '$testDocuments/aqari-test-backup.db';
       await DatabaseHelper.instance.backupToFile(backupPath);
@@ -91,6 +114,41 @@ void main() {
       await db.rawQuery('PRAGMA integrity_check');
     },
   );
+
+  test('lease template embeds Arabic font and has exactly two pages', () async {
+    final pdf = await LeaseContractPdf.build(
+      companyInfo: {'name_ar': 'مؤسسة النقيب التجارية'},
+      contract: {
+        'id': 7,
+        'start_date': '2026-09-09',
+        'end_date': '2026-12-12',
+        'rent_amount': 3222.0,
+        'payment_method': 'شهري',
+        'purpose': 'سكني',
+        'electricity_reading': '12345',
+      },
+      owner: {
+        'name': 'عبدالله محمد أحمد النقيب',
+        'identity_number': '1029836135',
+        'identity_issue_date': '1998/01/17',
+        'identity_source': 'البيت',
+      },
+      tenant: {
+        'name': 'مستأجر تجريبي',
+        'identity_number': '1234567890',
+        'mobile': '777000000',
+        'nationality_name': 'يمني',
+        'profession': 'موظف',
+      },
+      property: {'name': 'عقار الاختبار', 'address': 'شارع عكرمة بن أبي جهل'},
+      unit: {'unit_number': '1'},
+      unitTypeName: 'غرفة',
+    );
+    final source = latin1.decode(pdf);
+    expect(source, contains('Tajawal'));
+    expect(RegExp(r'/Subtype\s*/Image').hasMatch(source), isTrue);
+    expect(RegExp(r'/Type\s*/Page\b').allMatches(source).length, 2);
+  });
 
   test(
     'posts leasing receipts and invoices atomically and rejects invalid duplicates',

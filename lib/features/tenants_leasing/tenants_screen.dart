@@ -10,6 +10,9 @@ class TenantsScreen extends StatelessWidget {
     final nameController = TextEditingController();
     final mobileController = TextEditingController();
     final identityController = TextEditingController();
+    final identityIssueDateController = TextEditingController();
+    final identitySourceController = TextEditingController();
+    final professionController = TextEditingController();
     int? selectedNationalityId;
 
     showDialog(
@@ -38,44 +41,83 @@ class TenantsScreen extends StatelessWidget {
                     controller: identityController,
                     decoration: const InputDecoration(labelText: 'رقم الهوية'),
                   ),
+                  TextFormField(
+                    controller: identityIssueDateController,
+                    decoration: const InputDecoration(
+                      labelText: 'تاريخ إصدار الهوية',
+                    ),
+                  ),
+                  TextFormField(
+                    controller: identitySourceController,
+                    decoration: const InputDecoration(labelText: 'مصدر الهوية'),
+                  ),
+                  TextFormField(
+                    controller: professionController,
+                    decoration: const InputDecoration(labelText: 'المهنة'),
+                  ),
                   Consumer<LeasingProvider>(
                     builder: (context, provider, child) {
                       return DropdownButtonFormField<int>(
                         value: selectedNationalityId,
-                        items: provider.nationalities.map((n) => DropdownMenuItem<int>(
-                          value: n['id'],
-                          child: Text(n['name']),
-                        )).toList(),
+                        items: provider.nationalities
+                            .map(
+                              (n) => DropdownMenuItem<int>(
+                                value: n['id'],
+                                child: Text(n['name']),
+                              ),
+                            )
+                            .toList(),
                         onChanged: (val) => selectedNationalityId = val,
                         decoration: const InputDecoration(labelText: 'الجنسية'),
                       );
                     },
                   ),
                   const SizedBox(height: 16),
-                  const Text('ملاحظة: سيتم إنشاء حساب فرعي للمستأجر تلقائياً تحت حساب ذمم المستأجرين.', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  const Text(
+                    'ملاحظة: سيتم إنشاء حساب فرعي للمستأجر تلقائياً تحت حساب ذمم المستأجرين.',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
                 ],
               ),
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('إلغاء')),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إلغاء'),
+            ),
             ElevatedButton(
               onPressed: () async {
                 if (formKey.currentState!.validate()) {
-                  final provider = Provider.of<LeasingProvider>(context, listen: false);
+                  final provider = Provider.of<LeasingProvider>(
+                    context,
+                    listen: false,
+                  );
                   try {
                     await provider.addTenant({
                       'name': nameController.text,
                       'mobile': mobileController.text,
                       'identity_number': identityController.text,
+                      'identity_issue_date': identityIssueDateController.text,
+                      'identity_source': identitySourceController.text,
+                      'profession': professionController.text,
                       'nationality_id': selectedNationalityId,
                     });
                     if (context.mounted) {
                       Navigator.pop(context);
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تمت إضافة المستأجر وإنشاء الحساب بنجاح')));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'تمت إضافة المستأجر وإنشاء الحساب بنجاح',
+                          ),
+                        ),
+                      );
                     }
                   } catch (e) {
-                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ: $e')));
+                    if (context.mounted)
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(SnackBar(content: Text('خطأ: $e')));
                   }
                 }
               },
@@ -91,7 +133,8 @@ class TenantsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<LeasingProvider>(
       builder: (context, provider, child) {
-        if (provider.isLoading) return const Center(child: CircularProgressIndicator());
+        if (provider.isLoading)
+          return const Center(child: CircularProgressIndicator());
 
         return Padding(
           padding: const EdgeInsets.all(24.0),
@@ -101,7 +144,10 @@ class TenantsScreen extends StatelessWidget {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('إدارة المستأجرين', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'إدارة المستأجرين',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                  ),
                   ElevatedButton.icon(
                     onPressed: () => _showAddTenantDialog(context),
                     icon: const Icon(Icons.add),
@@ -121,13 +167,17 @@ class TenantsScreen extends StatelessWidget {
                       DataColumn(label: Text('رقم الحساب المحاسبي')),
                     ],
                     rows: provider.tenants.map((tenant) {
-                      return DataRow(cells: [
-                        DataCell(Text(tenant['id'].toString())),
-                        DataCell(Text(tenant['name'] ?? '')),
-                        DataCell(Text(tenant['mobile'] ?? '')),
-                        DataCell(Text(tenant['identity_number'] ?? '')),
-                        DataCell(Text(tenant['account_id']?.toString() ?? '')),
-                      ]);
+                      return DataRow(
+                        cells: [
+                          DataCell(Text(tenant['id'].toString())),
+                          DataCell(Text(tenant['name'] ?? '')),
+                          DataCell(Text(tenant['mobile'] ?? '')),
+                          DataCell(Text(tenant['identity_number'] ?? '')),
+                          DataCell(
+                            Text(tenant['account_id']?.toString() ?? ''),
+                          ),
+                        ],
+                      );
                     }).toList(),
                   ),
                 ),

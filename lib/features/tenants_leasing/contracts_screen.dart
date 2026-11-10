@@ -1,12 +1,11 @@
 import "../../core/print_utils.dart";
+import '../../core/lease_contract_pdf.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../../providers/leasing_provider.dart';
 import '../../providers/property_provider.dart';
 import '../../database/database_helper.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
 
 class ContractsScreen extends StatefulWidget {
   const ContractsScreen({super.key});
@@ -31,6 +30,8 @@ class _ContractsScreenState extends State<ContractsScreen> {
     ).format(DateTime.now().add(const Duration(days: 365))),
   );
   final _totalRentController = TextEditingController();
+  final _purposeController = TextEditingController();
+  final _electricityReadingController = TextEditingController();
 
   String _paymentMethod = 'شهري';
 
@@ -55,6 +56,8 @@ class _ContractsScreenState extends State<ContractsScreen> {
     _startDateController.dispose();
     _endDateController.dispose();
     _totalRentController.dispose();
+    _purposeController.dispose();
+    _electricityReadingController.dispose();
     _disposeInstallmentControllers();
     super.dispose();
   }
@@ -281,6 +284,8 @@ class _ContractsScreenState extends State<ContractsScreen> {
         'end_date': _endDateController.text,
         'rent_amount': double.tryParse(_totalRentController.text) ?? 0.0,
         'payment_method': _paymentMethod,
+        'purpose': _purposeController.text.trim(),
+        'electricity_reading': _electricityReadingController.text.trim(),
         'status': 'Active',
       };
 
@@ -302,6 +307,8 @@ class _ContractsScreenState extends State<ContractsScreen> {
             _selectedTenantId = null;
             _selectedUnitId = null;
             _totalRentController.clear();
+            _purposeController.clear();
+            _electricityReadingController.clear();
             _generatedInstallments.clear();
           });
         }
@@ -468,6 +475,23 @@ class _ContractsScreenState extends State<ContractsScreen> {
                               setState(() => _paymentMethod = val!),
                           decoration: const InputDecoration(
                             labelText: 'طريقة الدفع',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        TextFormField(
+                          controller: _purposeController,
+                          decoration: const InputDecoration(
+                            labelText: 'الغرض من الاستئجار (مثال: سكني)',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        TextFormField(
+                          controller: _electricityReadingController,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'قراءة عداد الكهرباء عند بدء الإيجار',
                             border: OutlineInputBorder(),
                           ),
                         ),
@@ -775,255 +799,113 @@ class _ContractsScreenState extends State<ContractsScreen> {
     required bool saveAsPdf,
   }) async {
     try {
-      final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
-      final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-      var termsConditions = companyInfo?['terms_conditions']?.toString() ?? '';
-      if (termsConditions.trim().isEmpty) {
-        termsConditions =
-            '7. لا يجوز للمستأجر تأجير العين بالباطن أو التنازل عنها للغير.\n'
-            '8. يلتزم المستأجر بالمحافظة على العين المؤجرة واستخدامها للغرض المخصص لها.\n'
-            '9. يلتزم المستأجر بسداد قيمة استهلاك الكهرباء والمياه والخدمات خلال فترة العقد.\n'
-            '10. يلتزم المستأجر بإخلاء العين عند انتهاء مدة العقد وتسليمها بحالتها الأصلية.\n'
-            '11. عند عدم الرغبة في التجديد، يُشعر الطرف الأول قبل انتهاء العقد بـ30 يوماً.';
-      }
-      final currency = companyInfo?['default_currency']?.toString() ?? 'ريال';
-      final tenant = leasingProv.tenants.firstWhere(
-        (t) => t['id'] == contract['tenant_id'],
-        orElse: () => <String, dynamic>{},
-      );
-      if (tenant.isEmpty) throw StateError('بيانات المستأجر غير متاحة');
-      final nationality = leasingProv.nationalities.firstWhere(
-        (n) => n['id'] == tenant['nationality_id'],
-        orElse: () => <String, dynamic>{},
-      );
-
       final db = await DatabaseHelper.instance.database;
+      final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+      final tenantRows = await db.query(
+        'tenants',
+        where: 'id = ?',
+        whereArgs: [contract['tenant_id']],
+        limit: 1,
+      );
+      if (tenantRows.isEmpty) throw StateError('بيانات المستأجر غير متاحة');
+      final tenant = Map<String, dynamic>.from(tenantRows.first);
+      if (tenant['nationality_id'] != null) {
+        final nationalityRows = await db.query(
+          'nationalities',
+          columns: ['name'],
+          where: 'id = ?',
+          whereArgs: [tenant['nationality_id']],
+          limit: 1,
+        );
+        tenant['nationality_name'] = nationalityRows.isEmpty
+            ? ''
+            : nationalityRows.first['name'];
+      }
+
       final unitRows = await db.query(
         'units',
         where: 'id = ?',
         whereArgs: [contract['unit_id']],
+        limit: 1,
       );
       if (unitRows.isEmpty) throw StateError('بيانات الوحدة غير متاحة');
-      final unit = unitRows.first;
+      final unit = Map<String, dynamic>.from(unitRows.first);
       final propertyRows = await db.query(
         'properties',
         where: 'id = ?',
         whereArgs: [unit['property_id']],
+        limit: 1,
       );
       if (propertyRows.isEmpty) throw StateError('بيانات العقار غير متاحة');
-      final property = propertyRows.first;
+      final property = Map<String, dynamic>.from(propertyRows.first);
 
-      var unitTypeName = 'غير محدد';
+      var owner = <String, dynamic>{};
+      final ownerRows = await db.query(
+        'owners',
+        where: 'id = ?',
+        whereArgs: [property['owner_id']],
+        limit: 1,
+      );
+      if (ownerRows.isNotEmpty)
+        owner = Map<String, dynamic>.from(ownerRows.first);
+
+      var unitTypeName = '';
       if (unit['unit_type_id'] != null) {
-        final unitTypes = await DatabaseHelper.instance.getLookupData(
+        final rows = await db.query(
           'unit_types',
+          columns: ['name'],
+          where: 'id = ?',
+          whereArgs: [unit['unit_type_id']],
+          limit: 1,
         );
-        final matchingType = unitTypes.firstWhere(
-          (type) => type['id'] == unit['unit_type_id'],
-          orElse: () => <String, dynamic>{},
-        );
-        unitTypeName = matchingType['name']?.toString() ?? unitTypeName;
+        if (rows.isNotEmpty)
+          unitTypeName = rows.first['name']?.toString() ?? '';
       }
-      final installments = await db.query(
-        'contract_installments',
-        where: 'contract_id = ?',
-        whereArgs: [contract['id']],
-        orderBy: 'due_date ASC, id ASC',
-      );
-
-      final theme = await PrintUtils.loadArabicTheme();
-      final pdf = pw.Document();
-      final rentAmount = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
-      final formattedRent = NumberFormat(
-        '#,##0.00',
-        'en_US',
-      ).format(rentAmount);
-      pdf.addPage(
-        pw.MultiPage(
-          pageTheme: pw.PageTheme(
-            buildBackground: (_) => PrintUtils.buildWatermark(companyInfo),
-          ),
-          pageFormat: PdfPageFormat.a4,
-          textDirection: pw.TextDirection.rtl,
-          theme: theme,
-          header: (_) => pw.Column(
-            children: [
-              PrintUtils.buildHeader(companyInfo, true),
-              pw.SizedBox(height: 8),
-            ],
-          ),
-          footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
-          build: (_) => [
-            pw.Center(
-              child: pw.Text(
-                'عقد إيجار عقار',
-                textDirection: pw.TextDirection.rtl,
-                style: pw.TextStyle(
-                  fontSize: 22,
-                  fontWeight: pw.FontWeight.bold,
-                  decoration: pw.TextDecoration.underline,
-                ),
-              ),
-            ),
-            pw.SizedBox(height: 16),
-            pw.Text(
-              'رقم العقد: ${contract['id']} | تاريخ تحرير العقد: ${DateFormat('yyyy-MM-dd').format(DateTime.now())}',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 11),
-            ),
-            pw.Text(
-              'الطرف الأول (المؤجر): ${companyInfo?['name_ar'] ?? 'مؤسسة عبدالله النقيب التجارية'}',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.Text(
-              'السجل التجاري: ${companyInfo?['commercial_register'] ?? ''}',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 10),
-            ),
-            pw.Text(
-              'الطرف الثاني (المستأجر): ${tenant['name'] ?? ''}',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.Text(
-              'رقم الهوية: ${tenant['identity_number'] ?? ''} | الجوال: ${tenant['mobile'] ?? ''} | الجنسية: ${nationality['name'] ?? ''}',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 10),
-            ),
-            pw.SizedBox(height: 12),
-            pw.Text(
-              'بيانات العين المؤجرة',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.Text(
-              'العقار: ${property['name'] ?? ''} | الوحدة: ${unit['unit_number'] ?? ''} | النوع: $unitTypeName',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 11),
-            ),
-            if ((property['address']?.toString() ?? '').isNotEmpty)
-              pw.Text(
-                'العنوان: ${property['address']}',
-                textDirection: pw.TextDirection.rtl,
-                style: const pw.TextStyle(fontSize: 10),
-              ),
-            pw.SizedBox(height: 12),
-            pw.Text(
-              'تفاصيل العقد',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.Text(
-              'مدة الإيجار: من ${contract['start_date']} إلى ${contract['end_date']}',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 11),
-            ),
-            pw.Text(
-              'القيمة الإيجارية الإجمالية: $formattedRent $currency',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 11),
-            ),
-            pw.Text(
-              'طريقة الدفع: ${contract['payment_method'] ?? ''}',
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 11),
-            ),
-            pw.SizedBox(height: 14),
-            pw.Text(
-              'البنود والشروط',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.Text(
-              termsConditions,
-              textDirection: pw.TextDirection.rtl,
-              style: const pw.TextStyle(fontSize: 10, lineSpacing: 1.3),
-            ),
-            pw.SizedBox(height: 14),
-            pw.Text(
-              'جدول الدفعات (الأقساط)',
-              textDirection: pw.TextDirection.rtl,
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.TableHelper.fromTextArray(
-              headers: ['رقم القسط', 'تاريخ الاستحقاق', 'المبلغ ($currency)'],
-              data: installments
-                  .asMap()
-                  .entries
-                  .map(
-                    (entry) => [
-                      (entry.key + 1).toString(),
-                      entry.value['due_date']?.toString() ?? '',
-                      '${((entry.value['amount'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)} $currency',
-                    ],
-                  )
-                  .toList(),
-              cellStyle: const pw.TextStyle(fontSize: 9),
-              headerStyle: pw.TextStyle(
-                fontSize: 9,
-                fontWeight: pw.FontWeight.bold,
-                color: PdfColors.white,
-              ),
-              headerDecoration: const pw.BoxDecoration(
-                color: PdfColors.blueGrey800,
-              ),
-              border: pw.TableBorder.all(color: PdfColors.grey400),
-              cellAlignment: pw.Alignment.center,
-            ),
-            pw.SizedBox(height: 28),
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              children: [
-                pw.Column(
-                  children: [
-                    pw.Text(
-                      'توقيع المؤجر',
-                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-                    ),
-                    pw.SizedBox(height: 30),
-                    pw.Text('_____________________'),
-                  ],
-                ),
-                pw.Column(
-                  children: [
-                    pw.Text(
-                      'الختم الرسمي',
-                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-                    ),
-                    pw.SizedBox(height: 30),
-                    pw.Text('_____________________'),
-                  ],
-                ),
-                pw.Column(
-                  children: [
-                    pw.Text(
-                      'توقيع المستأجر',
-                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-                    ),
-                    pw.SizedBox(height: 30),
-                    pw.Text('_____________________'),
-                  ],
-                ),
-              ],
-            ),
-          ],
-        ),
-      );
-
-      final bytes = await pdf.save();
-      if (saveAsPdf) {
-        final saved = await PrintUtils.savePdf(
-          bytes,
-          'عقد_إيجار_${contract['id']}',
+      var propertyTypeName = '';
+      if (property['property_type_id'] != null) {
+        final rows = await db.query(
+          'property_types',
+          columns: ['name'],
+          where: 'id = ?',
+          whereArgs: [property['property_type_id']],
+          limit: 1,
         );
+        if (rows.isNotEmpty) {
+          propertyTypeName = rows.first['name']?.toString() ?? '';
+        }
+      }
+      var cityName = '';
+      if (property['city_id'] != null) {
+        final rows = await db.query(
+          'cities',
+          columns: ['name'],
+          where: 'id = ?',
+          whereArgs: [property['city_id']],
+          limit: 1,
+        );
+        if (rows.isNotEmpty) cityName = rows.first['name']?.toString() ?? '';
+      }
+
+      final bytes = await LeaseContractPdf.build(
+        companyInfo: companyInfo,
+        contract: contract,
+        owner: owner,
+        tenant: tenant,
+        property: property,
+        unit: unit,
+        cityName: cityName,
+        unitTypeName: unitTypeName.isEmpty ? propertyTypeName : unitTypeName,
+      );
+      final name = 'عقد_إيجار_${contract['id']}';
+      if (saveAsPdf) {
+        final saved = await PrintUtils.savePdf(bytes, name);
         if (mounted && saved) {
           ScaffoldMessenger.of(
             context,
           ).showSnackBar(SnackBar(content: Text(PrintUtils.savedPdfMessage)));
         }
       } else {
-        await PrintUtils.printPdf(bytes, 'عقد_إيجار_${contract['id']}');
+        await PrintUtils.printPdf(bytes, name);
       }
     } catch (e) {
       if (mounted) {

@@ -48,12 +48,12 @@ class _OccupancyReportScreenState extends State<OccupancyReportScreen> {
       pdf.addPage(
         pw.MultiPage(
           pageTheme: pw.PageTheme(
+            pageFormat: PdfPageFormat.a4,
+            textDirection: pw.TextDirection.rtl,
+            theme: theme,
             buildBackground: (pw.Context context) =>
                 PrintUtils.buildWatermark(companyInfo),
           ),
-          pageFormat: PdfPageFormat.a4,
-          textDirection: pw.TextDirection.rtl,
-          theme: theme,
           header: (_) => PrintUtils.buildHeader(companyInfo, false),
           footer: (context) => PrintUtils.buildPageFooter(context, companyInfo),
           build: (_) => [
