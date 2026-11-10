@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'chart_of_accounts_screen.dart';
 import 'journal_entry_screen.dart';
 import 'general_voucher_screen.dart';
@@ -10,7 +11,8 @@ class AccountingMainScreen extends StatefulWidget {
   State<AccountingMainScreen> createState() => _AccountingMainScreenState();
 }
 
-class _AccountingMainScreenState extends State<AccountingMainScreen> with SingleTickerProviderStateMixin {
+class _AccountingMainScreenState extends State<AccountingMainScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -31,7 +33,7 @@ class _AccountingMainScreenState extends State<AccountingMainScreen> with Single
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: 'دليل الحسابات'),

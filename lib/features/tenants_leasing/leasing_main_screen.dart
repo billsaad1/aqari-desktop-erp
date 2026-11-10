@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import '../../providers/leasing_provider.dart';
 import '../../providers/property_provider.dart';
@@ -12,7 +13,8 @@ class LeasingMainScreen extends StatefulWidget {
   State<LeasingMainScreen> createState() => _LeasingMainScreenState();
 }
 
-class _LeasingMainScreenState extends State<LeasingMainScreen> with SingleTickerProviderStateMixin {
+class _LeasingMainScreenState extends State<LeasingMainScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -37,7 +39,7 @@ class _LeasingMainScreenState extends State<LeasingMainScreen> with SingleTicker
       children: [
         TabBar(
           controller: _tabController,
-          labelColor: Colors.blue,
+          labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: 'إدارة المستأجرين'),
@@ -47,10 +49,7 @@ class _LeasingMainScreenState extends State<LeasingMainScreen> with SingleTicker
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: const [
-              TenantsScreen(),
-              ContractsScreen(),
-            ],
+            children: const [TenantsScreen(), ContractsScreen()],
           ),
         ),
       ],

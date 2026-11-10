@@ -1,6 +1,7 @@
 import "../../core/print_utils.dart";
 import '../../core/lease_contract_pdf.dart';
 import 'package:flutter/material.dart';
+import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../../providers/leasing_provider.dart';
@@ -526,7 +527,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
                           IconButton(
                             icon: const Icon(
                               Icons.add_circle,
-                              color: Colors.blue,
+                              color: AppPalette.navy,
                             ),
                             tooltip: 'إضافة دفعة جديدة يدوياً',
                             onPressed: _addManualInstallment,
@@ -660,7 +661,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                     IconButton(
                                       icon: const Icon(
                                         Icons.print,
-                                        color: Colors.blue,
+                                        color: AppPalette.navy,
                                       ),
                                       tooltip: 'طباعة العقد (PDF)',
                                       onPressed: () => _printContract(

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/erp_data_table.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/print_utils.dart';
@@ -508,7 +509,7 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
           else
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
-              child: DataTable(
+              child: ErpDataTable(
                 columns: const [
                   DataColumn(label: Text('رمز الحساب')),
                   DataColumn(label: Text('الحساب')),
