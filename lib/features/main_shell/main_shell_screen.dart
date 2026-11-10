@@ -10,6 +10,7 @@ import '../general_accounting/accounting_main_screen.dart';
 import '../properties_owners/property_main_screen.dart';
 import '../tenants_leasing/leasing_main_screen.dart';
 import '../tenant_financial/tenant_financial_main_screen.dart';
+import '../tenant_financial/voucher_history_screen.dart';
 import '../reports_inquiry/reports_main_screen.dart';
 import '../system_services/system_services_screen.dart';
 import '../sms_gateway/sms_main_screen.dart';
@@ -64,6 +65,7 @@ class MainShellScreen extends StatelessWidget {
       case 6:
       case 7:
       case 8:
+      case 10:
         return admin || accountant;
       default:
         return false;
@@ -92,6 +94,8 @@ class MainShellScreen extends StatelessWidget {
         return const SmsMainScreen();
       case 9:
         return const SystemServicesScreen();
+      case 10:
+        return const VoucherHistoryScreen();
       default:
         return const DashboardScreen();
     }
@@ -178,6 +182,14 @@ class AppSidebar extends StatelessWidget {
                         'عمليات المستأجرين',
                         Icons.monetization_on,
                         5,
+                        navProvider,
+                      ),
+                    if (isSuperOrAdmin || isAccountant)
+                      _buildNavItem(
+                        context,
+                        'سجل السندات',
+                        Icons.receipt_long,
+                        10,
                         navProvider,
                       ),
                     if (isSuperOrAdmin || isAccountant)

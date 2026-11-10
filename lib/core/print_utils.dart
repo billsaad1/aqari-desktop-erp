@@ -10,9 +10,9 @@ import '../database/database_helper.dart';
 
 class PrintUtils {
   static const String _defaultCompanyName = 'مؤسسة عبدالله النقيب التجارية';
-  static pw.MemoryImage? _letterheadHeaderImage;
-  static pw.MemoryImage? _letterheadFooterImage;
-  static pw.MemoryImage? _embeddedLogoImage;
+  static String? _cachedLogoPath;
+  static DateTime? _cachedLogoModified;
+  static pw.MemoryImage? _cachedLogoImage;
   static bool get usesShareSheet => Platform.isAndroid || Platform.isIOS;
   static String get savedPdfMessage => usesShareSheet
       ? 'تم تجهيز PDF؛ اختر تطبيق الملفات لحفظه من قائمة المشاركة'
@@ -21,25 +21,16 @@ class PrintUtils {
   static Future<pw.ThemeData> loadArabicTheme() async {
     final regularData = await rootBundle.load('assets/fonts/Cairo-Regular.ttf');
     final boldData = await rootBundle.load('assets/fonts/Cairo-Bold.ttf');
-    _letterheadHeaderImage ??= pw.MemoryImage(
-      (await rootBundle.load(
-        'assets/images/naqib_letterhead_header.png',
-      )).buffer.asUint8List(),
-    );
-    _letterheadFooterImage ??= pw.MemoryImage(
-      (await rootBundle.load(
-        'assets/images/naqib_letterhead_footer.png',
-      )).buffer.asUint8List(),
-    );
-    _embeddedLogoImage ??= pw.MemoryImage(
-      (await rootBundle.load(
-        'assets/images/naqib_logo.png',
-      )).buffer.asUint8List(),
-    );
     return pw.ThemeData.withFont(
       base: pw.Font.ttf(regularData),
       bold: pw.Font.ttf(boldData),
     );
+  }
+
+  static void clearLogoCache() {
+    _cachedLogoPath = null;
+    _cachedLogoModified = null;
+    _cachedLogoImage = null;
   }
 
   static String suggestedPdfName(String name) {
@@ -221,85 +212,31 @@ class PrintUtils {
     Map<String, dynamic>? info,
     bool isFinancialDocument,
   ) {
-    final letterhead = _letterheadHeaderImage;
-    if (letterhead != null) {
-      return pw.Center(
-        child: pw.Image(
-          letterhead,
-          width: 520,
-          height: 90,
-          fit: pw.BoxFit.contain,
-        ),
-      );
-    }
-    final nameAr = (info?['name_ar'] as String?)?.trim();
-    final nameEn = (info?['name_en'] as String?)?.trim();
-    final activityAr = (info?['activity_name_ar'] as String?)?.trim();
-    final activityEn = (info?['activity_name_en'] as String?)?.trim();
-    final commercialRegister = (info?['commercial_register'] as String?)
-        ?.trim();
-    final taxNumber = (info?['tax_number'] as String?)?.trim();
+    final nameAr = _firstNonEmpty(info?['name_ar']) ?? _defaultCompanyName;
+    final nameEn = _firstNonEmpty(info?['name_en']);
+    final activityAr = _firstNonEmpty(
+      info?['activity_name_ar'],
+      info?['activity'],
+    );
+    final activityEn = _firstNonEmpty(info?['activity_name_en']);
+    final commercialRegister = _firstNonEmpty(info?['commercial_register']);
+    final taxNumber = _firstNonEmpty(info?['tax_number']);
     final logo = _readLogo((info?['logo_path'] as String?)?.trim());
 
     return pw.Column(
+      mainAxisSize: pw.MainAxisSize.min,
       children: [
+        pw.SizedBox(height: 3),
         pw.Row(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
           children: [
             pw.Expanded(
               child: pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  if (nameEn != null && nameEn.isNotEmpty)
-                    pw.Text(
-                      nameEn,
-                      textDirection: pw.TextDirection.ltr,
-                      style: pw.TextStyle(
-                        fontSize: 12,
-                        fontWeight: pw.FontWeight.bold,
-                      ),
-                    ),
-                  if (activityEn != null && activityEn.isNotEmpty)
-                    pw.Text(
-                      activityEn,
-                      textDirection: pw.TextDirection.ltr,
-                      style: const pw.TextStyle(fontSize: 8),
-                    ),
-                  if (isFinancialDocument &&
-                      commercialRegister != null &&
-                      commercialRegister.isNotEmpty)
-                    pw.Text(
-                      'C.R: $commercialRegister',
-                      textDirection: pw.TextDirection.ltr,
-                      style: const pw.TextStyle(fontSize: 8),
-                    ),
-                  if (isFinancialDocument &&
-                      taxNumber != null &&
-                      taxNumber.isNotEmpty)
-                    pw.Text(
-                      'VAT: $taxNumber',
-                      textDirection: pw.TextDirection.ltr,
-                      style: const pw.TextStyle(fontSize: 8),
-                    ),
-                ],
-              ),
-            ),
-            pw.SizedBox(width: 8),
-            if (logo != null)
-              pw.Container(
-                width: 62,
-                alignment: pw.Alignment.center,
-                child: pw.Image(logo, height: 50, fit: pw.BoxFit.contain),
-              )
-            else
-              pw.SizedBox(width: 24),
-            pw.SizedBox(width: 8),
-            pw.Expanded(
-              child: pw.Column(
                 crossAxisAlignment: pw.CrossAxisAlignment.end,
+                mainAxisSize: pw.MainAxisSize.min,
                 children: [
                   pw.Text(
-                    nameAr?.isNotEmpty == true ? nameAr! : _defaultCompanyName,
+                    nameAr,
                     textDirection: pw.TextDirection.rtl,
                     textAlign: pw.TextAlign.right,
                     style: pw.TextStyle(
@@ -307,25 +244,21 @@ class PrintUtils {
                       fontWeight: pw.FontWeight.bold,
                     ),
                   ),
-                  if (activityAr != null && activityAr.isNotEmpty)
+                  if (activityAr != null)
                     pw.Text(
                       activityAr,
                       textDirection: pw.TextDirection.rtl,
                       textAlign: pw.TextAlign.right,
-                      style: const pw.TextStyle(fontSize: 8),
+                      style: const pw.TextStyle(fontSize: 8.5),
                     ),
-                  if (isFinancialDocument &&
-                      commercialRegister != null &&
-                      commercialRegister.isNotEmpty)
+                  if (commercialRegister != null)
                     pw.Text(
                       'س.ت: $commercialRegister',
                       textDirection: pw.TextDirection.rtl,
                       textAlign: pw.TextAlign.right,
                       style: const pw.TextStyle(fontSize: 8),
                     ),
-                  if (isFinancialDocument &&
-                      taxNumber != null &&
-                      taxNumber.isNotEmpty)
+                  if (isFinancialDocument && taxNumber != null)
                     pw.Text(
                       'الرقم الضريبي: $taxNumber',
                       textDirection: pw.TextDirection.rtl,
@@ -335,33 +268,69 @@ class PrintUtils {
                 ],
               ),
             ),
+            pw.SizedBox(width: 12),
+            pw.Container(
+              width: 74,
+              height: 74,
+              alignment: pw.Alignment.center,
+              child: logo == null
+                  ? pw.SizedBox()
+                  : pw.Image(
+                      logo,
+                      width: 74,
+                      height: 74,
+                      fit: pw.BoxFit.contain,
+                    ),
+            ),
+            pw.SizedBox(width: 12),
+            pw.Expanded(
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                mainAxisSize: pw.MainAxisSize.min,
+                children: [
+                  if (nameEn != null)
+                    pw.Text(
+                      nameEn,
+                      textDirection: pw.TextDirection.ltr,
+                      textAlign: pw.TextAlign.left,
+                      style: pw.TextStyle(
+                        fontSize: 12,
+                        fontWeight: pw.FontWeight.bold,
+                      ),
+                    ),
+                  if (activityEn != null)
+                    pw.Text(
+                      activityEn,
+                      textDirection: pw.TextDirection.ltr,
+                      textAlign: pw.TextAlign.left,
+                      style: const pw.TextStyle(fontSize: 8.5),
+                    ),
+                  if (commercialRegister != null)
+                    pw.Text(
+                      'C.R. $commercialRegister',
+                      textDirection: pw.TextDirection.ltr,
+                      textAlign: pw.TextAlign.left,
+                      style: const pw.TextStyle(fontSize: 8),
+                    ),
+                ],
+              ),
+            ),
           ],
         ),
-        pw.SizedBox(height: 6),
-        pw.Divider(thickness: 1.2, color: PdfColors.blueGrey700),
+        pw.SizedBox(height: 7),
+        pw.Container(height: 1, color: PdfColors.grey700),
+        pw.SizedBox(height: 4),
       ],
     );
   }
 
   static pw.Widget buildFooter(Map<String, dynamic>? info) {
-    final letterhead = _letterheadFooterImage;
-    if (letterhead != null) {
-      return pw.Center(
-        child: pw.Image(
-          letterhead,
-          width: 520,
-          height: 32,
-          fit: pw.BoxFit.contain,
-        ),
-      );
-    }
     final addressAr = _firstNonEmpty(info?['address_ar'], info?['address']);
     final addressEn = _firstNonEmpty(info?['address_en']);
     final poBox = _firstNonEmpty(info?['po_box']);
     final telephone = _firstNonEmpty(info?['telephone']);
     final fax = _firstNonEmpty(info?['fax']);
     final mobile = _firstNonEmpty(info?['mobile']);
-
     final arabicParts = <String>[
       if (addressAr != null) 'العنوان: $addressAr',
       if (poBox != null) 'ص.ب: $poBox',
@@ -370,44 +339,32 @@ class PrintUtils {
       if (mobile != null) 'جوال: $mobile',
     ];
     final englishParts = <String>[
-      if (addressEn != null) 'Address: $addressEn',
-      if (poBox != null) 'P.O. Box: $poBox',
-      if (telephone != null) 'Tel: $telephone',
-      if (fax != null) 'Fax: $fax',
-      if (mobile != null) 'Mobile: $mobile',
+      if (addressEn != null) addressEn,
+      if (poBox != null) 'P.O. Box $poBox',
+      if (telephone != null) 'Tel. $telephone',
+      if (fax != null) 'Fax $fax',
+      if (mobile != null) 'Mobile $mobile',
     ];
 
     return pw.Column(
+      mainAxisSize: pw.MainAxisSize.min,
       children: [
-        pw.Divider(thickness: 0.8, color: PdfColors.grey600),
-        pw.Row(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: [
-            pw.Expanded(
-              child: pw.Text(
-                arabicParts.join('  |  '),
-                textDirection: pw.TextDirection.rtl,
-                textAlign: pw.TextAlign.right,
-                style: const pw.TextStyle(
-                  fontSize: 7,
-                  color: PdfColors.grey700,
-                ),
-              ),
-            ),
-            pw.SizedBox(width: 8),
-            pw.Expanded(
-              child: pw.Text(
-                englishParts.join('  |  '),
-                textDirection: pw.TextDirection.ltr,
-                textAlign: pw.TextAlign.left,
-                style: const pw.TextStyle(
-                  fontSize: 7,
-                  color: PdfColors.grey700,
-                ),
-              ),
-            ),
-          ],
-        ),
+        pw.Container(height: 0.7, color: PdfColors.grey600),
+        pw.SizedBox(height: 3),
+        if (arabicParts.isNotEmpty)
+          pw.Text(
+            arabicParts.join('   |   '),
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.center,
+            style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey800),
+          ),
+        if (englishParts.isNotEmpty)
+          pw.Text(
+            englishParts.join('   |   '),
+            textDirection: pw.TextDirection.ltr,
+            textAlign: pw.TextAlign.center,
+            style: const pw.TextStyle(fontSize: 6.5, color: PdfColors.grey700),
+          ),
       ],
     );
   }
@@ -434,14 +391,12 @@ class PrintUtils {
   }
 
   static pw.Widget buildWatermark(Map<String, dynamic>? info) {
-    final logo =
-        _readLogo((info?['logo_path'] as String?)?.trim()) ??
-        _embeddedLogoImage;
+    final logo = _readLogo((info?['logo_path'] as String?)?.trim());
     if (logo == null) return pw.SizedBox();
     return pw.Center(
       child: pw.Opacity(
-        opacity: 0.075,
-        child: pw.Image(logo, width: 260, fit: pw.BoxFit.contain),
+        opacity: 0.03,
+        child: pw.Image(logo, width: 220, fit: pw.BoxFit.contain),
       ),
     );
   }
@@ -451,7 +406,17 @@ class PrintUtils {
     try {
       final file = File(logoPath);
       if (!file.existsSync()) return null;
-      return pw.MemoryImage(file.readAsBytesSync());
+      if (file.lengthSync() > 8 * 1024 * 1024) return null;
+      final modified = file.lastModifiedSync();
+      if (_cachedLogoPath == file.path && _cachedLogoModified == modified) {
+        return _cachedLogoImage;
+      }
+      final extension = file.path.split('.').last.toLowerCase();
+      if (!const {'png', 'jpg', 'jpeg'}.contains(extension)) return null;
+      _cachedLogoPath = file.path;
+      _cachedLogoModified = modified;
+      _cachedLogoImage = pw.MemoryImage(file.readAsBytesSync());
+      return _cachedLogoImage;
     } catch (_) {
       return null;
     }

@@ -80,7 +80,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 8,
+        version: 9,
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
         },
@@ -146,6 +146,20 @@ class DatabaseHelper {
       }
       await _ensureColumn(db, 'contracts', 'purpose', 'TEXT');
       await _ensureColumn(db, 'contracts', 'electricity_reading', 'TEXT');
+    }
+    if (oldVersion < 9) {
+      await _ensureColumn(db, 'vouchers', 'party_name', 'TEXT');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS voucher_installment_allocations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          voucher_id INTEGER NOT NULL,
+          installment_id INTEGER NOT NULL,
+          amount REAL NOT NULL CHECK (amount > 0),
+          UNIQUE (voucher_id, installment_id),
+          FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
+          FOREIGN KEY (installment_id) REFERENCES contract_installments (id)
+        )
+      ''');
     }
   }
 
@@ -408,10 +422,23 @@ class DatabaseHelper {
         voucher_date TEXT NOT NULL,
         amount REAL NOT NULL,
         tenant_id INTEGER,
+        party_name TEXT,
         journal_entry_id INTEGER,
         description TEXT,
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (journal_entry_id) REFERENCES journal_entries (id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE voucher_installment_allocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_id INTEGER NOT NULL,
+        installment_id INTEGER NOT NULL,
+        amount REAL NOT NULL CHECK (amount > 0),
+        UNIQUE (voucher_id, installment_id),
+        FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
+        FOREIGN KEY (installment_id) REFERENCES contract_installments (id)
       )
     ''');
 
@@ -918,6 +945,10 @@ class DatabaseHelper {
           (voucher['description'] as String?)?.trim().isNotEmpty == true
           ? (voucher['description'] as String).trim()
           : 'سند $voucherType';
+      final partyName = (voucher['party_name'] as String?)?.trim();
+      voucher['party_name'] = partyName?.isNotEmpty == true
+          ? partyName
+          : description;
 
       // 1. Insert Journal Entry Header
       final journalHeader = {
@@ -1392,9 +1423,20 @@ class DatabaseHelper {
         'voucher_date': voucherDate,
         'amount': amount,
         'tenant_id': tenantId,
+        'party_name': tenantRows.first['name'],
         'journal_entry_id': journalId,
-        'description': 'تحصيل دفعة مستأجر',
+        'description': 'تحصيل دفعة إيجار',
       });
+      for (final installment in verifiedUpdates) {
+        final allocatedAmount =
+            (installment['paid_amount'] as num).toDouble() -
+            (installment['old_paid'] as num).toDouble();
+        await txn.insert('voucher_installment_allocations', {
+          'voucher_id': voucherId,
+          'installment_id': installment['id'],
+          'amount': allocatedAmount,
+        });
+      }
       for (final installment in verifiedUpdates) {
         final changed = await txn.update(
           'contract_installments',
@@ -1488,10 +1530,109 @@ class DatabaseHelper {
         'voucher_date': voucherDate,
         'amount': amount,
         'tenant_id': tenantId,
+        'party_name': tenantRows.first['name'],
         'journal_entry_id': journalId,
         'description': description,
       });
     });
+  }
+
+  Future<List<Map<String, dynamic>>> getVoucherHistory({
+    String? voucherType,
+  }) async {
+    final db = await instance.database;
+    final where = voucherType == null ? '' : 'WHERE v.voucher_type = ?';
+    final args = voucherType == null ? <Object?>[] : <Object?>[voucherType];
+    return db.rawQuery('''
+      SELECT
+        v.id,
+        v.voucher_type,
+        v.voucher_date,
+        v.amount,
+        v.tenant_id,
+        COALESCE(NULLIF(TRIM(v.party_name), ''), t.name, v.description, '') AS party_name,
+        v.description,
+        v.journal_entry_id
+      FROM vouchers v
+      LEFT JOIN tenants t ON t.id = v.tenant_id
+      $where
+      ORDER BY v.voucher_date DESC, v.id DESC
+      ''', args);
+  }
+
+  Future<Map<String, dynamic>?> getVoucherDetails(int voucherId) async {
+    final db = await instance.database;
+    final headers = await db.rawQuery(
+      '''
+      SELECT
+        v.id,
+        v.voucher_type,
+        v.voucher_date,
+        v.amount,
+        v.tenant_id,
+        COALESCE(NULLIF(TRIM(v.party_name), ''), t.name, v.description, '') AS party_name,
+        t.name AS current_tenant_name,
+        v.description,
+        v.journal_entry_id
+      FROM vouchers v
+      LEFT JOIN tenants t ON t.id = v.tenant_id
+      WHERE v.id = ?
+      LIMIT 1
+      ''',
+      [voucherId],
+    );
+    if (headers.isEmpty) return null;
+
+    final journalEntryId = headers.first['journal_entry_id'] as int?;
+    final lines = journalEntryId == null
+        ? <Map<String, Object?>>[]
+        : await db.rawQuery(
+            '''
+            SELECT
+              jl.id,
+              jl.account_id,
+              a.code AS account_code,
+              a.name AS account_name,
+              jl.debit,
+              jl.credit,
+              jl.description AS line_description,
+              jl.cost_center_id,
+              cc.name AS cost_center_name
+            FROM journal_lines jl
+            JOIN accounts a ON a.id = jl.account_id
+            LEFT JOIN cost_centers cc ON cc.id = jl.cost_center_id
+            WHERE jl.journal_entry_id = ?
+            ORDER BY jl.id
+            ''',
+            [journalEntryId],
+          );
+    final installments = await db.rawQuery(
+      '''
+      SELECT
+        via.installment_id,
+        via.amount AS allocated_amount,
+        ci.contract_id,
+        ci.amount AS installment_amount,
+        ci.paid_amount,
+        ci.due_date,
+        ci.status,
+        p.name AS property_name,
+        u.unit_number
+      FROM voucher_installment_allocations via
+      JOIN contract_installments ci ON ci.id = via.installment_id
+      JOIN contracts c ON c.id = ci.contract_id
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
+      WHERE via.voucher_id = ?
+      ORDER BY ci.due_date, ci.id
+      ''',
+      [voucherId],
+    );
+    return {
+      'voucher': headers.first,
+      'journal_lines': lines,
+      'installments': installments,
+    };
   }
 
   Future<int> insertTaxInvoice({

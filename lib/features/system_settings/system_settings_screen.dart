@@ -1,8 +1,12 @@
+import 'dart:io';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import '../../core/print_utils.dart';
 import '../../database/database_helper.dart';
 import '../../core/crypto_utils.dart';
 import '../../models/company_info_model.dart';
@@ -104,6 +108,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
 
   Future<void> _loadCompanyInfo() async {
     final infoMap = await DatabaseHelper.instance.getCompanyInfo();
+    if (!mounted) return;
     if (infoMap != null) {
       _companyInfo = CompanyInfo.fromMap(infoMap);
       _nameArController.text = _companyInfo!.nameAr;
@@ -137,7 +142,87 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
     });
   }
 
+  String? get _logoPathError {
+    final path = _logoPathController.text.trim();
+    if (path.isEmpty) return null;
+    try {
+      final file = File(path);
+      if (!file.existsSync()) {
+        return 'ملف الشعار غير موجود؛ اختره من جهازك مرة أخرى.';
+      }
+      if (!const {
+        'png',
+        'jpg',
+        'jpeg',
+      }.contains(p.extension(path).toLowerCase())) {
+        return 'صيغة الشعار يجب أن تكون PNG أو JPG.';
+      }
+      if (file.lengthSync() > 8 * 1024 * 1024) {
+        return 'حجم ملف الشعار أكبر من 8 ميغابايت.';
+      }
+    } catch (_) {
+      return 'تعذر قراءة ملف الشعار؛ أعد اختياره من جهازك.';
+    }
+    return null;
+  }
+
+  Future<void> _selectLogo() async {
+    try {
+      final selected = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'صور الشعار', extensions: ['png', 'jpg', 'jpeg']),
+        ],
+      );
+      if (selected == null) return;
+      final extension = p.extension(selected.name).toLowerCase();
+      if (!const {'.png', '.jpg', '.jpeg'}.contains(extension)) {
+        _showLogoMessage('اختر صورة بصيغة PNG أو JPG.');
+        return;
+      }
+      if (await selected.length() > 8 * 1024 * 1024) {
+        _showLogoMessage('حجم ملف الشعار يجب ألا يتجاوز 8 ميغابايت.');
+        return;
+      }
+
+      final supportDirectory = await getApplicationSupportDirectory();
+      final brandingDirectory = Directory(
+        p.join(supportDirectory.path, 'aqari_erp', 'branding'),
+      );
+      await brandingDirectory.create(recursive: true);
+      final targetPath = p.join(
+        brandingDirectory.path,
+        'company_logo_${DateTime.now().millisecondsSinceEpoch}$extension',
+      );
+      final savedFile = await File(selected.path).copy(targetPath);
+      PrintUtils.clearLogoCache();
+      if (!mounted) return;
+      setState(() => _logoPathController.text = savedFile.path);
+      _showLogoMessage(
+        'تم تحميل الشعار. احفظ التعديلات لاعتماده في المستندات.',
+      );
+    } catch (e) {
+      _showLogoMessage('تعذر تحميل الشعار: $e');
+    }
+  }
+
+  void _removeLogo() {
+    PrintUtils.clearLogoCache();
+    setState(() => _logoPathController.clear());
+  }
+
+  void _showLogoMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<void> _saveCompanyInfo() async {
+    final logoError = _logoPathError;
+    if (logoError != null) {
+      _showLogoMessage(logoError);
+      return;
+    }
     if (_formKey.currentState!.validate()) {
       final updatedInfo = CompanyInfo(
         id: _companyInfo?.id ?? 1,
@@ -161,6 +246,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       );
 
       await DatabaseHelper.instance.updateCompanyInfo(updatedInfo.toMap());
+      PrintUtils.clearLogoCache();
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -193,6 +279,11 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) return const Center(child: CircularProgressIndicator());
+    final selectedLogoPath = _logoPathController.text.trim();
+    final selectedLogo = selectedLogoPath.isEmpty
+        ? null
+        : File(selectedLogoPath);
+    final hasPreviewLogo = selectedLogo != null && selectedLogo.existsSync();
 
     return Padding(
       padding: const EdgeInsets.all(24.0),
@@ -352,13 +443,100 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
               },
             ),
             const SizedBox(height: 16),
-            TextFormField(
-              controller: _logoPathController,
-              decoration: const InputDecoration(
-                labelText:
-                    'مسار الشعار (Logo Path - مثلاً C:\\images\\logo.png)',
-                border: OutlineInputBorder(),
-                hintText: 'مسار ملف الشعار في الجهاز',
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.shade400),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 96,
+                    height: 96,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: hasPreviewLogo
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.file(
+                              selectedLogo,
+                              width: 94,
+                              height: 94,
+                              fit: BoxFit.contain,
+                              errorBuilder: (_, __, ___) => const Icon(
+                                Icons.broken_image_outlined,
+                                size: 38,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          )
+                        : const Icon(
+                            Icons.image_outlined,
+                            size: 38,
+                            color: Colors.grey,
+                          ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'شعار المنشأة',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          'اختر ملف الشعار الأصلي؛ سيُدرج مباشرة في ترويسة وتذييل المستندات مع الحفاظ على أبعاده.',
+                        ),
+                        if (selectedLogoPath.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            'الملف المختار: ${p.basename(selectedLogoPath)}',
+                            style: const TextStyle(color: Colors.black54),
+                          ),
+                        ],
+                        if (_logoPathError != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            _logoPathError!,
+                            style: const TextStyle(color: Colors.red),
+                          ),
+                        ],
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            ElevatedButton.icon(
+                              onPressed: _selectLogo,
+                              icon: const Icon(Icons.upload_file),
+                              label: Text(
+                                hasPreviewLogo
+                                    ? 'استبدال الشعار'
+                                    : 'رفع الشعار',
+                              ),
+                            ),
+                            if (selectedLogoPath.isNotEmpty)
+                              OutlinedButton.icon(
+                                onPressed: _removeLogo,
+                                icon: const Icon(Icons.delete_outline),
+                                label: const Text('إزالة الشعار'),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 16),

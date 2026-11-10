@@ -5,6 +5,8 @@ import 'package:app/core/crypto_utils.dart';
 import 'package:app/core/lease_contract_pdf.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
+import 'package:app/features/tenant_financial/voucher_history_screen.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -73,6 +75,12 @@ void main() {
       final contractColumns = (await db.rawQuery(
         'PRAGMA table_info(contracts)',
       )).map((row) => row['name']).toSet();
+      final voucherColumns = (await db.rawQuery(
+        'PRAGMA table_info(vouchers)',
+      )).map((row) => row['name']).toSet();
+      final voucherTables = (await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      )).map((row) => row['name']).toSet();
       expect(
         tenantColumns,
         containsAll(['identity_issue_date', 'identity_source', 'profession']),
@@ -82,6 +90,8 @@ void main() {
         containsAll(['identity_issue_date', 'identity_source']),
       );
       expect(contractColumns, containsAll(['purpose', 'electricity_reading']));
+      expect(voucherColumns, contains('party_name'));
+      expect(voucherTables, contains('voucher_installment_allocations'));
 
       final summary = await DatabaseHelper.instance.getDashboardSummary();
       expect(summary['properties_count'], 0);
@@ -115,40 +125,67 @@ void main() {
     },
   );
 
-  test('lease template embeds Arabic font and has exactly two pages', () async {
-    final pdf = await LeaseContractPdf.build(
-      companyInfo: {'name_ar': 'مؤسسة النقيب التجارية'},
-      contract: {
-        'id': 7,
-        'start_date': '2026-09-09',
-        'end_date': '2026-12-12',
-        'rent_amount': 3222.0,
-        'payment_method': 'شهري',
-        'purpose': 'سكني',
-        'electricity_reading': '12345',
-      },
-      owner: {
-        'name': 'عبدالله محمد أحمد النقيب',
-        'identity_number': '1029836135',
-        'identity_issue_date': '1998/01/17',
-        'identity_source': 'البيت',
-      },
-      tenant: {
-        'name': 'مستأجر تجريبي',
-        'identity_number': '1234567890',
-        'mobile': '777000000',
-        'nationality_name': 'يمني',
-        'profession': 'موظف',
-      },
-      property: {'name': 'عقار الاختبار', 'address': 'شارع عكرمة بن أبي جهل'},
-      unit: {'unit_number': '1'},
-      unitTypeName: 'غرفة',
-    );
-    final source = latin1.decode(pdf);
-    expect(source, contains('Tajawal'));
-    expect(RegExp(r'/Subtype\s*/Image').hasMatch(source), isTrue);
-    expect(RegExp(r'/Type\s*/Page\b').allMatches(source).length, 2);
-  });
+  test(
+    'lease template embeds the settings logo and has exactly two pages',
+    () async {
+      final logoFile = File(
+        '${Directory.systemTemp.path}/aqari-test-logo-${DateTime.now().microsecondsSinceEpoch}.png',
+      );
+      await logoFile.writeAsBytes(
+        base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQCXD7DwAC0AGqugkibgAAAABJRU5ErkJggg==',
+        ),
+      );
+      try {
+        final pdf = await LeaseContractPdf.build(
+          companyInfo: {
+            'name_ar': 'مؤسسة النقيب التجارية',
+            'name_en': 'AL-NAQIB TRADING EST.',
+            'activity_name_ar': 'للمقاولات ومواد البناء',
+            'activity_name_en': 'Contracting & Building Materials',
+            'commercial_register': '4601000613',
+            'address_ar': 'شارع عمرو بن العاص - صنعاء',
+            'telephone': '0777420665',
+            'logo_path': logoFile.path,
+          },
+          contract: {
+            'id': 7,
+            'start_date': '2026-09-09',
+            'end_date': '2026-12-12',
+            'rent_amount': 3222.0,
+            'payment_method': 'شهري',
+            'purpose': 'سكني',
+            'electricity_reading': '12345',
+          },
+          owner: {
+            'name': 'عبدالله محمد أحمد النقيب',
+            'identity_number': '1029836135',
+            'identity_issue_date': '1998/01/17',
+            'identity_source': 'البيت',
+          },
+          tenant: {
+            'name': 'مستأجر تجريبي',
+            'identity_number': '1234567890',
+            'mobile': '777000000',
+            'nationality_name': 'يمني',
+            'profession': 'موظف',
+          },
+          property: {
+            'name': 'عقار الاختبار',
+            'address': 'شارع عكرمة بن أبي جهل',
+          },
+          unit: {'unit_number': '1'},
+          unitTypeName: 'غرفة',
+        );
+        final source = latin1.decode(pdf);
+        expect(source, contains('Tajawal'));
+        expect(RegExp(r'/Subtype\s*/Image').hasMatch(source), isTrue);
+        expect(RegExp(r'/Type\s*/Page\b').allMatches(source).length, 2);
+      } finally {
+        if (await logoFile.exists()) await logoFile.delete();
+      }
+    },
+  );
 
   test(
     'posts leasing receipts and invoices atomically and rejects invalid duplicates',
@@ -224,6 +261,24 @@ void main() {
             ],
           );
       expect(receiptId, greaterThan(0));
+      final receiptHistory = await DatabaseHelper.instance.getVoucherHistory(
+        voucherType: 'قبض مستأجر',
+      );
+      expect(receiptHistory.single['id'], receiptId);
+      expect(receiptHistory.single['party_name'], 'مستأجر الاختبار');
+      final receiptDetails = await DatabaseHelper.instance.getVoucherDetails(
+        receiptId,
+      );
+      expect(receiptDetails, isNotNull);
+      expect((receiptDetails!['journal_lines'] as List).length, 2);
+      final paidInstallments = receiptDetails['installments'] as List;
+      expect(paidInstallments.length, 2);
+      expect(
+        paidInstallments
+            .map((row) => (row['allocated_amount'] as num).toDouble())
+            .toList(),
+        [100.0, 50.0],
+      );
 
       final revenueAccount = (await db.query(
         'accounts',
@@ -244,6 +299,36 @@ void main() {
             'قبض عام',
           );
       expect(generalVoucherId, greaterThan(0));
+      final generalDetails = await DatabaseHelper.instance.getVoucherDetails(
+        generalVoucherId,
+      );
+      expect(generalDetails, isNotNull);
+      expect((generalDetails!['voucher'] as Map)['party_name'], 'اختبار');
+      expect((generalDetails['journal_lines'] as List).length, 2);
+
+      final expenseAccount = (await db.query(
+        'accounts',
+        where: "account_type = 'Expense' AND parent_id IS NOT NULL",
+        limit: 1,
+      )).single;
+      final paymentId = await DatabaseHelper.instance
+          .insertTenantPaymentVoucher(
+            tenantId: tenantId,
+            amount: 25.0,
+            voucherDate: '2026-11-10',
+            cashAccountId: cashAccountId,
+            offsetAccountId: expenseAccount['id'] as int,
+            description: 'رد تأمين اختبار',
+          );
+      final paymentDetails = await DatabaseHelper.instance.getVoucherDetails(
+        paymentId,
+      );
+      expect(paymentDetails, isNotNull);
+      expect(
+        (paymentDetails!['voucher'] as Map)['party_name'],
+        'مستأجر الاختبار',
+      );
+      expect((paymentDetails['journal_lines'] as List).length, 2);
 
       final taxAccountId =
           (await db.query(
@@ -349,4 +434,31 @@ void main() {
       );
     },
   );
+
+  testWidgets('voucher history lists persisted tenant and general vouchers', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: VoucherHistoryScreen())),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(seconds: 1)),
+    );
+    await tester.pump();
+    expect(find.text('سجل السندات'), findsOneWidget);
+    expect(find.textContaining('سند صرف مستأجر رقم'), findsOneWidget);
+    await tester.drag(find.byType(ListView), const Offset(0, -500));
+    await tester.pump();
+    expect(find.textContaining('سند قبض مستأجر رقم'), findsOneWidget);
+    expect(find.textContaining('سند قبض عام رقم'), findsOneWidget);
+    await tester.tap(find.textContaining('سند قبض مستأجر رقم').first);
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(seconds: 1)),
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.textContaining('تفاصيل السند رقم'), findsOneWidget);
+    expect(find.text('الحسابات والحركة المحاسبية'), findsOneWidget);
+    expect(find.text('الأقساط التي سددها هذا السند'), findsOneWidget);
+  });
 }

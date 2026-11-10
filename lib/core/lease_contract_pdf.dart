@@ -8,7 +8,7 @@ import 'print_utils.dart';
 
 /// Builds the exact, two-page Arabic lease form supplied by the company.
 /// Data is passed from the selected property owner, tenant, unit and contract;
-/// the letterhead, logo and footer are bundled app assets (never remote URLs).
+/// vector letterhead details and the locally uploaded logo come from settings.
 class LeaseContractPdf {
   static const _defaultOwnerName = 'عبدالله محمد أحمد النقيب';
   static const _defaultOwnerIdentity = '1029836135';
@@ -56,7 +56,7 @@ class LeaseContractPdf {
 
     pdf.addPage(
       pw.Page(
-        pageTheme: _pageTheme(theme),
+        pageTheme: _pageTheme(theme, companyInfo),
         build: (_) => _pageFrame(
           pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.stretch,
@@ -124,7 +124,7 @@ class LeaseContractPdf {
 
     pdf.addPage(
       pw.Page(
-        pageTheme: _pageTheme(theme),
+        pageTheme: _pageTheme(theme, companyInfo),
         build: (_) => _pageFrame(
           pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.stretch,
@@ -152,30 +152,22 @@ class LeaseContractPdf {
     return pdf.save();
   }
 
-  static pw.PageTheme _pageTheme(pw.ThemeData theme) => pw.PageTheme(
+  static pw.PageTheme _pageTheme(
+    pw.ThemeData theme,
+    Map<String, dynamic>? companyInfo,
+  ) => pw.PageTheme(
     pageFormat: PdfPageFormat.a4,
     textDirection: pw.TextDirection.rtl,
     theme: theme,
-    margin: const pw.EdgeInsets.fromLTRB(26, 22, 26, 22),
-    buildBackground: (_) => pw.Stack(
-      children: [
-        PrintUtils.buildWatermark(null),
-        pw.Positioned.fill(
-          child: pw.Padding(
-            padding: const pw.EdgeInsets.all(18),
-            child: pw.Container(
-              decoration: pw.BoxDecoration(
-                border: pw.Border.all(color: PdfColors.grey600, width: 0.55),
-              ),
-            ),
-          ),
-        ),
-      ],
-    ),
+    margin: const pw.EdgeInsets.all(22),
+    buildBackground: (_) => PrintUtils.buildWatermark(companyInfo),
   );
 
-  static pw.Widget _pageFrame(pw.Widget child) => pw.Padding(
-    padding: const pw.EdgeInsets.fromLTRB(8, 5, 8, 13),
+  static pw.Widget _pageFrame(pw.Widget child) => pw.Container(
+    decoration: pw.BoxDecoration(
+      border: pw.Border.all(color: PdfColors.grey600, width: 0.55),
+    ),
+    padding: const pw.EdgeInsets.fromLTRB(14, 10, 14, 18),
     child: child,
   );
 
