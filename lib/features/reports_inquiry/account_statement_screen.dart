@@ -68,7 +68,7 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
     }).toList();
 
     pdf.addPage(
-      pw.Page(
+      pw.Page(pageTheme: pw.PageTheme(buildBackground: (pw.Context context) => PrintUtils.buildWatermark(companyInfo)),
         pageFormat: PdfPageFormat.a4,
         textDirection: pw.TextDirection.rtl,
         theme: pw.ThemeData.withFont(base: ttf, bold: ttfBold),

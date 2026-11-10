@@ -165,7 +165,7 @@ class PrintUtils {
     final pdf = pw.Document();
 
     pdf.addPage(
-      pw.Page(
+      pw.Page(pageTheme: pw.PageTheme(buildBackground: (pw.Context context) => PrintUtils.buildWatermark(companyInfo)),
         pageFormat: PdfPageFormat.a5.landscape,
         textDirection: pw.TextDirection.rtl,
         theme: pw.ThemeData.withFont(base: ttf, bold: ttfBold),
