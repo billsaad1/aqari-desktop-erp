@@ -197,6 +197,9 @@ void main() {
       final ownerColumns = (await db.rawQuery(
         'PRAGMA table_info(owners)',
       )).map((row) => row['name']).toSet();
+      final unitColumns = (await db.rawQuery(
+        'PRAGMA table_info(units)',
+      )).map((row) => row['name']).toSet();
       final contractColumns = (await db.rawQuery(
         'PRAGMA table_info(contracts)',
       )).map((row) => row['name']).toSet();
@@ -214,7 +217,16 @@ void main() {
         ownerColumns,
         containsAll(['identity_issue_date', 'identity_source']),
       );
-      expect(contractColumns, containsAll(['purpose', 'electricity_reading']));
+      expect(unitColumns, containsAll(['default_rent', 'default_rent_period']));
+      expect(
+        contractColumns,
+        containsAll([
+          'purpose',
+          'electricity_reading',
+          'unit_rent_amount',
+          'unit_rent_period',
+        ]),
+      );
       expect(voucherColumns, contains('party_name'));
       expect(voucherTables, contains('voucher_installment_allocations'));
 
@@ -279,6 +291,109 @@ void main() {
       // Keep the primary test database usable until tearDownAll; remove only the snapshot.
       await backup.delete();
       await db.rawQuery('PRAGMA integrity_check');
+    },
+  );
+
+  test(
+    'unit rent period is explicit and legacy rows are not guessed',
+    () async {
+      final db = await DatabaseHelper.instance.database;
+      expect(
+        (await db.rawQuery('PRAGMA user_version')).single.values.single,
+        11,
+      );
+
+      final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
+      final propertyId = await db.insert('properties', {
+        'name': 'عقار اختبار الدورية',
+        'owner_id': ownerId,
+      });
+      final legacyUnitId = await db.insert('units', {
+        'property_id': propertyId,
+        'unit_number': 'LEGACY-01',
+        'default_rent': 1200.0,
+        'status': 'شاغرة',
+      });
+      await DatabaseHelper.instance.insertTenantWithAccount({
+        'name': 'مستأجر اختبار الدورية',
+        'mobile': '777000001',
+      });
+      final tenantId = (await db.query(
+        'tenants',
+        where: 'name = ?',
+        whereArgs: ['مستأجر اختبار الدورية'],
+      )).single['id'];
+      final contractsBefore = (await db.rawQuery(
+        'SELECT COUNT(*) AS count FROM contracts',
+      )).single['count'];
+
+      await expectLater(
+        DatabaseHelper.instance.insertContractWithInstallments(
+          {
+            'tenant_id': tenantId,
+            'unit_id': legacyUnitId,
+            'start_date': '2026-11-10',
+            'end_date': '2027-11-10',
+            'rent_amount': 1200.0,
+            'payment_method': 'سنوي',
+            'status': 'Active',
+          },
+          [
+            {
+              'amount': 1200.0,
+              'paid_amount': 0.0,
+              'due_date': '2026-11-10',
+              'status': 'Unpaid',
+            },
+          ],
+        ),
+        throwsStateError,
+      );
+      expect(
+        (await db.query(
+          'units',
+          where: 'id = ?',
+          whereArgs: [legacyUnitId],
+        )).single['default_rent_period'],
+        isNull,
+      );
+      expect(
+        (await db.rawQuery(
+          'SELECT COUNT(*) AS count FROM contracts',
+        )).single['count'],
+        contractsBefore,
+      );
+      expect(
+        (await db.query(
+          'units',
+          where: 'id = ?',
+          whereArgs: [legacyUnitId],
+        )).single['status'],
+        'شاغرة',
+      );
+
+      await expectLater(
+        DatabaseHelper.instance.insertUnit({
+          'property_id': propertyId,
+          'unit_number': 'NEW-NO-PERIOD',
+          'default_rent': 100.0,
+        }),
+        throwsArgumentError,
+      );
+      final newUnitId = await DatabaseHelper.instance.insertUnit({
+        'property_id': propertyId,
+        'unit_number': 'NEW-ANNUAL',
+        'default_rent': 24000.0,
+        'default_rent_period': 'annual',
+        'status': 'شاغرة',
+      });
+      final newUnit = (await db.query(
+        'units',
+        where: 'id = ?',
+        whereArgs: [newUnitId],
+      )).single;
+      expect(newUnit['default_rent'], 24000.0);
+      expect(newUnit['default_rent_period'], 'annual');
     },
   );
 
@@ -381,6 +496,8 @@ void main() {
       final unitId = await db.insert('units', {
         'property_id': propertyId,
         'unit_number': 'T-01',
+        'default_rent': 100.0,
+        'default_rent_period': 'monthly',
       });
       await DatabaseHelper.instance.insertTenantWithAccount({
         'name': 'مستأجر الاختبار',
@@ -413,6 +530,15 @@ void main() {
             'status': 'Active',
           }, installments);
       expect(contractId, greaterThan(0));
+
+      final storedContract = (await db.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [contractId],
+      )).single;
+      expect(storedContract['rent_amount'], 1200.0);
+      expect(storedContract['unit_rent_amount'], 100.0);
+      expect(storedContract['unit_rent_period'], 'monthly');
 
       final storedInstallments = await DatabaseHelper.instance
           .getInstallmentsForContract(contractId);
@@ -668,6 +794,7 @@ void main() {
       'elec_meter': 'E-01',
       'water_meter': 'W-01',
       'default_rent': 100.0,
+      'default_rent_period': 'monthly',
     });
     final editedUnit = (await db.query(
       'units',

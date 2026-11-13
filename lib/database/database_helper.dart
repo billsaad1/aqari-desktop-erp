@@ -4,6 +4,7 @@ import 'package:path/path.dart';
 import 'dart:io';
 
 import '../core/lease_contract_terms.dart';
+import '../core/rent_period.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
@@ -82,7 +83,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 10,
+        version: 11,
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
         },
@@ -173,6 +174,21 @@ class DatabaseHelper {
         where:
             'terms_conditions IS NULL OR TRIM(terms_conditions) = ? OR terms_conditions = ?',
         whereArgs: ['', legacySeed],
+      );
+    }
+    if (oldVersion < 11) {
+      await _ensureColumn(
+        db,
+        'units',
+        'default_rent_period',
+        "TEXT CHECK (default_rent_period IN ('monthly', 'annual') OR default_rent_period IS NULL)",
+      );
+      await _ensureColumn(db, 'contracts', 'unit_rent_amount', 'REAL');
+      await _ensureColumn(
+        db,
+        'contracts',
+        'unit_rent_period',
+        "TEXT CHECK (unit_rent_period IN ('monthly', 'annual') OR unit_rent_period IS NULL)",
       );
     }
   }
@@ -356,6 +372,7 @@ class DatabaseHelper {
         water_meter TEXT,
         status TEXT DEFAULT 'شاغرة',
         default_rent REAL,
+        default_rent_period TEXT CHECK (default_rent_period IN ('monthly', 'annual') OR default_rent_period IS NULL),
         FOREIGN KEY (property_id) REFERENCES properties (id),
         FOREIGN KEY (unit_type_id) REFERENCES unit_types (id)
       )
@@ -386,6 +403,8 @@ class DatabaseHelper {
         start_date TEXT NOT NULL,
         end_date TEXT NOT NULL,
         rent_amount REAL NOT NULL,
+        unit_rent_amount REAL,
+        unit_rent_period TEXT CHECK (unit_rent_period IN ('monthly', 'annual') OR unit_rent_period IS NULL),
         payment_method TEXT,
         purpose TEXT,
         electricity_reading TEXT,
@@ -1245,7 +1264,51 @@ class DatabaseHelper {
 
   Future<int> insertUnit(Map<String, dynamic> unit) async {
     final db = await instance.database;
-    return await db.insert('units', unit);
+    final propertyId = unit['property_id'];
+    final number = (unit['unit_number'] as String?)?.trim() ?? '';
+    final rent = unit['default_rent'] as num?;
+    final rentPeriod = unit['default_rent_period'];
+    if (propertyId is! int || propertyId <= 0 || number.isEmpty) {
+      throw ArgumentError('العقار ورقم الوحدة حقول مطلوبة');
+    }
+    if (!RentPeriod.isValid(rentPeriod)) {
+      throw ArgumentError('حدد دورية الإيجار الشهري أو السنوي');
+    }
+    if (rent != null &&
+        (!rent.toDouble().isFinite ||
+            rent < 0 ||
+            !_hasCentPrecision(rent.toDouble()))) {
+      throw ArgumentError(
+        'الإيجار الافتراضي يجب أن يكون غير سالب وبمنزلتين عشريتين',
+      );
+    }
+
+    return db.transaction((txn) async {
+      final property = await txn.query(
+        'properties',
+        columns: ['id'],
+        where: 'id = ?',
+        whereArgs: [propertyId],
+        limit: 1,
+      );
+      if (property.isEmpty) throw StateError('العقار المطلوب غير موجود');
+      final duplicate = await txn.query(
+        'units',
+        columns: ['id'],
+        where: 'property_id = ? AND unit_number = ?',
+        whereArgs: [propertyId, number],
+        limit: 1,
+      );
+      if (duplicate.isNotEmpty) {
+        throw StateError('رقم الوحدة مستخدم في هذا العقار مسبقًا');
+      }
+      return txn.insert('units', {
+        ...unit,
+        'unit_number': number,
+        'default_rent': rent?.toDouble(),
+        'default_rent_period': rentPeriod,
+      });
+    });
   }
 
   Future<List<Map<String, dynamic>>> getUnitsForProperty(int propertyId) async {
@@ -1262,15 +1325,19 @@ class DatabaseHelper {
     final unitId = unit['id'];
     final number = (unit['unit_number'] as String?)?.trim() ?? '';
     final rent = unit['default_rent'] as num?;
+    final rentPeriod = unit['default_rent_period'];
     if (unitId is! int || unitId <= 0 || number.isEmpty) {
       throw ArgumentError('معرف الوحدة ورقمها حقول مطلوبة');
+    }
+    if (!RentPeriod.isValid(rentPeriod)) {
+      throw ArgumentError('حدد دورية الإيجار الشهري أو السنوي');
     }
     if (rent != null &&
         (!rent.toDouble().isFinite ||
             rent < 0 ||
             !_hasCentPrecision(rent.toDouble()))) {
       throw ArgumentError(
-        'الإيجار الافتراضي يجب أن يكون موجبًا وبمنزلتين عشريتين',
+        'الإيجار الافتراضي يجب أن يكون غير سالب وبمنزلتين عشريتين',
       );
     }
 
@@ -1302,6 +1369,7 @@ class DatabaseHelper {
           'elec_meter': unit['elec_meter'],
           'water_meter': unit['water_meter'],
           'default_rent': rent?.toDouble(),
+          'default_rent_period': rentPeriod,
         },
         where: 'id = ?',
         whereArgs: [unitId],
@@ -1481,6 +1549,21 @@ class DatabaseHelper {
       if (unitRows.isEmpty || unitRows.first['status'] != 'شاغرة') {
         throw StateError('الوحدة لم تعد شاغرة؛ حدّث القائمة واختر وحدة أخرى');
       }
+      final unitRentPeriod = unitRows.first['default_rent_period'];
+      final unitRent = unitRows.first['default_rent'] as num?;
+      if (!RentPeriod.isValid(unitRentPeriod)) {
+        throw StateError(
+          'دورية إيجار الوحدة غير محددة؛ حدّث بيانات الوحدة قبل إنشاء العقد',
+        );
+      }
+      if (unitRent != null &&
+          (!unitRent.toDouble().isFinite ||
+              unitRent < 0 ||
+              !_hasCentPrecision(unitRent.toDouble()))) {
+        throw StateError(
+          'سعر الوحدة الافتراضي غير صالح؛ حدّث بيانات الوحدة قبل إنشاء العقد',
+        );
+      }
       final activeContracts = await txn.query(
         'contracts',
         columns: ['id'],
@@ -1490,7 +1573,11 @@ class DatabaseHelper {
       );
       if (activeContracts.isNotEmpty) throw StateError('للوحدة عقد نشط بالفعل');
 
-      final contractId = await txn.insert('contracts', contract);
+      final contractId = await txn.insert('contracts', {
+        ...contract,
+        'unit_rent_amount': unitRent?.toDouble(),
+        'unit_rent_period': unitRentPeriod,
+      });
       for (final item in installments) {
         final installment = Map<String, dynamic>.from(item)
           ..['contract_id'] = contractId;
