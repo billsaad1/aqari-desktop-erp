@@ -916,6 +916,9 @@ class DatabaseHelper {
     if (voucherType != 'قبض عام' && voucherType != 'صرف عام') {
       throw ArgumentError('نوع السند غير معروف');
     }
+    if (voucher['voucher_type'] != voucherType) {
+      throw ArgumentError('نوع السند المخزن لا يطابق نوع الترحيل');
+    }
     final amountValue = voucher['amount'];
     if (amountValue is! num ||
         amountValue <= 0 ||

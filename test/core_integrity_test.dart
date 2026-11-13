@@ -467,6 +467,26 @@ void main() {
         where: "account_type = 'Revenue' AND parent_id IS NOT NULL",
         limit: 1,
       )).single;
+      final vouchersBeforeMismatch = (await db.query('vouchers')).length;
+      final entriesBeforeMismatch = (await db.query('journal_entries')).length;
+      await expectLater(
+        DatabaseHelper.instance.insertGeneralVoucher(
+          {
+            'voucher_type': 'صرف عام',
+            'voucher_date': '2026-11-10',
+            'amount': 20.0,
+            'description': 'سند بنوع مخالف',
+          },
+          cashAccountId,
+          revenueAccount['id'] as int,
+          null,
+          'قبض عام',
+        ),
+        throwsArgumentError,
+      );
+      expect((await db.query('vouchers')).length, vouchersBeforeMismatch);
+      expect((await db.query('journal_entries')).length, entriesBeforeMismatch);
+
       final generalVoucherId = await DatabaseHelper.instance
           .insertGeneralVoucher(
             {
