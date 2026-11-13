@@ -1,5 +1,6 @@
 import '../../core/pdf_preview_dialog.dart';
 import '../../core/lease_contract_pdf.dart';
+import '../../core/rent_period.dart';
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
@@ -35,6 +36,18 @@ class _ContractsScreenState extends State<ContractsScreen> {
   final _electricityReadingController = TextEditingController();
 
   String _paymentMethod = 'شهري';
+
+  Map<String, dynamic>? _selectedVacantUnit() {
+    if (_selectedUnitId == null) return null;
+    final units = Provider.of<LeasingProvider>(
+      context,
+      listen: false,
+    ).vacantUnits;
+    for (final unit in units) {
+      if (unit['id'] == _selectedUnitId) return unit;
+    }
+    return null;
+  }
 
   // Custom structure to hold manual edit controllers for each installment
   List<Map<String, dynamic>> _generatedInstallments = [];
@@ -134,6 +147,21 @@ class _ContractsScreenState extends State<ContractsScreen> {
   }
 
   void _generateInstallments() {
+    final unit = _selectedVacantUnit();
+    if (unit == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('اختر الوحدة أولاً')));
+      return;
+    }
+    if (!RentPeriod.isValid(unit['default_rent_period'])) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('حدد دورية إيجار الوحدة من بيانات العقار أولاً'),
+        ),
+      );
+      return;
+    }
     if (_totalRentController.text.isEmpty) return;
 
     double totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
@@ -242,6 +270,15 @@ class _ContractsScreenState extends State<ContractsScreen> {
         return;
       }
 
+      final selectedUnit = _selectedVacantUnit();
+      if (selectedUnit == null ||
+          !RentPeriod.isValid(selectedUnit['default_rent_period'])) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('حدد دورية إيجار الوحدة قبل حفظ العقد')),
+        );
+        return;
+      }
+
       final totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
       final startDate = DateTime.tryParse(_startDateController.text);
       final endDate = DateTime.tryParse(_endDateController.text);
@@ -336,6 +373,14 @@ class _ContractsScreenState extends State<ContractsScreen> {
           return const Center(child: CircularProgressIndicator());
         }
 
+        Map<String, dynamic>? selectedUnit;
+        for (final unit in leasingProv.vacantUnits) {
+          if (unit['id'] == _selectedUnitId) {
+            selectedUnit = unit;
+            break;
+          }
+        }
+
         return Padding(
           padding: const EdgeInsets.all(24.0),
           child: Row(
@@ -378,32 +423,34 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         const SizedBox(height: 16),
                         DropdownButtonFormField<int>(
                           value: _selectedUnitId,
+                          isExpanded: true,
                           items: leasingProv.vacantUnits.map((u) {
                             final propName = propProv.properties.firstWhere(
                               (p) => p['id'] == u['property_id'],
                               orElse: () => {'name': ''},
                             )['name'];
+                            final rentPeriod = RentPeriod.label(
+                              u['default_rent_period'],
+                            );
+                            final rentDetails = rentPeriod == null
+                                ? ' — دورية غير محددة'
+                                : u['default_rent'] == null
+                                ? ' — السعر غير محدد ($rentPeriod)'
+                                : ' — ${u['default_rent']} $rentPeriod';
                             return DropdownMenuItem<int>(
                               value: u['id'],
                               child: Text(
-                                'عقار: $propName - وحدة: ${u['unit_number']}',
+                                'عقار: $propName - وحدة: ${u['unit_number']}$rentDetails',
+                                overflow: TextOverflow.ellipsis,
                               ),
                             );
                           }).toList(),
                           onChanged: (val) {
+                            _disposeInstallmentControllers();
                             setState(() {
                               _selectedUnitId = val;
-                              if (val == null) {
-                                _totalRentController.clear();
-                              } else {
-                                final unit = leasingProv.vacantUnits.firstWhere(
-                                  (u) => u['id'] == val,
-                                );
-                                if (unit['default_rent'] != null) {
-                                  _totalRentController.text =
-                                      unit['default_rent'].toString();
-                                }
-                              }
+                              _totalRentController.clear();
+                              _generatedInstallments.clear();
                             });
                           },
                           decoration: const InputDecoration(
@@ -411,6 +458,60 @@ class _ContractsScreenState extends State<ContractsScreen> {
                             border: OutlineInputBorder(),
                           ),
                         ),
+                        if (selectedUnit != null) ...[
+                          const SizedBox(height: 8),
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Icon(
+                                    RentPeriod.isValid(
+                                          selectedUnit['default_rent_period'],
+                                        )
+                                        ? Icons.price_change_outlined
+                                        : Icons.warning_amber_outlined,
+                                    color:
+                                        RentPeriod.isValid(
+                                          selectedUnit['default_rent_period'],
+                                        )
+                                        ? AppPalette.navy
+                                        : Colors.deepOrange,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const Text(
+                                          'سعر الوحدة المرجعي',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        Text(
+                                          !RentPeriod.isValid(
+                                                selectedUnit['default_rent_period'],
+                                              )
+                                              ? 'الدورية غير محددة؛ عدّل بيانات الوحدة قبل إنشاء العقد.'
+                                              : selectedUnit['default_rent'] ==
+                                                    null
+                                              ? 'لا يوجد سعر افتراضي؛ أدخل إجمالي العقد المتفق عليه.'
+                                              : '${selectedUnit['default_rent']} ريال ${RentPeriod.label(selectedUnit['default_rent_period'])}',
+                                        ),
+                                        const Text(
+                                          'أدخل إجمالي العقد المتفق عليه صراحةً؛ سعر الوحدة الدوري ليس إجمالي العقد تلقائيًا.',
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 16),
                         Row(
                           children: [
@@ -442,9 +543,11 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         const SizedBox(height: 16),
                         TextFormField(
                           controller: _totalRentController,
-                          keyboardType: TextInputType.number,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
                           decoration: const InputDecoration(
-                            labelText: 'القيمة الإجمالية للعقد',
+                            labelText: 'إجمالي قيمة العقد المتفق عليها',
                             border: OutlineInputBorder(),
                           ),
                           validator: (v) {

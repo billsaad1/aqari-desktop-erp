@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/erp_data_table.dart';
+import '../../core/rent_period.dart';
 import 'package:provider/provider.dart';
 import '../../providers/property_provider.dart';
 import '../../database/database_helper.dart';
@@ -448,6 +449,7 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
     );
     final initialTypeId = unit['unit_type_id'];
     int? selectedTypeId = initialTypeId is num ? initialTypeId.toInt() : null;
+    String? selectedRentPeriod = unit['default_rent_period']?.toString();
     var saving = false;
 
     try {
@@ -515,7 +517,7 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                       TextFormField(
                         controller: rentController,
                         decoration: const InputDecoration(
-                          labelText: 'الإيجار الافتراضي',
+                          labelText: 'سعر الإيجار الافتراضي للوحدة',
                         ),
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
@@ -529,6 +531,43 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                           return null;
                         },
                       ),
+                      DropdownButtonFormField<String>(
+                        initialValue: RentPeriod.isValid(selectedRentPeriod)
+                            ? selectedRentPeriod
+                            : null,
+                        items: [
+                          DropdownMenuItem(
+                            value: RentPeriod.monthly,
+                            child: Text(RentPeriod.label(RentPeriod.monthly)!),
+                          ),
+                          DropdownMenuItem(
+                            value: RentPeriod.annual,
+                            child: Text(RentPeriod.label(RentPeriod.annual)!),
+                          ),
+                        ],
+                        onChanged: saving
+                            ? null
+                            : (value) => setDialogState(
+                                () => selectedRentPeriod = value,
+                              ),
+                        validator: (value) => !RentPeriod.isValid(value)
+                            ? 'حدد دورية الإيجار'
+                            : null,
+                        decoration: const InputDecoration(
+                          labelText: 'دورية سعر الوحدة',
+                        ),
+                      ),
+                      if (!RentPeriod.isValid(selectedRentPeriod))
+                        const Align(
+                          alignment: Alignment.centerRight,
+                          child: Padding(
+                            padding: EdgeInsets.only(top: 6),
+                            child: Text(
+                              'هذه وحدة قديمة بلا دورية محفوظة؛ اخترها قبل إنشاء عقد جديد.',
+                              style: TextStyle(color: Colors.deepOrange),
+                            ),
+                          ),
+                        ),
                       const SizedBox(height: 8),
                       Text(
                         'حالة الوحدة تُحدّث عبر دورة العقد فقط.',
@@ -563,6 +602,7 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                             'default_rent': rentController.text.trim().isEmpty
                                 ? null
                                 : double.parse(rentController.text.trim()),
+                            'default_rent_period': selectedRentPeriod,
                           });
                           await _loadUnits();
                           if (!dialogContext.mounted) return;
@@ -606,7 +646,7 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
     }
   }
 
-  void _showAddUnitDialog() {
+  Future<void> _showAddUnitDialog() async {
     final formKey = GlobalKey<FormState>();
     final numController = TextEditingController();
     final rentController = TextEditingController();
@@ -614,93 +654,175 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
     final elecController = TextEditingController();
     final waterController = TextEditingController();
     int? selectedUnitTypeId;
+    String? selectedRentPeriod;
+    var saving = false;
 
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('إضافة وحدة/عين جديدة'),
-          content: Form(
-            key: formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  controller: numController,
-                  decoration: const InputDecoration(
-                    labelText: 'رقم الوحدة/الشقة',
-                  ),
-                  validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                ),
-                DropdownButtonFormField<int>(
-                  initialValue: selectedUnitTypeId,
-                  items: widget.provider.unitTypes
-                      .map(
-                        (t) => DropdownMenuItem<int>(
-                          value: t['id'],
-                          child: Text(t['name']),
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: const Text('إضافة وحدة/عين جديدة'),
+            content: SizedBox(
+              width: 440,
+              child: Form(
+                key: formKey,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextFormField(
+                        controller: numController,
+                        decoration: const InputDecoration(
+                          labelText: 'رقم الوحدة/الشقة',
                         ),
+                        validator: (value) => value?.trim().isEmpty ?? true
+                            ? 'رقم الوحدة مطلوب'
+                            : null,
+                      ),
+                      DropdownButtonFormField<int>(
+                        initialValue: selectedUnitTypeId,
+                        items: widget.provider.unitTypes
+                            .map(
+                              (type) => DropdownMenuItem<int>(
+                                value: type['id'] as int,
+                                child: Text(type['name'].toString()),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: saving
+                            ? null
+                            : (value) => setDialogState(
+                                () => selectedUnitTypeId = value,
+                              ),
+                        decoration: const InputDecoration(
+                          labelText: 'نوع الوحدة',
+                        ),
+                      ),
+                      TextFormField(
+                        controller: floorController,
+                        decoration: const InputDecoration(labelText: 'الدور'),
+                      ),
+                      TextFormField(
+                        controller: elecController,
+                        decoration: const InputDecoration(
+                          labelText: 'رقم عداد الكهرباء',
+                        ),
+                      ),
+                      TextFormField(
+                        controller: waterController,
+                        decoration: const InputDecoration(
+                          labelText: 'رقم عداد الماء',
+                        ),
+                      ),
+                      TextFormField(
+                        controller: rentController,
+                        decoration: const InputDecoration(
+                          labelText: 'سعر الإيجار الافتراضي للوحدة',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        validator: (value) {
+                          if ((value ?? '').trim().isEmpty) return null;
+                          final rent = double.tryParse(value!.trim());
+                          if (rent == null ||
+                              !rent.isFinite ||
+                              rent < 0 ||
+                              ((rent * 100) - (rent * 100).round()).abs() >
+                                  0.000001) {
+                            return 'أدخل مبلغاً صحيحاً بمنزلتين عشريتين أو اتركه فارغاً';
+                          }
+                          return null;
+                        },
+                      ),
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedRentPeriod,
+                        items: [
+                          DropdownMenuItem(
+                            value: RentPeriod.monthly,
+                            child: Text(RentPeriod.label(RentPeriod.monthly)!),
+                          ),
+                          DropdownMenuItem(
+                            value: RentPeriod.annual,
+                            child: Text(RentPeriod.label(RentPeriod.annual)!),
+                          ),
+                        ],
+                        onChanged: saving
+                            ? null
+                            : (value) => setDialogState(
+                                () => selectedRentPeriod = value,
+                              ),
+                        validator: (value) => !RentPeriod.isValid(value)
+                            ? 'حدد دورية الإيجار'
+                            : null,
+                        decoration: const InputDecoration(
+                          labelText: 'دورية سعر الوحدة',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: saving ? null : () => Navigator.pop(dialogContext),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton.icon(
+                onPressed: saving
+                    ? null
+                    : () async {
+                        if (!(formKey.currentState?.validate() ?? false)) {
+                          return;
+                        }
+                        setDialogState(() => saving = true);
+                        try {
+                          await DatabaseHelper.instance.insertUnit({
+                            'property_id': widget.propertyId,
+                            'unit_number': numController.text.trim(),
+                            'unit_type_id': selectedUnitTypeId,
+                            'floor': floorController.text.trim(),
+                            'elec_meter': elecController.text.trim(),
+                            'water_meter': waterController.text.trim(),
+                            'default_rent': rentController.text.trim().isEmpty
+                                ? null
+                                : double.parse(rentController.text.trim()),
+                            'default_rent_period': selectedRentPeriod,
+                            'status': 'شاغرة',
+                          });
+                          if (!dialogContext.mounted) return;
+                          Navigator.pop(dialogContext);
+                          await _loadUnits();
+                        } catch (error) {
+                          if (!dialogContext.mounted) return;
+                          setDialogState(() => saving = false);
+                          ScaffoldMessenger.of(dialogContext).showSnackBar(
+                            SnackBar(content: Text('تعذر حفظ الوحدة: $error')),
+                          );
+                        }
+                      },
+                icon: saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                      .toList(),
-                  onChanged: (val) => selectedUnitTypeId = val,
-                  decoration: const InputDecoration(labelText: 'نوع الوحدة'),
-                ),
-                TextFormField(
-                  controller: floorController,
-                  decoration: const InputDecoration(labelText: 'الدور'),
-                ),
-                TextFormField(
-                  controller: elecController,
-                  decoration: const InputDecoration(
-                    labelText: 'رقم عداد الكهرباء',
-                  ),
-                ),
-                TextFormField(
-                  controller: waterController,
-                  decoration: const InputDecoration(
-                    labelText: 'رقم عداد الماء',
-                  ),
-                ),
-                TextFormField(
-                  controller: rentController,
-                  decoration: const InputDecoration(
-                    labelText: 'الإيجار الافتراضي',
-                  ),
-                  keyboardType: TextInputType.number,
-                ),
-              ],
-            ),
+                    : const Icon(Icons.save_outlined),
+                label: Text(saving ? 'جارٍ الحفظ...' : 'حفظ الوحدة'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('إلغاء'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                if (formKey.currentState!.validate()) {
-                  await DatabaseHelper.instance.insertUnit({
-                    'property_id': widget.propertyId,
-                    'unit_number': numController.text,
-                    'unit_type_id': selectedUnitTypeId,
-                    'floor': floorController.text,
-                    'elec_meter': elecController.text,
-                    'water_meter': waterController.text,
-                    'default_rent': double.tryParse(rentController.text) ?? 0.0,
-                    'status': 'شاغرة', // Default status
-                  });
-                  if (context.mounted) {
-                    Navigator.pop(context);
-                    _loadUnits();
-                  }
-                }
-              },
-              child: const Text('حفظ'),
-            ),
-          ],
-        );
-      },
-    );
+        ),
+      );
+    } finally {
+      numController.dispose();
+      rentController.dispose();
+      floorController.dispose();
+      elecController.dispose();
+      waterController.dispose();
+    }
   }
 
   @override
@@ -774,7 +896,15 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                           ),
                         ),
                       ),
-                      DataCell(Text(unit['default_rent']?.toString() ?? '')),
+                      DataCell(
+                        Text(
+                          RentPeriod.isValid(unit['default_rent_period'])
+                              ? unit['default_rent'] == null
+                                    ? 'غير محدد السعر — ${RentPeriod.label(unit['default_rent_period'])}'
+                                    : '${unit['default_rent']} — ${RentPeriod.label(unit['default_rent_period'])}'
+                              : 'يلزم تحديد الدورية',
+                        ),
+                      ),
                       DataCell(
                         IconButton(
                           tooltip: 'تعديل بيانات الوحدة',
