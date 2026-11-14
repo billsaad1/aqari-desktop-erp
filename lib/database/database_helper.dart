@@ -11,6 +11,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
+  static const int _schemaVersion = 12;
 
   DatabaseHelper._init();
 
@@ -31,40 +32,449 @@ class DatabaseHelper {
   }
 
   Future<void> backupToFile(String targetPath) async {
-    final target = File(targetPath);
-    await target.parent.create(recursive: true);
-    if (await target.exists()) await target.delete();
-    final db = await database;
-    final escapedPath = target.absolute.path.replaceAll("'", "''");
-    await db.execute("VACUUM INTO '$escapedPath'");
-
-    Database? snapshot;
-    try {
-      snapshot = await databaseFactory.openDatabase(
-        target.absolute.path,
-        options: OpenDatabaseOptions(readOnly: true),
+    final target = File(targetPath).absolute;
+    final livePath = File(await getDbPath()).absolute.path;
+    if (target.path == livePath) {
+      throw ArgumentError('لا يمكن اختيار قاعدة التشغيل كوجهة للنسخ');
+    }
+    if (await target.exists()) {
+      throw FileSystemException(
+        'ملف النسخة موجود مسبقًا؛ لن يُستبدل',
+        target.path,
       );
-      final check = await snapshot.rawQuery('PRAGMA quick_check');
-      if (check.isEmpty || check.first.values.first != 'ok') {
-        throw StateError('فشل فحص سلامة النسخة الاحتياطية');
+    }
+    await target.parent.create(recursive: true);
+    final temporary = File(
+      '${target.path}.partial-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    try {
+      final db = await database;
+      final escapedPath = temporary.path.replaceAll("'", "''");
+      await db.execute("VACUUM INTO '$escapedPath'");
+      await _validateDatabaseFile(temporary.path, requireCurrentSchema: true);
+      if (await target.exists()) {
+        throw FileSystemException(
+          'ملف النسخة ظهر أثناء العملية؛ لم يتم استبداله',
+          target.path,
+        );
       }
-    } catch (_) {
-      if (await target.exists()) await target.delete();
-      rethrow;
+      await temporary.rename(target.path);
     } finally {
-      await snapshot?.close();
+      if (await temporary.exists()) await temporary.delete();
     }
   }
 
-  Future<void> factoryReset() async {
-    final path = await getDbPath();
-    if (_database != null) {
-      await _database!.close();
-      _database = null;
+  Future<String> restoreFromFile(String sourcePath) async {
+    final source = File(sourcePath).absolute;
+    final livePath = File(await getDbPath()).absolute;
+    if (source.path == livePath.path) {
+      throw ArgumentError('اختر ملف نسخة احتياطية، وليس قاعدة التشغيل');
     }
-    await databaseFactory.deleteDatabase(path);
-    // Re-initialize to create schema and seed data
-    _database = await _initDB('desktop_erp.db');
+    await _rejectUncheckpointedWal(source.path);
+    final sourceVersion = await _validateDatabaseFile(source.path);
+    if (sourceVersion > _schemaVersion) {
+      throw StateError(
+        'إصدار النسخة ($sourceVersion) أحدث من إصدار هذا البرنامج ($_schemaVersion)',
+      );
+    }
+
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    final staged = File('${livePath.path}.restore-$stamp');
+    final rollback = File(
+      join(livePath.parent.path, 'aqari_pre_restore_$stamp.db'),
+    );
+    var liveReplacementStarted = false;
+    await livePath.parent.create(recursive: true);
+    try {
+      final sourceStatBefore = await source.stat();
+      await source.copy(staged.path);
+      await _rejectUncheckpointedWal(source.path);
+      final sourceStatAfter = await source.stat();
+      if (sourceStatBefore.size != sourceStatAfter.size ||
+          sourceStatBefore.modified != sourceStatAfter.modified) {
+        throw StateError(
+          'تغير ملف النسخة أثناء قراءته؛ أوقف أي برنامج يستخدمه ثم أعد المحاولة',
+        );
+      }
+      final candidate = await databaseFactory.openDatabase(
+        staged.path,
+        options: OpenDatabaseOptions(
+          version: _schemaVersion,
+          onConfigure: (db) async => db.execute('PRAGMA foreign_keys = ON'),
+          onUpgrade: _upgradeDB,
+        ),
+      );
+      try {
+        await _validateOpenDatabase(candidate, requireCurrentSchema: true);
+      } finally {
+        await candidate.close();
+      }
+
+      // Preserve a verified copy before disconnecting or replacing the live DB.
+      await backupToFile(rollback.path);
+      final current = await database;
+      await current.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+      await current.close();
+      _database = null;
+      liveReplacementStarted = true;
+      await _deleteSqliteSidecars(livePath.path);
+      await staged.rename(livePath.path);
+      _database = await _initDB('desktop_erp.db');
+      await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+      return rollback.path;
+    } catch (error) {
+      if (liveReplacementStarted) {
+        Object? rollbackError;
+        try {
+          if (_database != null) await _database!.close();
+          _database = null;
+          if (await livePath.exists()) await livePath.delete();
+          await _deleteSqliteSidecars(livePath.path);
+          if (!await rollback.exists()) {
+            throw StateError('ملف نسخة الرجوع غير موجود');
+          }
+          await rollback.copy(livePath.path);
+          _database = await _initDB('desktop_erp.db');
+          await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+        } catch (failure) {
+          rollbackError = failure;
+        }
+        if (rollbackError != null) {
+          throw StateError(
+            'فشلت الاستعادة ($error)، وتعذرت الاستعادة التلقائية ($rollbackError). احتفظ بنسخة الرجوع إن وُجدت: ${rollback.path}',
+          );
+        }
+        throw StateError(
+          'فشلت الاستعادة، لكن أُعيدت قاعدة التشغيل من نسخة الرجوع المحفوظة في ${rollback.path}. السبب: $error',
+        );
+      }
+      rethrow;
+    } finally {
+      if (await staged.exists()) await staged.delete();
+    }
+  }
+
+  Future<int> _validateDatabaseFile(
+    String path, {
+    bool requireCurrentSchema = false,
+  }) async {
+    final file = File(path);
+    if (!await file.exists() || await file.length() < 100) {
+      throw StateError('ملف النسخة غير موجود أو غير مكتمل');
+    }
+    await _rejectUncheckpointedWal(file.absolute.path);
+    Database? candidate;
+    try {
+      candidate = await databaseFactory.openDatabase(
+        file.absolute.path,
+        options: OpenDatabaseOptions(readOnly: true),
+      );
+      final versionRows = await candidate.rawQuery('PRAGMA user_version');
+      final version = (versionRows.first.values.first as num).toInt();
+      if (version < 1 || version > _schemaVersion) {
+        throw StateError('إصدار قاعدة البيانات غير مدعوم: $version');
+      }
+      final integrity = await candidate.rawQuery('PRAGMA integrity_check');
+      if (integrity.isEmpty ||
+          integrity.any((row) => row.values.first != 'ok')) {
+        throw StateError('فشل فحص سلامة ملف قاعدة البيانات');
+      }
+      final violations = await candidate.rawQuery('PRAGMA foreign_key_check');
+      if (violations.isNotEmpty) {
+        throw StateError('تحتوي النسخة على علاقات مرجعية غير سليمة');
+      }
+      if (requireCurrentSchema) {
+        await _validateOpenDatabase(candidate, requireCurrentSchema: true);
+      }
+      await _rejectUncheckpointedWal(file.absolute.path);
+      return version;
+    } on StateError {
+      rethrow;
+    } catch (error) {
+      throw StateError('تعذر فتح/فحص ملف قاعدة البيانات: $error');
+    } finally {
+      await candidate?.close();
+    }
+  }
+
+  Future<void> _validateOpenDatabase(
+    DatabaseExecutor db, {
+    required bool requireCurrentSchema,
+  }) async {
+    final integrity = await db.rawQuery('PRAGMA integrity_check');
+    if (integrity.isEmpty || integrity.any((row) => row.values.first != 'ok')) {
+      throw StateError('فشل فحص سلامة قاعدة البيانات');
+    }
+    final violations = await db.rawQuery('PRAGMA foreign_key_check');
+    if (violations.isNotEmpty) {
+      throw StateError('تحتوي قاعدة البيانات على علاقات مرجعية غير سليمة');
+    }
+    if (!requireCurrentSchema) return;
+    final versionRows = await db.rawQuery('PRAGMA user_version');
+    final version = (versionRows.first.values.first as num).toInt();
+    if (version != _schemaVersion) {
+      throw StateError('إصدار مخطط قاعدة البيانات غير متوقع: $version');
+    }
+    const requiredColumns = <String, List<String>>{
+      'company_info': [
+        'id',
+        'name_ar',
+        'name_en',
+        'activity',
+        'address',
+        'default_currency',
+        'tax_number',
+        'commercial_register',
+        'logo_path',
+        'terms_conditions',
+        'activity_name_ar',
+        'activity_name_en',
+        'address_ar',
+        'address_en',
+        'po_box',
+        'telephone',
+        'fax',
+        'mobile',
+      ],
+      'users': [
+        'id',
+        'username',
+        'password_hash',
+        'full_name',
+        'role',
+        'cash_box_account_id',
+        'must_change_password',
+      ],
+      'user_permissions': [
+        'id',
+        'user_id',
+        'screen_name',
+        'can_view',
+        'can_add',
+        'can_edit',
+        'can_delete',
+        'can_print',
+        'can_post',
+      ],
+      'audit_logs': ['id', 'user_id', 'action', 'details', 'timestamp'],
+      'cities': ['id', 'name'],
+      'nationalities': ['id', 'name'],
+      'banks': ['id', 'name', 'account_id'],
+      'property_types': ['id', 'name'],
+      'unit_types': ['id', 'name'],
+      'cost_centers': ['id', 'code', 'name'],
+      'accounts': [
+        'id',
+        'code',
+        'name',
+        'parent_id',
+        'account_type',
+        'balance',
+      ],
+      'owners': [
+        'id',
+        'name',
+        'identity_number',
+        'identity_issue_date',
+        'identity_source',
+        'profession',
+        'mobile',
+        'iban',
+        'account_id',
+        'commission_rate',
+      ],
+      'properties': [
+        'id',
+        'name',
+        'owner_id',
+        'city_id',
+        'property_type_id',
+        'cost_center_id',
+        'address',
+        'deed_number',
+      ],
+      'units': [
+        'id',
+        'property_id',
+        'unit_number',
+        'unit_type_id',
+        'floor',
+        'elec_meter',
+        'water_meter',
+        'status',
+        'default_rent',
+        'default_rent_period',
+      ],
+      'tenants': [
+        'id',
+        'name',
+        'identity_number',
+        'identity_issue_date',
+        'identity_source',
+        'profession',
+        'mobile',
+        'account_id',
+        'nationality_id',
+      ],
+      'contracts': [
+        'id',
+        'tenant_id',
+        'unit_id',
+        'start_date',
+        'end_date',
+        'rent_amount',
+        'unit_rent_amount',
+        'unit_rent_period',
+        'party_snapshot',
+        'payment_method',
+        'purpose',
+        'electricity_reading',
+        'status',
+      ],
+      'contract_installments': [
+        'id',
+        'contract_id',
+        'amount',
+        'paid_amount',
+        'due_date',
+        'status',
+      ],
+      'tax_invoices': [
+        'id',
+        'contract_id',
+        'invoice_date',
+        'total_amount',
+        'tax_amount',
+      ],
+      'credit_notes': ['id', 'invoice_id', 'note_date', 'amount'],
+      'vouchers': [
+        'id',
+        'voucher_type',
+        'voucher_date',
+        'amount',
+        'tenant_id',
+        'party_name',
+        'journal_entry_id',
+        'description',
+      ],
+      'voucher_installment_allocations': [
+        'id',
+        'voucher_id',
+        'installment_id',
+        'amount',
+      ],
+      'journal_entries': ['id', 'entry_date', 'description', 'is_posted'],
+      'journal_lines': [
+        'id',
+        'journal_entry_id',
+        'account_id',
+        'debit',
+        'credit',
+        'cost_center_id',
+        'description',
+      ],
+      'sms_settings': [
+        'id',
+        'api_url',
+        'api_key',
+        'sender_name',
+        'reminder_template',
+        'receipt_template',
+      ],
+      'sms_logs': [
+        'id',
+        'recipient_number',
+        'message_text',
+        'sent_at',
+        'status',
+      ],
+    };
+    final missingSchema = <String>[];
+    for (final entry in requiredColumns.entries) {
+      final columns = (await db.rawQuery(
+        'PRAGMA table_info("${entry.key}")',
+      )).map((row) => row['name']?.toString()).toSet();
+      final missing = entry.value.where((column) => !columns.contains(column));
+      missingSchema.addAll(missing.map((column) => '${entry.key}.$column'));
+    }
+    if (missingSchema.isNotEmpty) {
+      throw StateError(
+        'مخطط النسخة غير مكتمل؛ الجداول/الأعمدة المفقودة: ${missingSchema.join('، ')}',
+      );
+    }
+    final triggers = (await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger'",
+    )).map((row) => row['name']?.toString()).toSet();
+    const requiredTriggers = [
+      'units_unique_number_insert',
+      'units_unique_number_update',
+    ];
+    final missingTriggers = requiredTriggers
+        .where((trigger) => !triggers.contains(trigger))
+        .toList();
+    if (missingTriggers.isNotEmpty) {
+      throw StateError(
+        'مخطط النسخة يفتقد حواجز سلامة الوحدات: ${missingTriggers.join('، ')}',
+      );
+    }
+  }
+
+  Future<void> _rejectUncheckpointedWal(String databasePath) async {
+    final walFile = File('$databasePath-wal');
+    if (await walFile.exists() && await walFile.length() > 0) {
+      throw StateError(
+        'ملف قاعدة البيانات يحتوي على سجل WAL منفصل. أوقف البرنامج الذي يستخدمه وأنشئ نسخة مكتملة من داخل Aqari قبل الاستعادة.',
+      );
+    }
+  }
+
+  Future<void> _deleteSqliteSidecars(String path) async {
+    for (final suffix in ['-wal', '-shm']) {
+      final sidecar = File('$path$suffix');
+      if (await sidecar.exists()) await sidecar.delete();
+    }
+  }
+
+  Future<String> factoryReset() async {
+    final path = await getDbPath();
+    final rollbackPath = join(
+      File(path).parent.path,
+      'aqari_pre_reset_${DateTime.now().microsecondsSinceEpoch}.db',
+    );
+    await backupToFile(rollbackPath);
+    final current = await database;
+    await current.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+    await current.close();
+    _database = null;
+    try {
+      await _deleteSqliteSidecars(path);
+      await databaseFactory.deleteDatabase(path);
+      _database = await _initDB('desktop_erp.db');
+      await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+      return rollbackPath;
+    } catch (error) {
+      Object? rollbackError;
+      try {
+        if (_database != null) await _database!.close();
+        _database = null;
+        await _deleteSqliteSidecars(path);
+        final live = File(path);
+        if (await live.exists()) await live.delete();
+        await File(rollbackPath).copy(path);
+        _database = await _initDB('desktop_erp.db');
+        await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+      } catch (failure) {
+        rollbackError = failure;
+      }
+      if (rollbackError != null) {
+        throw StateError(
+          'فشلت التهيئة ($error)، وتعذرت الاستعادة التلقائية. نسخة الرجوع: $rollbackPath. الخطأ: $rollbackError',
+        );
+      }
+      throw StateError(
+        'فشلت التهيئة، وأُعيدت قاعدة التشغيل من نسخة الرجوع المحفوظة في $rollbackPath. السبب: $error',
+      );
+    }
   }
 
   Future<Database> _initDB(String filePath) async {
@@ -85,7 +495,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 12,
+        version: _schemaVersion,
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
         },
