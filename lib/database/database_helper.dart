@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart';
@@ -5,6 +6,7 @@ import 'dart:io';
 
 import '../core/lease_contract_terms.dart';
 import '../core/rent_period.dart';
+import 'database_integrity_migrations.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
@@ -83,7 +85,7 @@ class DatabaseHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 11,
+        version: 12,
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
         },
@@ -190,6 +192,9 @@ class DatabaseHelper {
         'unit_rent_period',
         "TEXT CHECK (unit_rent_period IN ('monthly', 'annual') OR unit_rent_period IS NULL)",
       );
+    }
+    if (oldVersion < 12) {
+      await DatabaseIntegrityMigrations.upgradeToV12(db);
     }
   }
 
@@ -377,6 +382,7 @@ class DatabaseHelper {
         FOREIGN KEY (unit_type_id) REFERENCES unit_types (id)
       )
     ''');
+    await DatabaseIntegrityMigrations.installUnitNumberGuards(db);
 
     // 7. Tenants and Contracts
     await db.execute('''
@@ -405,6 +411,7 @@ class DatabaseHelper {
         rent_amount REAL NOT NULL,
         unit_rent_amount REAL,
         unit_rent_period TEXT CHECK (unit_rent_period IN ('monthly', 'annual') OR unit_rent_period IS NULL),
+        party_snapshot TEXT,
         payment_method TEXT,
         purpose TEXT,
         electricity_reading TEXT,
@@ -1095,7 +1102,31 @@ class DatabaseHelper {
 
   // --- Owner & Property Operations ---
 
+  Future<void> _requireOptionalLookup(
+    DatabaseExecutor executor,
+    String table,
+    Object? id,
+    String label,
+  ) async {
+    if (id == null) return;
+    if (id is! int || id <= 0) throw ArgumentError('$label غير صالح');
+    final rows = await executor.query(
+      table,
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw ArgumentError('$label المحدد غير موجود');
+  }
+
   Future<void> insertOwnerWithAccount(Map<String, dynamic> owner) async {
+    final name = (owner['name'] as String?)?.trim() ?? '';
+    final commission = (owner['commission_rate'] as num?)?.toDouble() ?? 0;
+    if (name.isEmpty) throw ArgumentError('اسم المالك مطلوب');
+    if (!commission.isFinite || commission < 0 || commission > 100) {
+      throw ArgumentError('نسبة العمولة يجب أن تكون بين صفر و100');
+    }
     final db = await instance.database;
     await db.transaction((txn) async {
       // 1. Find the parent account for Owners (code: '2101')
@@ -1133,7 +1164,7 @@ class DatabaseHelper {
       // 3. Create the sub-account
       final newAccount = {
         'code': newCode,
-        'name': owner['name'],
+        'name': name,
         'parent_id': parentId,
         'account_type': 'Liability', // Since '2101' is a liability
         'balance': 0.0,
@@ -1142,8 +1173,13 @@ class DatabaseHelper {
       final accountId = await txn.insert('accounts', newAccount);
 
       // 4. Insert Owner linked to the new account
-      owner['account_id'] = accountId;
-      await txn.insert('owners', owner);
+      final ownerValues = Map<String, dynamic>.from(owner)
+        ..remove('id')
+        ..remove('account_id')
+        ..['name'] = name
+        ..['commission_rate'] = commission
+        ..['account_id'] = accountId;
+      await txn.insert('owners', ownerValues);
     });
   }
 
@@ -1193,19 +1229,52 @@ class DatabaseHelper {
 
       final accountId = existing.first['account_id'] as int?;
       if (accountId != null) {
-        await txn.update(
+        final changedAccount = await txn.update(
           'accounts',
           {'name': name},
           where: 'id = ?',
           whereArgs: [accountId],
         );
+        if (changedAccount != 1) {
+          throw StateError('الحساب المحاسبي المرتبط بالمالك غير موجود');
+        }
       }
     });
   }
 
   Future<int> insertProperty(Map<String, dynamic> property) async {
+    final name = (property['name'] as String?)?.trim() ?? '';
+    final ownerId = property['owner_id'];
+    if (name.isEmpty || ownerId is! int || ownerId <= 0) {
+      throw ArgumentError('اسم العقار والمالك حقول مطلوبة');
+    }
+
     final db = await instance.database;
-    return await db.insert('properties', property);
+    return db.transaction((txn) async {
+      await _requireOptionalLookup(txn, 'owners', ownerId, 'مالك العقار');
+      await _requireOptionalLookup(
+        txn,
+        'cities',
+        property['city_id'],
+        'المدينة',
+      );
+      await _requireOptionalLookup(
+        txn,
+        'property_types',
+        property['property_type_id'],
+        'نوع العقار',
+      );
+      await _requireOptionalLookup(
+        txn,
+        'cost_centers',
+        property['cost_center_id'],
+        'مركز التكلفة',
+      );
+      final values = Map<String, dynamic>.from(property)
+        ..remove('id')
+        ..['name'] = name;
+      return txn.insert('properties', values);
+    });
   }
 
   Future<void> updateProperty(Map<String, dynamic> property) async {
@@ -1221,6 +1290,25 @@ class DatabaseHelper {
 
     final db = await instance.database;
     await db.transaction((txn) async {
+      await _requireOptionalLookup(txn, 'owners', ownerId, 'مالك العقار');
+      await _requireOptionalLookup(
+        txn,
+        'cities',
+        property['city_id'],
+        'المدينة',
+      );
+      await _requireOptionalLookup(
+        txn,
+        'property_types',
+        property['property_type_id'],
+        'نوع العقار',
+      );
+      await _requireOptionalLookup(
+        txn,
+        'cost_centers',
+        property['cost_center_id'],
+        'مركز التكلفة',
+      );
       final existing = await txn.query(
         'properties',
         columns: ['id', 'owner_id'],
@@ -1295,10 +1383,16 @@ class DatabaseHelper {
         limit: 1,
       );
       if (property.isEmpty) throw StateError('العقار المطلوب غير موجود');
+      await _requireOptionalLookup(
+        txn,
+        'unit_types',
+        unit['unit_type_id'],
+        'نوع الوحدة',
+      );
       final duplicate = await txn.query(
         'units',
         columns: ['id'],
-        where: 'property_id = ? AND unit_number = ?',
+        where: 'property_id = ? AND lower(trim(unit_number)) = lower(trim(?))',
         whereArgs: [propertyId, number],
         limit: 1,
       );
@@ -1316,10 +1410,21 @@ class DatabaseHelper {
 
   Future<List<Map<String, dynamic>>> getUnitsForProperty(int propertyId) async {
     final db = await instance.database;
-    return await db.query(
-      'units',
-      where: 'property_id = ?',
-      whereArgs: [propertyId],
+    return await db.rawQuery(
+      '''
+      SELECT u.*,
+             CASE WHEN EXISTS (
+               SELECT 1 FROM units duplicate
+               WHERE duplicate.property_id = u.property_id
+                 AND lower(trim(duplicate.unit_number)) =
+                     lower(trim(u.unit_number))
+                 AND duplicate.id != u.id
+             ) THEN 1 ELSE 0 END AS has_duplicate_number
+      FROM units u
+      WHERE u.property_id = ?
+      ORDER BY u.unit_number COLLATE NOCASE, u.id
+      ''',
+      [propertyId],
     );
   }
 
@@ -1347,21 +1452,32 @@ class DatabaseHelper {
     await db.transaction((txn) async {
       final existing = await txn.query(
         'units',
-        columns: ['id', 'property_id'],
+        columns: ['id', 'property_id', 'unit_number'],
         where: 'id = ?',
         whereArgs: [unitId],
         limit: 1,
       );
       if (existing.isEmpty) throw StateError('الوحدة المطلوبة غير موجودة');
-      final duplicate = await txn.query(
-        'units',
-        columns: ['id'],
-        where: 'property_id = ? AND unit_number = ? AND id != ?',
-        whereArgs: [existing.first['property_id'], number, unitId],
-        limit: 1,
+      await _requireOptionalLookup(
+        txn,
+        'unit_types',
+        unit['unit_type_id'],
+        'نوع الوحدة',
       );
-      if (duplicate.isNotEmpty) {
-        throw StateError('رقم الوحدة مستخدم في هذا العقار مسبقًا');
+      final previousNumber =
+          existing.first['unit_number']?.toString().trim().toLowerCase() ?? '';
+      if (previousNumber != number.toLowerCase()) {
+        final duplicate = await txn.query(
+          'units',
+          columns: ['id'],
+          where:
+              'property_id = ? AND lower(trim(unit_number)) = lower(trim(?)) AND id != ?',
+          whereArgs: [existing.first['property_id'], number, unitId],
+          limit: 1,
+        );
+        if (duplicate.isNotEmpty) {
+          throw StateError('رقم الوحدة مستخدم في هذا العقار مسبقًا');
+        }
       }
       final changed = await txn.update(
         'units',
@@ -1383,14 +1499,53 @@ class DatabaseHelper {
 
   Future<void> deleteUnit(int id) async {
     final db = await instance.database;
-    await db.delete('units', where: 'id = ?', whereArgs: [id]);
+    if (id <= 0) throw ArgumentError('معرف الوحدة غير صالح');
+    await db.transaction((txn) async {
+      final units = await txn.query(
+        'units',
+        columns: ['id'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (units.isEmpty) throw StateError('الوحدة المطلوبة غير موجودة');
+      final history = await txn.query(
+        'contracts',
+        columns: ['id'],
+        where: 'unit_id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (history.isNotEmpty) {
+        throw StateError(
+          'لا يمكن حذف وحدة مرتبطة بعقد؛ غيّر حالتها أو أرشفها للحفاظ على السجل التاريخي.',
+        );
+      }
+      final deleted = await txn.delete(
+        'units',
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (deleted != 1) throw StateError('تعذر حذف الوحدة');
+    });
   }
 
   // --- Leasing & Tenants Operations ---
 
   Future<void> insertTenantWithAccount(Map<String, dynamic> tenant) async {
+    final name = (tenant['name'] as String?)?.trim() ?? '';
+    final mobile = (tenant['mobile'] as String?)?.trim() ?? '';
+    if (name.isEmpty || mobile.isEmpty) {
+      throw ArgumentError('اسم المستأجر ورقم الجوال حقول مطلوبة');
+    }
     final db = await instance.database;
     await db.transaction((txn) async {
+      await _requireOptionalLookup(
+        txn,
+        'nationalities',
+        tenant['nationality_id'],
+        'الجنسية',
+      );
       // 1. Find the parent account for Tenants (code: '1201')
       final parentResult = await txn.query(
         'accounts',
@@ -1426,7 +1581,7 @@ class DatabaseHelper {
       // 3. Create the sub-account
       final newAccount = {
         'code': newCode,
-        'name': tenant['name'],
+        'name': name,
         'parent_id': parentId,
         'account_type': 'Asset', // Since '1201' is an asset
         'balance': 0.0,
@@ -1435,8 +1590,13 @@ class DatabaseHelper {
       final accountId = await txn.insert('accounts', newAccount);
 
       // 4. Insert Tenant linked to the new account
-      tenant['account_id'] = accountId;
-      await txn.insert('tenants', tenant);
+      final tenantValues = Map<String, dynamic>.from(tenant)
+        ..remove('id')
+        ..remove('account_id')
+        ..['name'] = name
+        ..['mobile'] = mobile
+        ..['account_id'] = accountId;
+      await txn.insert('tenants', tenantValues);
     });
   }
 
@@ -1455,6 +1615,12 @@ class DatabaseHelper {
 
     final db = await instance.database;
     await db.transaction((txn) async {
+      await _requireOptionalLookup(
+        txn,
+        'nationalities',
+        tenant['nationality_id'],
+        'الجنسية',
+      );
       final existing = await txn.query(
         'tenants',
         columns: ['id', 'account_id'],
@@ -1483,14 +1649,90 @@ class DatabaseHelper {
       if (changed != 1) throw StateError('تعذر تحديث بيانات المستأجر');
 
       if (accountId != null) {
-        await txn.update(
+        final changedAccount = await txn.update(
           'accounts',
           {'name': name},
           where: 'id = ?',
           whereArgs: [accountId],
         );
+        if (changedAccount != 1) {
+          throw StateError('الحساب المحاسبي المرتبط بالمستأجر غير موجود');
+        }
       }
     });
+  }
+
+  Future<Map<String, dynamic>> _captureContractPartySnapshot(
+    DatabaseExecutor txn,
+    Map<String, dynamic> tenant,
+    Map<String, dynamic> unit,
+  ) async {
+    final propertyRows = await txn.query(
+      'properties',
+      where: 'id = ?',
+      whereArgs: [unit['property_id']],
+      limit: 1,
+    );
+    if (propertyRows.isEmpty)
+      throw StateError('العقار المرتبط بالوحدة غير موجود');
+    final property = propertyRows.first;
+    final ownerRows = await txn.query(
+      'owners',
+      where: 'id = ?',
+      whereArgs: [property['owner_id']],
+      limit: 1,
+    );
+    if (ownerRows.isEmpty) throw StateError('مالك العقار المرتبط غير موجود');
+    final owner = ownerRows.first;
+
+    Future<String?> lookupName(String table, Object? id) async {
+      if (id == null) return null;
+      final rows = await txn.query(
+        table,
+        columns: ['name'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      return rows.isEmpty ? null : rows.first['name']?.toString();
+    }
+
+    final tenantSnapshot = <String, dynamic>{
+      for (final field in [
+        'name',
+        'identity_number',
+        'identity_issue_date',
+        'identity_source',
+        'profession',
+        'mobile',
+      ])
+        field: tenant[field],
+      'nationality_name': await lookupName(
+        'nationalities',
+        tenant['nationality_id'],
+      ),
+    };
+
+    return {
+      'owner': {
+        for (final field in [
+          'name',
+          'identity_number',
+          'identity_issue_date',
+          'identity_source',
+        ])
+          field: owner[field],
+      },
+      'tenant': tenantSnapshot,
+      'property': {'name': property['name'], 'address': property['address']},
+      'unit': {'unit_number': unit['unit_number']},
+      'city_name': await lookupName('cities', property['city_id']),
+      'unit_type_name': await lookupName('unit_types', unit['unit_type_id']),
+      'property_type_name': await lookupName(
+        'property_types',
+        property['property_type_id'],
+      ),
+    };
   }
 
   Future<int> insertContractWithInstallments(
@@ -1536,18 +1778,26 @@ class DatabaseHelper {
     return db.transaction((txn) async {
       final tenantId = contract['tenant_id'];
       final unitId = contract['unit_id'];
-      if (tenantId == null ||
-          (await txn.query(
-            'tenants',
-            where: 'id = ?',
-            whereArgs: [tenantId],
-          )).isEmpty) {
+      if (tenantId is! int || tenantId <= 0) {
         throw ArgumentError('المستأجر المحدد غير موجود');
+      }
+      final tenantRows = await txn.query(
+        'tenants',
+        where: 'id = ?',
+        whereArgs: [tenantId],
+        limit: 1,
+      );
+      if (tenantRows.isEmpty) {
+        throw ArgumentError('المستأجر المحدد غير موجود');
+      }
+      if (unitId is! int || unitId <= 0) {
+        throw ArgumentError('الوحدة المحددة غير موجودة');
       }
       final unitRows = await txn.query(
         'units',
         where: 'id = ?',
         whereArgs: [unitId],
+        limit: 1,
       );
       if (unitRows.isEmpty || unitRows.first['status'] != 'شاغرة') {
         throw StateError('الوحدة لم تعد شاغرة؛ حدّث القائمة واختر وحدة أخرى');
@@ -1576,10 +1826,17 @@ class DatabaseHelper {
       );
       if (activeContracts.isNotEmpty) throw StateError('للوحدة عقد نشط بالفعل');
 
+      final partySnapshot = await _captureContractPartySnapshot(
+        txn,
+        tenantRows.first,
+        unitRows.first,
+      );
+
       final contractId = await txn.insert('contracts', {
         ...contract,
         'unit_rent_amount': unitRent?.toDouble(),
         'unit_rent_period': unitRentPeriod,
+        'party_snapshot': jsonEncode(partySnapshot),
       });
       for (final item in installments) {
         final installment = Map<String, dynamic>.from(item)

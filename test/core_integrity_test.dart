@@ -5,9 +5,11 @@ import 'package:app/core/arabic_amount_words.dart';
 import 'package:app/core/crypto_utils.dart';
 import 'package:app/core/company_logo_storage.dart';
 import 'package:app/core/lease_contract_pdf.dart';
+import 'package:app/core/contract_party_snapshot.dart';
 import 'package:app/core/lease_contract_terms.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
+import 'package:app/database/database_integrity_migrations.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
 import 'package:app/features/tenants_leasing/tenants_screen.dart';
 import 'package:app/providers/leasing_provider.dart';
@@ -17,6 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:provider/provider.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -185,6 +188,108 @@ void main() {
   });
 
   test(
+    'v11 migration preserves legacy units and blocks new duplicates',
+    () async {
+      sqfliteFfiInit();
+      final path =
+          '${Directory.systemTemp.path}/aqari-v11-migration-${DateTime.now().microsecondsSinceEpoch}.db';
+      final oldDb = await databaseFactoryFfi.openDatabase(
+        path,
+        options: OpenDatabaseOptions(
+          version: 11,
+          onCreate: (db, _) async {
+            await db.execute('''
+            CREATE TABLE units (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              property_id INTEGER NOT NULL,
+              unit_number TEXT NOT NULL,
+              floor TEXT
+            )
+          ''');
+            await db.execute('''
+            CREATE TABLE contracts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              unit_id INTEGER NOT NULL,
+              rent_amount REAL NOT NULL
+            )
+          ''');
+            await db.insert('units', {
+              'property_id': 41,
+              'unit_number': 'DUP-01',
+              'floor': 'الأرضي',
+            });
+            await db.insert('units', {
+              'property_id': 41,
+              'unit_number': ' dup-01 ',
+              'floor': 'الأول',
+            });
+            await db.insert('contracts', {'unit_id': 1, 'rent_amount': 1000.0});
+          },
+        ),
+      );
+      await oldDb.close();
+
+      final migratedDb = await databaseFactoryFfi.openDatabase(
+        path,
+        options: OpenDatabaseOptions(
+          version: 12,
+          onUpgrade: (db, oldVersion, newVersion) async {
+            expect(oldVersion, 11);
+            expect(newVersion, 12);
+            await DatabaseIntegrityMigrations.upgradeToV12(db);
+          },
+        ),
+      );
+      try {
+        expect(
+          (await migratedDb.rawQuery(
+            'PRAGMA user_version',
+          )).single.values.single,
+          12,
+        );
+        final contractColumns = (await migratedDb.rawQuery(
+          'PRAGMA table_info(contracts)',
+        )).map((row) => row['name']).toSet();
+        expect(contractColumns, contains('party_snapshot'));
+        expect(await migratedDb.query('units'), hasLength(2));
+        expect(await migratedDb.query('contracts'), hasLength(1));
+        await expectLater(
+          migratedDb.insert('units', {
+            'property_id': 41,
+            'unit_number': 'DUP-01',
+          }),
+          throwsA(isA<Exception>()),
+        );
+        await migratedDb.update(
+          'units',
+          {'unit_number': 'DUP-01', 'floor': 'الثاني'},
+          where: 'id = ?',
+          whereArgs: [1],
+        );
+        await migratedDb.update(
+          'units',
+          {'unit_number': 'LEGACY-01'},
+          where: 'id = ?',
+          whereArgs: [1],
+        );
+        expect(
+          (await migratedDb.query(
+            'units',
+            where: 'id = ?',
+            whereArgs: [1],
+          )).single['unit_number'],
+          'LEGACY-01',
+        );
+        expect(await migratedDb.query('units'), hasLength(2));
+      } finally {
+        await migratedDb.close();
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      }
+    },
+  );
+
+  test(
     'creates a valid Arabic voucher PDF and a consistent SQLite backup',
     () async {
       final db = await DatabaseHelper.instance.database;
@@ -225,6 +330,7 @@ void main() {
           'electricity_reading',
           'unit_rent_amount',
           'unit_rent_period',
+          'party_snapshot',
         ]),
       );
       expect(voucherColumns, contains('party_name'));
@@ -300,7 +406,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        11,
+        12,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -394,6 +500,186 @@ void main() {
       )).single;
       expect(newUnit['default_rent'], 24000.0);
       expect(newUnit['default_rent_period'], 'annual');
+    },
+  );
+
+  test(
+    'entity relationships reject missing parents and duplicate units',
+    () async {
+      final db = await DatabaseHelper.instance.database;
+      final accountCountBefore = (await db.rawQuery(
+        'SELECT COUNT(*) AS count FROM accounts',
+      )).single['count'];
+
+      await expectLater(
+        DatabaseHelper.instance.insertOwnerWithAccount({
+          'name': '   ',
+          'commission_rate': 5.0,
+        }),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertOwnerWithAccount({
+          'name': 'مالك عمولة غير صالحة',
+          'commission_rate': 101.0,
+        }),
+        throwsArgumentError,
+      );
+      expect(
+        (await db.rawQuery(
+          'SELECT COUNT(*) AS count FROM accounts',
+        )).single['count'],
+        accountCountBefore,
+      );
+
+      await DatabaseHelper.instance.insertOwnerWithAccount({
+        'name': 'مالك العلاقات',
+        'commission_rate': 0.0,
+      });
+      final owner = (await db.query(
+        'owners',
+        where: 'name = ?',
+        whereArgs: ['مالك العلاقات'],
+      )).single;
+      final ownerId = owner['id'] as int;
+
+      await expectLater(
+        DatabaseHelper.instance.insertProperty({
+          'name': 'عقار بلا مالك صحيح',
+          'owner_id': 999999,
+        }),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertProperty({
+          'name': 'عقار بمرجع مدينة غير صحيح',
+          'owner_id': ownerId,
+          'city_id': 999999,
+        }),
+        throwsArgumentError,
+      );
+      final propertyId = await DatabaseHelper.instance.insertProperty({
+        'name': 'عقار العلاقات',
+        'owner_id': ownerId,
+      });
+
+      final firstUnitId = await DatabaseHelper.instance.insertUnit({
+        'property_id': propertyId,
+        'unit_number': 'UNIT-01',
+        'default_rent': 1000.0,
+        'default_rent_period': 'monthly',
+        'status': 'شاغرة',
+      });
+      await expectLater(
+        DatabaseHelper.instance.insertUnit({
+          'property_id': propertyId,
+          'unit_number': ' unit-01 ',
+          'default_rent_period': 'annual',
+        }),
+        throwsStateError,
+      );
+      await expectLater(
+        db.insert('units', {
+          'property_id': propertyId,
+          'unit_number': ' unit-01 ',
+          'default_rent_period': 'annual',
+        }),
+        throwsA(isA<Exception>()),
+      );
+      final secondUnitId = await DatabaseHelper.instance.insertUnit({
+        'property_id': propertyId,
+        'unit_number': 'UNIT-02',
+        'default_rent_period': 'annual',
+        'status': 'شاغرة',
+      });
+      await expectLater(
+        DatabaseHelper.instance.updateUnit({
+          'id': secondUnitId,
+          'unit_number': 'unit-01',
+          'default_rent_period': 'annual',
+        }),
+        throwsStateError,
+      );
+      expect(
+        (await db.query(
+          'units',
+          where: 'id = ?',
+          whereArgs: [firstUnitId],
+        )).single['unit_number'],
+        'UNIT-01',
+      );
+
+      await db.execute('DROP TRIGGER IF EXISTS units_unique_number_insert');
+      await db.execute('DROP TRIGGER IF EXISTS units_unique_number_update');
+      late final int legacyDuplicateId;
+      try {
+        legacyDuplicateId = await db.insert('units', {
+          'property_id': propertyId,
+          'unit_number': ' unit-01 ',
+          'default_rent_period': 'annual',
+          'status': 'شاغرة',
+        });
+      } finally {
+        await DatabaseIntegrityMigrations.installUnitNumberGuards(db);
+      }
+      final duplicateRows = await DatabaseHelper.instance.getUnitsForProperty(
+        propertyId,
+      );
+      expect(
+        duplicateRows.where((row) => row['has_duplicate_number'] == 1).length,
+        2,
+      );
+      await DatabaseHelper.instance.updateUnit({
+        'id': legacyDuplicateId,
+        'unit_number': ' unit-01 ',
+        'default_rent_period': 'annual',
+      });
+      await DatabaseHelper.instance.updateUnit({
+        'id': legacyDuplicateId,
+        'unit_number': 'UNIT-03',
+        'default_rent_period': 'annual',
+      });
+      final resolvedRows = await DatabaseHelper.instance.getUnitsForProperty(
+        propertyId,
+      );
+      expect(
+        resolvedRows.every((row) => row['has_duplicate_number'] == 0),
+        isTrue,
+      );
+
+      final accountsBeforeInvalidTenant = (await db.rawQuery(
+        'SELECT COUNT(*) AS count FROM accounts',
+      )).single['count'];
+      await expectLater(
+        DatabaseHelper.instance.insertTenantWithAccount({
+          'name': 'مستأجر بجنسية غير موجودة',
+          'mobile': '777222333',
+          'nationality_id': 999999,
+        }),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertTenantWithAccount({
+          'name': 'اسم فقط',
+          'mobile': ' ',
+        }),
+        throwsArgumentError,
+      );
+      expect(
+        (await db.rawQuery(
+          'SELECT COUNT(*) AS count FROM accounts',
+        )).single['count'],
+        accountsBeforeInvalidTenant,
+      );
+
+      await expectLater(
+        DatabaseHelper.instance.updateProperty({
+          'id': propertyId,
+          'name': 'عقار العلاقات',
+          'owner_id': 999999,
+        }),
+        throwsArgumentError,
+      );
     },
   );
 
@@ -539,6 +825,23 @@ void main() {
       expect(storedContract['rent_amount'], 1200.0);
       expect(storedContract['unit_rent_amount'], 100.0);
       expect(storedContract['unit_rent_period'], 'monthly');
+      final partySnapshot = ContractPartySnapshot.decode(storedContract);
+      expect(
+        ContractPartySnapshot.section(partySnapshot, 'tenant')['name'],
+        'مستأجر الاختبار',
+      );
+      expect(
+        ContractPartySnapshot.section(partySnapshot, 'owner')['name'],
+        'مالك الاختبار',
+      );
+      expect(
+        ContractPartySnapshot.section(partySnapshot, 'property')['name'],
+        'عقار الاختبار',
+      );
+      expect(
+        ContractPartySnapshot.section(partySnapshot, 'unit')['unit_number'],
+        'T-01',
+      );
 
       final storedInstallments = await DatabaseHelper.instance
           .getInstallmentsForContract(contractId);
@@ -843,6 +1146,69 @@ void main() {
             },
           ],
         );
+    final contractBeforeMasterEdits = (await db.query(
+      'contracts',
+      where: 'id = ?',
+      whereArgs: [contractId],
+    )).single;
+    final originalSnapshot = ContractPartySnapshot.decode(
+      contractBeforeMasterEdits,
+    );
+    expect(
+      ContractPartySnapshot.section(originalSnapshot, 'owner')['name'],
+      'مالك عقد الإلغاء',
+    );
+    expect(
+      ContractPartySnapshot.section(originalSnapshot, 'property')['name'],
+      'عقار عقد الإلغاء المعدل',
+    );
+    expect(
+      ContractPartySnapshot.section(originalSnapshot, 'unit')['unit_number'],
+      'CANCEL-EDITED',
+    );
+    await DatabaseHelper.instance.updateProperty({
+      ...((await db.query(
+        'properties',
+        where: 'id = ?',
+        whereArgs: [propertyId],
+      )).single),
+      'name': 'عقار بعد العقد',
+      'address': 'عنوان جديد',
+    });
+    await DatabaseHelper.instance.updateUnit({
+      'id': unitId,
+      'unit_number': 'CANCEL-RENAMED',
+      'unit_type_id': null,
+      'floor': 'الأول',
+      'elec_meter': 'E-01',
+      'water_meter': 'W-01',
+      'default_rent': 100.0,
+      'default_rent_period': 'monthly',
+    });
+    await DatabaseHelper.instance.updateOwner({
+      'id': ownerId,
+      'name': 'مالك بعد العقد',
+      'commission_rate': 0.0,
+    });
+    final persistedSnapshot = ContractPartySnapshot.decode(
+      (await db.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [contractId],
+      )).single,
+    );
+    expect(
+      ContractPartySnapshot.section(persistedSnapshot, 'owner')['name'],
+      'مالك عقد الإلغاء',
+    );
+    expect(
+      ContractPartySnapshot.section(persistedSnapshot, 'property')['name'],
+      'عقار عقد الإلغاء المعدل',
+    );
+    expect(
+      ContractPartySnapshot.section(persistedSnapshot, 'unit')['unit_number'],
+      'CANCEL-EDITED',
+    );
     final secondOwnerId = await db.insert('owners', {
       'name': 'مالك ثان للاختبار',
     });
@@ -863,6 +1229,11 @@ void main() {
       where: 'contract_id = ?',
       whereArgs: [contractId],
     )).single;
+
+    await expectLater(
+      DatabaseHelper.instance.deleteUnit(unitId),
+      throwsStateError,
+    );
 
     await DatabaseHelper.instance.cancelContract(contractId);
 
@@ -889,6 +1260,10 @@ void main() {
     expect(retainedInstallments.single['status'], 'Cancelled');
     expect(cancelledContract['status'], 'Cancelled');
     expect(releasedUnit['status'], 'شاغرة');
+    await expectLater(
+      DatabaseHelper.instance.deleteUnit(unitId),
+      throwsStateError,
+    );
     expect(
       dueInstallments.any((row) => row['installment_id'] == installment['id']),
       isFalse,
@@ -933,6 +1308,13 @@ void main() {
       )).single;
       final tenantId = tenant['id'] as int;
       final accountId = tenant['account_id'] as int;
+      final contract = (await db.query(
+        'contracts',
+        where: 'tenant_id = ?',
+        whereArgs: [tenantId],
+        limit: 1,
+      )).single;
+      expect(ContractPartySnapshot.tenantName(contract), 'مستأجر الاختبار');
 
       await DatabaseHelper.instance.updateTenant({
         'id': tenantId,
@@ -957,6 +1339,7 @@ void main() {
       expect(updated['name'], 'مستأجر معدل');
       expect(updated['account_id'], accountId);
       expect(account['name'], 'مستأجر معدل');
+      expect(ContractPartySnapshot.tenantName(contract), 'مستأجر الاختبار');
     },
   );
 

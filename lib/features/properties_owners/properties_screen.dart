@@ -220,17 +220,24 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
             ),
             ElevatedButton(
               onPressed: () async {
-                if (formKey.currentState!.validate()) {
+                if (!(formKey.currentState?.validate() ?? false)) return;
+                try {
                   await provider.addProperty({
-                    'name': nameController.text,
+                    'name': nameController.text.trim(),
                     'owner_id': selectedOwnerId,
                     'city_id': selectedCityId,
                     'property_type_id': selectedPropertyTypeId,
                     'cost_center_id': selectedCostCenterId,
-                    'address': addressController.text,
-                    'deed_number': deedController.text,
+                    'address': addressController.text.trim(),
+                    'deed_number': deedController.text.trim(),
                   });
                   if (context.mounted) Navigator.pop(context);
+                } catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('تعذر حفظ العقار: $error')),
+                    );
+                  }
                 }
               },
               child: const Text('حفظ'),
@@ -870,7 +877,25 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                   return DataRow(
                     cells: [
                       DataCell(
-                        Text(unit['unit_number'] ?? ''),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(unit['unit_number'] ?? ''),
+                            if (unit['has_duplicate_number'] == 1)
+                              const Tooltip(
+                                message:
+                                    'رقم الوحدة مكرر في بيانات قديمة. راجع العقد وعدّل الرقم إلى رقم فريد.',
+                                child: Padding(
+                                  padding: EdgeInsets.only(right: 6),
+                                  child: Icon(
+                                    Icons.warning_amber_rounded,
+                                    color: Colors.deepOrange,
+                                    size: 18,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
                         onTap: () => _showEditUnitDialog(unit),
                       ),
                       DataCell(Text(typeName)),
