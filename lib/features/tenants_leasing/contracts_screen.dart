@@ -1,5 +1,6 @@
 import '../../core/pdf_preview_dialog.dart';
 import '../../core/lease_contract_pdf.dart';
+import '../../core/contract_party_snapshot.dart';
 import '../../core/rent_period.dart';
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
@@ -741,10 +742,12 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         itemCount: leasingProv.contracts.length,
                         itemBuilder: (context, index) {
                           final contract = leasingProv.contracts[index];
-                          final tenantName = leasingProv.tenants.firstWhere(
-                            (t) => t['id'] == contract['tenant_id'],
-                            orElse: () => {'name': 'غير معروف'},
-                          )['name'];
+                          final tenantName =
+                              ContractPartySnapshot.tenantName(contract) ??
+                              leasingProv.tenants.firstWhere(
+                                (t) => t['id'] == contract['tenant_id'],
+                                orElse: () => {'name': 'غير معروف'},
+                              )['name'];
                           return Card(
                             child: InkWell(
                               onTap: () => _showContractDetailsDialog(
@@ -905,6 +908,49 @@ class _ContractsScreenState extends State<ContractsScreen> {
     try {
       final db = await DatabaseHelper.instance.database;
       final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+      final savedSnapshot = ContractPartySnapshot.decode(contract);
+      final savedOwner = ContractPartySnapshot.section(savedSnapshot, 'owner');
+      final savedTenant = ContractPartySnapshot.section(
+        savedSnapshot,
+        'tenant',
+      );
+      final savedProperty = ContractPartySnapshot.section(
+        savedSnapshot,
+        'property',
+      );
+      final savedUnit = ContractPartySnapshot.section(savedSnapshot, 'unit');
+      if (savedOwner.isNotEmpty &&
+          savedTenant.isNotEmpty &&
+          savedProperty.isNotEmpty &&
+          savedUnit.isNotEmpty) {
+        final savedUnitType = savedSnapshot['unit_type_name']?.toString() ?? '';
+        final savedPropertyType =
+            savedSnapshot['property_type_name']?.toString() ?? '';
+        final bytes = await LeaseContractPdf.build(
+          companyInfo: companyInfo,
+          contract: contract,
+          owner: savedOwner,
+          tenant: savedTenant,
+          property: savedProperty,
+          unit: savedUnit,
+          cityName: savedSnapshot['city_name']?.toString() ?? '',
+          unitTypeName: savedUnitType.isEmpty
+              ? savedPropertyType
+              : savedUnitType,
+        );
+        if (mounted) {
+          await PdfDocumentPreviewDialog.show(
+            context: context,
+            bytes: bytes,
+            fileName: 'عقد_إيجار_${contract['id']}',
+            preferredIntent: saveAsPdf
+                ? PdfPreviewIntent.save
+                : PdfPreviewIntent.printDocument,
+          );
+        }
+        return;
+      }
+
       final tenantRows = await db.query(
         'tenants',
         where: 'id = ?',
@@ -990,13 +1036,36 @@ class _ContractsScreenState extends State<ContractsScreen> {
         if (rows.isNotEmpty) cityName = rows.first['name']?.toString() ?? '';
       }
 
+      final documentOwner = {
+        ...owner,
+        ...ContractPartySnapshot.section(savedSnapshot, 'owner'),
+      };
+      final documentTenant = {
+        ...tenant,
+        ...ContractPartySnapshot.section(savedSnapshot, 'tenant'),
+      };
+      final documentProperty = {
+        ...property,
+        ...ContractPartySnapshot.section(savedSnapshot, 'property'),
+      };
+      final documentUnit = {
+        ...unit,
+        ...ContractPartySnapshot.section(savedSnapshot, 'unit'),
+      };
+      if (savedSnapshot.isNotEmpty) {
+        cityName = savedSnapshot['city_name']?.toString() ?? '';
+        unitTypeName = savedSnapshot['unit_type_name']?.toString() ?? '';
+        propertyTypeName =
+            savedSnapshot['property_type_name']?.toString() ?? '';
+      }
+
       final bytes = await LeaseContractPdf.build(
         companyInfo: companyInfo,
         contract: contract,
-        owner: owner,
-        tenant: tenant,
-        property: property,
-        unit: unit,
+        owner: documentOwner,
+        tenant: documentTenant,
+        property: documentProperty,
+        unit: documentUnit,
         cityName: cityName,
         unitTypeName: unitTypeName.isEmpty ? propertyTypeName : unitTypeName,
       );
