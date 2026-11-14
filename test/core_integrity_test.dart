@@ -401,6 +401,206 @@ void main() {
   );
 
   test(
+    'restores a validated backup and preserves a verified rollback copy',
+    () async {
+      final db = await DatabaseHelper.instance.database;
+      final companyRows = await db.query('company_info', limit: 1);
+      expect(companyRows, isNotEmpty);
+      final companyId = companyRows.single['id'];
+      final originalName = companyRows.single['name_ar'];
+      final backupPath = '$testDocuments/aqari-restore-source.db';
+      await DatabaseHelper.instance.backupToFile(backupPath);
+
+      await db.update(
+        'company_info',
+        {'name_ar': 'تغيير مؤقت لاختبار الاستعادة'},
+        where: 'id = ?',
+        whereArgs: [companyId],
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        'تغيير مؤقت لاختبار الاستعادة',
+      );
+
+      final rollbackPath = await DatabaseHelper.instance.restoreFromFile(
+        backupPath,
+      );
+      expect(File(rollbackPath).existsSync(), isTrue);
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+      );
+
+      final rollbackDb = await databaseFactory.openDatabase(
+        rollbackPath,
+        options: OpenDatabaseOptions(readOnly: true),
+      );
+      try {
+        expect(
+          (await rollbackDb.query('company_info', limit: 1)).single['name_ar'],
+          'تغيير مؤقت لاختبار الاستعادة',
+        );
+      } finally {
+        await rollbackDb.close();
+      }
+      await File(backupPath).delete();
+      await File(rollbackPath).delete();
+    },
+  );
+
+  test(
+    'rejects a corrupt restore without changing live data or an existing backup',
+    () async {
+      final db = await DatabaseHelper.instance.database;
+      final originalName = (await DatabaseHelper.instance
+          .getCompanyInfo())?['name_ar'];
+      final corruptPath = '$testDocuments/not-a-database.db';
+      await File(corruptPath).writeAsBytes(List<int>.filled(256, 0));
+
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(corruptPath),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+      );
+      expect(await db.rawQuery('PRAGMA integrity_check'), isNotEmpty);
+
+      final existingBackupPath = '$testDocuments/do-not-overwrite.db';
+      final existingBackup = File(existingBackupPath);
+      await existingBackup.writeAsString('preserve-existing-file');
+      await expectLater(
+        DatabaseHelper.instance.backupToFile(existingBackupPath),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(await existingBackup.readAsString(), 'preserve-existing-file');
+      await File(corruptPath).delete();
+      await existingBackup.delete();
+    },
+  );
+
+  test(
+    'rejects incomplete schemas and uncheckpointed WAL backups before replacement',
+    () async {
+      final originalName = (await DatabaseHelper.instance
+          .getCompanyInfo())?['name_ar'];
+      final completeBackupPath = '$testDocuments/complete-schema.db';
+      final incompleteBackupPath = '$testDocuments/incomplete-schema.db';
+      final missingColumnBackupPath =
+          '$testDocuments/missing-contract-column.db';
+      await DatabaseHelper.instance.backupToFile(completeBackupPath);
+      await File(completeBackupPath).copy(incompleteBackupPath);
+      final incompleteDb = await databaseFactory.openDatabase(
+        incompleteBackupPath,
+      );
+      await incompleteDb.execute('DROP TABLE sms_logs');
+      await incompleteDb.close();
+
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(incompleteBackupPath),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+      );
+
+      await File(completeBackupPath).copy(missingColumnBackupPath);
+      final missingColumnDb = await databaseFactory.openDatabase(
+        missingColumnBackupPath,
+      );
+      await missingColumnDb.execute(
+        'ALTER TABLE contracts DROP COLUMN payment_method',
+      );
+      await missingColumnDb.close();
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(missingColumnBackupPath),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+      );
+
+      final walBackupPath = '$testDocuments/wal-pending-backup.db';
+      await DatabaseHelper.instance.backupToFile(walBackupPath);
+      final walDatabase = await databaseFactory.openDatabase(walBackupPath);
+      await walDatabase.rawQuery('PRAGMA journal_mode = WAL');
+      await walDatabase.execute(
+        'CREATE TABLE committed_in_wal (id INTEGER PRIMARY KEY, value TEXT)',
+      );
+      await walDatabase.insert('committed_in_wal', {'value': 'committed'});
+      expect(File('$walBackupPath-wal').lengthSync(), greaterThan(32));
+
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(walBackupPath),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+      );
+      await walDatabase.close();
+
+      for (final path in [
+        completeBackupPath,
+        incompleteBackupPath,
+        missingColumnBackupPath,
+        walBackupPath,
+      ]) {
+        for (final suffix in ['', '-wal', '-shm']) {
+          final file = File('$path$suffix');
+          if (await file.exists()) await file.delete();
+        }
+      }
+    },
+  );
+
+  test(
+    'upgrades a valid v11 backup during restore before replacing live data',
+    () async {
+      final sourcePath = '$testDocuments/aqari-v11-restore.db';
+      await DatabaseHelper.instance.backupToFile(sourcePath);
+      final legacyDatabase = await databaseFactory.openDatabase(sourcePath);
+      await legacyDatabase.execute(
+        'ALTER TABLE contracts DROP COLUMN party_snapshot',
+      );
+      await legacyDatabase.execute('DROP TRIGGER units_unique_number_insert');
+      await legacyDatabase.execute('DROP TRIGGER units_unique_number_update');
+      await legacyDatabase.execute('PRAGMA user_version = 11');
+      await legacyDatabase.close();
+
+      final rollbackPath = await DatabaseHelper.instance.restoreFromFile(
+        sourcePath,
+      );
+      final restored = await DatabaseHelper.instance.database;
+      expect(
+        (await restored.rawQuery('PRAGMA user_version')).single.values.single,
+        12,
+      );
+      expect(
+        (await restored.rawQuery(
+          'PRAGMA table_info(contracts)',
+        )).map((row) => row['name']),
+        contains('party_snapshot'),
+      );
+      expect(
+        (await restored.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger'",
+        )).map((row) => row['name']),
+        containsAll([
+          'units_unique_number_insert',
+          'units_unique_number_update',
+        ]),
+      );
+      expect(File(rollbackPath).existsSync(), isTrue);
+      await File(sourcePath).delete();
+      await File(rollbackPath).delete();
+    },
+  );
+
+  test(
     'unit rent period is explicit and legacy rows are not guessed',
     () async {
       final db = await DatabaseHelper.instance.database;
@@ -1412,6 +1612,29 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     provider.dispose();
   });
+
+  test(
+    'factory reset creates a verified rollback copy before reseeding',
+    () async {
+      final rollbackPath = await DatabaseHelper.instance.factoryReset();
+      final rollback = File(rollbackPath);
+      expect(await rollback.exists(), isTrue);
+      expect(await rollback.length(), greaterThan(100));
+
+      final company = await DatabaseHelper.instance.getCompanyInfo();
+      expect(company?['name_ar'], isNotEmpty);
+      final db = await DatabaseHelper.instance.database;
+      expect(
+        (await db.rawQuery('PRAGMA user_version')).single.values.single,
+        12,
+      );
+      expect(
+        (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
+        'ok',
+      );
+      await rollback.delete();
+    },
+  );
 }
 
 class _TestLeasingProvider extends LeasingProvider {

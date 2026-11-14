@@ -127,8 +127,8 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       _addressController.text = _companyInfo!.address ?? '';
       _savedLogoPath = _companyInfo!.logoPath;
       _logoPathController.text = _savedLogoPath ?? '';
-      _termsController.text = _companyInfo!.termsConditions?.trim().isNotEmpty ==
-              true
+      _termsController.text =
+          _companyInfo!.termsConditions?.trim().isNotEmpty == true
           ? _companyInfo!.termsConditions!
           : LeaseContractTerms.defaultText;
 
@@ -201,10 +201,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
         return;
       }
       final bytes = await selected.readAsBytes();
-      final validationError = CompanyLogoStorage.validateBytes(
-        fileName,
-        bytes,
-      );
+      final validationError = CompanyLogoStorage.validateBytes(fileName, bytes);
       if (validationError != null) {
         _showLogoMessage(validationError);
         return;
@@ -653,10 +650,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                       height: 22,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : const Text(
-                      'حفظ التعديلات',
-                      style: TextStyle(fontSize: 18),
-                    ),
+                  : const Text('حفظ التعديلات', style: TextStyle(fontSize: 18)),
             ),
           ],
         ),
@@ -873,70 +867,233 @@ class MaintenanceTab extends StatefulWidget {
 }
 
 class _MaintenanceTabState extends State<MaintenanceTab> {
-  String _backupPath = '';
-  final _backupPathController = TextEditingController();
+  String _localBackupPath = '';
+  String _externalBackupPath = '';
+  bool _isBackingUp = false;
+  bool _isRestoring = false;
+  final _localBackupPathController = TextEditingController();
+  final _externalBackupPathController = TextEditingController();
   final _confirmController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _loadBackupPath();
+    _loadBackupPaths();
   }
 
-  Future<void> _loadBackupPath() async {
+  Future<void> _loadBackupPaths() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
-      _backupPath = prefs.getString('backup_path') ?? '';
-      _backupPathController.text = _backupPath;
+      _localBackupPath =
+          prefs.getString('backup_local_path') ??
+          prefs.getString('backup_path') ??
+          '';
+      _externalBackupPath = prefs.getString('backup_external_path') ?? '';
+      _localBackupPathController.text = _localBackupPath;
+      _externalBackupPathController.text = _externalBackupPath;
     });
   }
 
-  Future<void> _selectBackupFolder() async {
-    String? selectedDirectory = await getDirectoryPath();
+  Future<void> _selectBackupFolder({required bool external}) async {
+    final selectedDirectory = await getDirectoryPath();
     if (selectedDirectory != null) {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('backup_path', selectedDirectory);
+      final preferenceKey = external
+          ? 'backup_external_path'
+          : 'backup_local_path';
+      await prefs.setString(preferenceKey, selectedDirectory);
+      if (!external) await prefs.setString('backup_path', selectedDirectory);
+      if (!mounted) return;
       setState(() {
-        _backupPath = selectedDirectory;
-        _backupPathController.text = selectedDirectory;
+        if (external) {
+          _externalBackupPath = selectedDirectory;
+          _externalBackupPathController.text = selectedDirectory;
+        } else {
+          _localBackupPath = selectedDirectory;
+          _localBackupPathController.text = selectedDirectory;
+        }
       });
     }
   }
 
   Future<void> _performBackup() async {
-    if (_backupPath.isEmpty) {
+    final destinations = {
+      if (_localBackupPath.trim().isNotEmpty) _localBackupPath.trim(),
+      if (_externalBackupPath.trim().isNotEmpty) _externalBackupPath.trim(),
+    }.toList();
+    if (destinations.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('الرجاء اختيار مجلد النسخ الاحتياطي أولاً'),
+          content: Text('حدد مجلدًا محليًا أو خارجيًا للنسخ الاحتياطي أولاً'),
         ),
       );
       return;
     }
 
+    setState(() => _isBackingUp = true);
+    final timestamp = DateTime.now()
+        .toIso8601String()
+        .replaceAll(':', '')
+        .replaceAll('-', '')
+        .replaceAll('.', '');
+    final succeeded = <String>[];
+    final failures = <String>[];
     try {
-      final timestamp = DateTime.now()
-          .toIso8601String()
-          .replaceAll(':', '')
-          .replaceAll('-', '')
-          .replaceAll('.', '');
-      final backupFilePath = p.join(
-        _backupPath,
-        'aqari_erp_backup_$timestamp.db',
-      );
-      await DatabaseHelper.instance.backupToFile(backupFilePath);
-
-      if (mounted)
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('تم النسخ الاحتياطي بنجاح إلى: $backupFilePath'),
-          ),
+      for (final destination in destinations) {
+        final backupFilePath = p.join(
+          destination,
+          'aqari_erp_backup_$timestamp.db',
         );
-    } catch (e) {
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('فشل النسخ الاحتياطي: $e')));
+        try {
+          await DatabaseHelper.instance.backupToFile(backupFilePath);
+          succeeded.add(backupFilePath);
+        } catch (error) {
+          failures.add('$destination: $error');
+        }
+      }
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(
+            failures.isEmpty
+                ? 'اكتمل النسخ الاحتياطي'
+                : 'نتيجة النسخ الاحتياطي',
+          ),
+          content: SizedBox(
+            width: 620,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (succeeded.isNotEmpty) ...[
+                    Text('نسخ تم إنشاؤها والتحقق منها (${succeeded.length}):'),
+                    const SizedBox(height: 8),
+                    for (final path in succeeded) ...[
+                      SelectableText(path, textDirection: TextDirection.ltr),
+                      const SizedBox(height: 8),
+                    ],
+                  ],
+                  if (failures.isNotEmpty) ...[
+                    Text(
+                      succeeded.isEmpty
+                          ? 'فشل النسخ في جميع الوجهات:'
+                          : 'لم تنجح الوجهات التالية:',
+                    ),
+                    const SizedBox(height: 8),
+                    for (final failure in failures) ...[
+                      SelectableText(failure),
+                      const SizedBox(height: 8),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('إغلاق'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isBackingUp = false);
+    }
+  }
+
+  Future<void> _selectAndRestoreBackup() async {
+    final selected = await openFile(
+      acceptedTypeGroups: [
+        const XTypeGroup(
+          label: 'نسخة قاعدة بيانات Aqari',
+          extensions: ['db', 'sqlite', 'sqlite3'],
+        ),
+      ],
+    );
+    if (selected == null || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('تأكيد استعادة قاعدة البيانات'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'سيستبدل النظام بيانات التشغيل بمحتوى النسخة بعد فحص سلامتها ومخططها. سيحفظ نسخة رجوع من البيانات الحالية قبل الاستبدال، وستحتاج إلى تسجيل الدخول مجددًا.',
+            ),
+            const SizedBox(height: 12),
+            SelectableText(selected.path, textDirection: TextDirection.ltr),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('فحص واستعادة'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) await _performRestore(selected.path);
+  }
+
+  Future<void> _performRestore(String backupPath) async {
+    final authProvider = Provider.of<AuthProvider>(context, listen: false);
+    final navigationProvider = Provider.of<NavigationProvider>(
+      context,
+      listen: false,
+    );
+    setState(() => _isRestoring = true);
+    try {
+      final rollbackPath = await DatabaseHelper.instance.restoreFromFile(
+        backupPath,
+      );
+      await authProvider.logout();
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('تمت الاستعادة. نسخة الرجوع محفوظة في: $rollbackPath'),
+          duration: const Duration(seconds: 10),
+        ),
+      );
+      navigationProvider.reset();
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        (_) => false,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      final rollbackFailed = error.toString().contains(
+        'تعذرت الاستعادة التلقائية',
+      );
+      if (rollbackFailed) {
+        await authProvider.logout();
+        if (!mounted) return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('لم تتم الاستعادة: $error'),
+          duration: const Duration(seconds: 10),
+        ),
+      );
+      if (rollbackFailed) {
+        navigationProvider.reset();
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (_) => false,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isRestoring = false);
     }
   }
 
@@ -961,7 +1118,7 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'هذا الإجراء سيمسح جميع البيانات المدخلة في النظام (عقود، مستأجرين، سندات، الخ) وسيعيده كأنه جديد.',
+                    'سيعيد النظام إلى قاعدة فارغة ويمسح بياناته الحالية. قبل ذلك سيحفظ نسخة رجوع متحققًا منها تلقائيًا؛ احتفظ بمسارها إذا احتجت إلى الاستعادة.',
                   ),
                   const SizedBox(height: 16),
                   const Text('لتأكيد الحذف، اكتب كلمة "تأكيد" في الحقل أدناه:'),
@@ -1003,105 +1160,194 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
   }
 
   Future<void> _performFactoryReset() async {
+    final authProvider = Provider.of<AuthProvider>(context, listen: false);
+    final navigationProvider = Provider.of<NavigationProvider>(
+      context,
+      listen: false,
+    );
     try {
-      await Provider.of<AuthProvider>(context, listen: false).logout();
-      await DatabaseHelper.instance.factoryReset();
+      final rollbackPath = await DatabaseHelper.instance.factoryReset();
+      await authProvider.logout();
       if (mounted) {
-        Provider.of<NavigationProvider>(context, listen: false).reset();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('اكتملت التهيئة. نسخة الرجوع: $rollbackPath'),
+            duration: const Duration(seconds: 10),
+          ),
+        );
+        navigationProvider.reset();
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => const LoginScreen()),
           (_) => false,
         );
       }
     } catch (e) {
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('فشل تهيئة النظام: $e')));
+      if (!mounted) return;
+      final rollbackFailed = e.toString().contains('تعذرت الاستعادة التلقائية');
+      if (rollbackFailed) {
+        await authProvider.logout();
+        if (!mounted) return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('فشلت التهيئة؛ راجع حالة قاعدة البيانات: $e'),
+          duration: const Duration(seconds: 10),
+        ),
+      );
+      if (rollbackFailed) {
+        navigationProvider.reset();
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (_) => false,
+        );
+      }
     }
   }
 
   @override
   void dispose() {
-    _backupPathController.dispose();
+    _localBackupPathController.dispose();
+    _externalBackupPathController.dispose();
     _confirmController.dispose();
     super.dispose();
+  }
+
+  Widget _backupLocationRow({
+    required String label,
+    required TextEditingController controller,
+    required bool external,
+  }) {
+    return Row(
+      children: [
+        Expanded(
+          child: TextFormField(
+            decoration: InputDecoration(
+              labelText: label,
+              border: const OutlineInputBorder(),
+            ),
+            controller: controller,
+            readOnly: true,
+          ),
+        ),
+        const SizedBox(width: 12),
+        OutlinedButton.icon(
+          onPressed: _isBackingUp || _isRestoring
+              ? null
+              : () => _selectBackupFolder(external: external),
+          icon: const Icon(Icons.folder),
+          label: const Text('اختيار'),
+          style: OutlinedButton.styleFrom(padding: const EdgeInsets.all(16)),
+        ),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(24.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'نسخة احتياطية يدوية متحقق منها',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: TextFormField(
-                  decoration: const InputDecoration(
-                    labelText: 'مسار مجلد النسخ الاحتياطي',
-                    border: OutlineInputBorder(),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'النسخ الاحتياطي والاستعادة',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'اختر وجهة محلية، خارجية (مثل USB)، أو كلتيهما. كل نسخة تُفحص بسلامة SQLite والعلاقات قبل اعتمادها. لا يُستبدل ملف نسخة موجود.',
+            ),
+            const SizedBox(height: 16),
+            _backupLocationRow(
+              label: 'مجلد النسخ المحلي',
+              controller: _localBackupPathController,
+              external: false,
+            ),
+            const SizedBox(height: 12),
+            _backupLocationRow(
+              label: 'مجلد النسخ الخارجي (اختياري)',
+              controller: _externalBackupPathController,
+              external: true,
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: _isBackingUp || _isRestoring
+                      ? null
+                      : _performBackup,
+                  icon: _isBackingUp
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.backup),
+                  label: Text(
+                    _isBackingUp ? 'جارٍ النسخ والفحص...' : 'نسخ احتياطي الآن',
                   ),
-                  controller: _backupPathController,
-                  readOnly: true,
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.all(16),
+                    backgroundColor: Colors.green,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 16),
-              ElevatedButton.icon(
-                onPressed: _selectBackupFolder,
-                icon: const Icon(Icons.folder),
-                label: const Text('تحديد المجلد'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.all(16),
+                OutlinedButton.icon(
+                  onPressed: _isBackingUp || _isRestoring
+                      ? null
+                      : _selectAndRestoreBackup,
+                  icon: _isRestoring
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.settings_backup_restore),
+                  label: Text(
+                    _isRestoring
+                        ? 'جارٍ فحص/استعادة النسخة...'
+                        : 'استعادة نسخة',
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.all(16),
+                  ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 48),
+            const Divider(),
+            const SizedBox(height: 24),
+            const Text(
+              'تهيئة وتصفير النظام',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Colors.red,
               ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          ElevatedButton.icon(
-            onPressed: _performBackup,
-            icon: const Icon(Icons.backup),
-            label: const Text('نسخ احتياطي الآن'),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.all(16),
-              backgroundColor: Colors.green,
             ),
-          ),
-          const SizedBox(height: 48),
-          const Divider(),
-          const SizedBox(height: 24),
-          const Text(
-            'تهيئة وتصفير النظام (Factory Reset)',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Colors.red,
+            const SizedBox(height: 8),
+            const Text(
+              'يتطلب هذا الإجراء تأكيدًا صريحًا، وينشئ نسخة رجوع متحققًا منها قبل مسح قاعدة التشغيل.',
             ),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'احذر: هذه العملية ستمسح جميع قواعد البيانات الخاصة بالمؤسسة.',
-          ),
-          const SizedBox(height: 16),
-          ElevatedButton.icon(
-            onPressed: _showFactoryResetDialog,
-            icon: const Icon(Icons.warning, color: Colors.white),
-            label: const Text(
-              'تصفير النظام بالكامل',
-              style: TextStyle(color: Colors.white),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _isBackingUp || _isRestoring
+                  ? null
+                  : _showFactoryResetDialog,
+              icon: const Icon(Icons.warning, color: Colors.white),
+              label: const Text(
+                'تصفير النظام بالكامل',
+                style: TextStyle(color: Colors.white),
+              ),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.all(16),
+                backgroundColor: Colors.red,
+              ),
             ),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.all(16),
-              backgroundColor: Colors.red,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
