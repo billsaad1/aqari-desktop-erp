@@ -312,6 +312,11 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
           (line) => Map<String, dynamic>.from(line as Map),
         ),
       );
+      final invoices = List<Map<String, dynamic>>.from(
+        (_data!['invoices'] as List).map(
+          (invoice) => Map<String, dynamic>.from(invoice as Map),
+        ),
+      );
       final voucherType = voucher['voucher_type']?.toString() ?? '';
       final isGeneralVoucher = voucherType.contains('عام');
       final partyName = voucher['party_name']?.toString().trim() ?? '';
@@ -326,6 +331,7 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         description: voucher['description']?.toString(),
         journalLines: lines,
         installmentAllocations: installments,
+        invoiceAllocations: invoices,
       );
       if (mounted) {
         await PdfDocumentPreviewDialog.show(
@@ -368,6 +374,15 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
       ],
     ),
   );
+
+  String _formatInvoiceAmount(dynamic value) {
+    final amount = value is num
+        ? value.toDouble()
+        : double.tryParse(value?.toString() ?? '');
+    return amount == null
+        ? '—'
+        : '${NumberFormat('#,##0.00').format(amount)} $_currency';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -462,6 +477,24 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         (line) => Map<String, dynamic>.from(line as Map),
       ),
     );
+    final rawInvoices = _data!['invoices'];
+    final invoices = rawInvoices is List
+        ? rawInvoices
+              .whereType<Map>()
+              .map((invoice) => Map<String, dynamic>.from(invoice))
+              .toList()
+        : <Map<String, dynamic>>[];
+    final invoicedInstallmentIds = invoices
+        .map((invoice) => invoice['installment_id'])
+        .whereType<num>()
+        .map((id) => id.toInt())
+        .toSet();
+    final standaloneInstallments = installments.where((installment) {
+      final id = installment['installment_id'];
+      return id is! num || !invoicedInstallmentIds.contains(id.toInt());
+    }).toList();
+    final isReceipt =
+        voucher['voucher_type']?.toString().contains('قبض') == true;
     final amount = (voucher['amount'] as num).toDouble();
     final detailTiles = <Widget>[
       _detailTile('نوع السند', 'سند ${voucher['voucher_type']}'),
@@ -520,14 +553,14 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
                 }).toList(),
               ),
             ),
-          if (installments.isNotEmpty) ...[
+          if (standaloneInstallments.isNotEmpty) ...[
             const SizedBox(height: 22),
             const Text(
               'الأقساط التي سددها هذا السند',
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            ...installments.map((installment) {
+            ...standaloneInstallments.map((installment) {
               final allocated = (installment['allocated_amount'] as num)
                   .toDouble();
               return Card(
@@ -550,8 +583,75 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
               );
             }),
           ],
+          if (isReceipt && invoices.isNotEmpty) ...[
+            const SizedBox(height: 22),
+            const Text(
+              'الفواتير المرتبطة بهذا السند',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            ...invoices.map((invoice) {
+              final invoiceDate = invoice['invoice_date']?.toString() ?? '—';
+              final rawInstallmentId = invoice['installment_id'];
+              final installmentId = rawInstallmentId is num
+                  ? rawInstallmentId.toInt()
+                  : null;
+              final rentAllocated = installmentId == null
+                  ? 0.0
+                  : installments
+                        .where(
+                          (item) =>
+                              (item['installment_id'] as num?)?.toInt() ==
+                              installmentId,
+                        )
+                        .fold<double>(
+                          0,
+                          (sum, item) =>
+                              sum +
+                              ((item['allocated_amount'] as num?)?.toDouble() ??
+                                  0),
+                        );
+              final invoiceAllocated =
+                  (invoice['allocated_amount'] as num?)?.toDouble() ?? 0.0;
+              final taxAllocated = (invoiceAllocated - rentAllocated)
+                  .clamp(0.0, invoiceAllocated)
+                  .toDouble();
+              final invoiceDetails = [
+                'التاريخ: $invoiceDate',
+                'القسط: ${installmentId?.toString() ?? '—'}',
+                if (invoice['due_date'] != null)
+                  'الاستحقاق: ${invoice['due_date']}',
+                'إجمالي الفاتورة: ${_formatInvoiceAmount(invoice['total_amount'])}',
+                if (invoice['net_amount'] != null)
+                  'الصافي: ${_formatInvoiceAmount(invoice['net_amount'])}',
+                if (invoice['tax_amount'] != null)
+                  'الضريبة: ${_formatInvoiceAmount(invoice['tax_amount'])}',
+                'من هذا السند للإيجار: ${_formatInvoiceAmount(rentAllocated)}',
+                'من هذا السند للضريبة: ${_formatInvoiceAmount(taxAllocated)}',
+              ];
+              return Card(
+                child: ListTile(
+                  leading: const Icon(Icons.receipt, color: Colors.blueGrey),
+                  title: Text('الفاتورة رقم ${invoice['invoice_id'] ?? '—'}'),
+                  subtitle: Text(invoiceDetails.join(' • ')),
+                  trailing: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      const Text('المبلغ المخصص'),
+                      Text(
+                        _formatInvoiceAmount(invoice['allocated_amount']),
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
+          ],
           if (voucher['voucher_type'] == 'قبض مستأجر' &&
-              installments.isEmpty) ...[
+              installments.isEmpty &&
+              invoices.isEmpty) ...[
             const SizedBox(height: 16),
             const Text(
               'هذا السند محفوظ، لكن تفاصيل توزيعه على الأقساط لم تكن تُسجل في الإصدارات السابقة من النظام.',

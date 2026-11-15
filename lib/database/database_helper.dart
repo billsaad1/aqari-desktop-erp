@@ -13,7 +13,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 14;
+  static const int _schemaVersion = 15;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -415,6 +415,8 @@ class DatabaseHelper {
       'tax_invoices': [
         'id',
         'contract_id',
+        'installment_id',
+        'journal_entry_id',
         'invoice_date',
         'net_amount',
         'total_amount',
@@ -436,6 +438,12 @@ class DatabaseHelper {
         'id',
         'voucher_id',
         'installment_id',
+        'amount',
+      ],
+      'voucher_invoice_allocations': [
+        'id',
+        'voucher_id',
+        'invoice_id',
         'amount',
       ],
       'journal_entries': ['id', 'entry_date', 'description', 'is_posted'],
@@ -490,6 +498,21 @@ class DatabaseHelper {
     if (missingTriggers.isNotEmpty) {
       throw StateError(
         'مخطط النسخة يفتقد حواجز سلامة الوحدات: ${missingTriggers.join('، ')}',
+      );
+    }
+    final indexes = (await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'index'",
+    )).map((row) => row['name']?.toString()).toSet();
+    const requiredIndexes = [
+      'tax_invoices_installment_unique',
+      'voucher_invoice_unique',
+    ];
+    final missingIndexes = requiredIndexes
+        .where((index) => !indexes.contains(index))
+        .toList();
+    if (missingIndexes.isNotEmpty) {
+      throw StateError(
+        'مخطط النسخة يفتقد فهارس الربط المالي: ${missingIndexes.join('، ')}',
       );
     }
   }
@@ -715,6 +738,43 @@ class DatabaseHelper {
       await db.execute('''
         UPDATE tax_invoices
         SET net_amount = ROUND(MAX(total_amount - tax_amount, 0), 2)
+      ''');
+    }
+    if (oldVersion < 15) {
+      await _ensureColumn(
+        db,
+        'tax_invoices',
+        'installment_id',
+        'INTEGER REFERENCES contract_installments(id)',
+      );
+      await _ensureColumn(
+        db,
+        'tax_invoices',
+        'journal_entry_id',
+        'INTEGER REFERENCES journal_entries(id)',
+      );
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS voucher_invoice_allocations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          voucher_id INTEGER NOT NULL,
+          invoice_id INTEGER NOT NULL,
+          amount REAL NOT NULL CHECK (amount > 0),
+          FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
+          FOREIGN KEY (invoice_id) REFERENCES tax_invoices (id)
+        )
+      ''');
+      await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS tax_invoices_installment_unique
+        ON tax_invoices(installment_id)
+        WHERE installment_id IS NOT NULL
+      ''');
+      await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS voucher_invoice_unique
+        ON voucher_invoice_allocations(voucher_id, invoice_id)
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS voucher_invoice_invoice_idx
+        ON voucher_invoice_allocations(invoice_id)
       ''');
     }
   }
@@ -961,13 +1021,22 @@ class DatabaseHelper {
       CREATE TABLE tax_invoices (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         contract_id INTEGER,
+        installment_id INTEGER,
+        journal_entry_id INTEGER,
         invoice_date TEXT NOT NULL,
         net_amount REAL NOT NULL DEFAULT 0,
         total_amount REAL NOT NULL,
         tax_amount REAL NOT NULL,
         tax_rate REAL CHECK (tax_rate IS NULL OR (tax_rate >= 0 AND tax_rate <= 100)),
-        FOREIGN KEY (contract_id) REFERENCES contracts (id)
+        FOREIGN KEY (contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (installment_id) REFERENCES contract_installments (id),
+        FOREIGN KEY (journal_entry_id) REFERENCES journal_entries (id)
       )
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX tax_invoices_installment_unique
+      ON tax_invoices(installment_id)
+      WHERE installment_id IS NOT NULL
     ''');
 
     await db.execute('''
@@ -1005,6 +1074,25 @@ class DatabaseHelper {
         FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
         FOREIGN KEY (installment_id) REFERENCES contract_installments (id)
       )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE voucher_invoice_allocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_id INTEGER NOT NULL,
+        invoice_id INTEGER NOT NULL,
+        amount REAL NOT NULL CHECK (amount > 0),
+        FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
+        FOREIGN KEY (invoice_id) REFERENCES tax_invoices (id)
+      )
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX voucher_invoice_unique
+      ON voucher_invoice_allocations(voucher_id, invoice_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX voucher_invoice_invoice_idx
+      ON voucher_invoice_allocations(invoice_id)
     ''');
 
     // 9. General Accounting (Journal Entries)
@@ -3139,6 +3227,80 @@ class DatabaseHelper {
     );
   }
 
+  Future<List<Map<String, dynamic>>> getUnbilledInstallmentsForContract(
+    int contractId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT ci.*
+      FROM contract_installments ci
+      JOIN contracts c ON c.id = ci.contract_id
+      LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
+      WHERE ci.contract_id = ? AND c.status = 'Active' AND ti.id IS NULL
+      ORDER BY ci.due_date, ci.id
+      ''',
+      [contractId],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getUnbilledInstallmentsForTenant(
+    int tenantId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT ci.*
+      FROM contract_installments ci
+      JOIN contracts c ON c.id = ci.contract_id
+      LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
+      WHERE c.tenant_id = ?
+        AND c.status = 'Active'
+        AND ci.status != 'Paid'
+        AND ti.id IS NULL
+      ORDER BY ci.due_date, ci.id
+      ''',
+      [tenantId],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getOpenTaxInvoicesForTenant(
+    int tenantId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT
+        ti.id,
+        ti.contract_id,
+        ti.installment_id,
+        ti.invoice_date,
+        ti.net_amount,
+        ti.tax_amount,
+        ti.total_amount,
+        ti.tax_rate,
+        ci.due_date,
+        ci.amount AS installment_amount,
+        ci.paid_amount AS installment_paid_amount,
+        COALESCE(SUM(via.amount), 0) AS paid_amount,
+        ROUND(MAX(ti.total_amount - COALESCE(SUM(via.amount), 0), 0), 2)
+          AS remaining_amount
+      FROM tax_invoices ti
+      JOIN contracts c ON c.id = ti.contract_id
+      JOIN contract_installments ci ON ci.id = ti.installment_id
+      LEFT JOIN voucher_invoice_allocations via ON via.invoice_id = ti.id
+      WHERE c.tenant_id = ? AND c.status = 'Active'
+      GROUP BY ti.id
+      HAVING ROUND(MAX(ti.total_amount - COALESCE(SUM(via.amount), 0), 0), 2) > 0
+      ORDER BY ci.due_date, ti.invoice_date, ti.id
+      ''',
+      [tenantId],
+    );
+  }
+
   // --- Tenant Financial Operations ---
 
   Future<int> insertTenantReceiptVoucher({
@@ -3147,12 +3309,14 @@ class DatabaseHelper {
     required String voucherDate,
     required int cashAccountId,
     required List<Map<String, dynamic>> installmentsToUpdate,
+    int? invoiceId,
   }) async {
     PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
     if (amount <= 0 ||
         !_hasCentPrecision(amount) ||
         DateTime.tryParse(voucherDate) == null ||
-        installmentsToUpdate.isEmpty) {
+        (invoiceId == null && installmentsToUpdate.isEmpty) ||
+        (invoiceId != null && installmentsToUpdate.isNotEmpty)) {
       throw ArgumentError('المبلغ والأقساط المطلوب تسديدها يجب أن تكون صحيحة');
     }
     final db = await instance.database;
@@ -3176,50 +3340,162 @@ class DatabaseHelper {
 
       var allocatedCents = 0;
       final verifiedUpdates = <Map<String, dynamic>>[];
-      for (final requested in installmentsToUpdate) {
-        final rows = await txn.rawQuery(
+      if (invoiceId != null) {
+        final invoices = await txn.rawQuery(
           '''
-          SELECT ci.* FROM contract_installments ci
-          JOIN contracts c ON c.id = ci.contract_id
-          WHERE ci.id = ? AND c.tenant_id = ? AND c.status = 'Active'
-        ''',
-          [requested['id'], tenantId],
+          SELECT
+            ti.id,
+            ti.total_amount,
+            ti.net_amount,
+            ti.tax_amount,
+            ti.installment_id,
+            c.tenant_id,
+            ci.amount AS installment_amount,
+            ci.paid_amount AS installment_paid_amount
+          FROM tax_invoices ti
+          JOIN contracts c ON c.id = ti.contract_id
+          JOIN contract_installments ci ON ci.id = ti.installment_id
+          WHERE ti.id = ? AND c.status = 'Active'
+          LIMIT 1
+          ''',
+          [invoiceId],
         );
-        if (rows.isEmpty)
+        if (invoices.isEmpty || invoices.first['tenant_id'] != tenantId) {
           throw StateError(
-            'القسط المحدد لا يتبع هذا المستأجر أو أن عقده غير نشط',
-          );
-        final current = rows.first;
-        final total = (current['amount'] as num).toDouble();
-        final oldPaid = (current['paid_amount'] as num?)?.toDouble() ?? 0;
-        final newPaid = (requested['paid_amount'] as num?)?.toDouble();
-        if (newPaid == null ||
-            !_hasCentPrecision(newPaid) ||
-            !_hasCentPrecision(oldPaid) ||
-            newPaid <= oldPaid ||
-            newPaid > total + 0.001) {
-          throw StateError(
-            'تغير رصيد القسط أو أن المبلغ يتجاوز المستحق؛ أعد تحميل الأقساط',
+            'الفاتورة المحددة لا تخص هذا المستأجر أو عقدها غير نشط',
           );
         }
-        final status = newPaid >= total - 0.001 ? 'Paid' : 'Partially Paid';
-        if (requested['status'] != status)
-          throw ArgumentError('حالة القسط لا تطابق المبلغ المدفوع');
-        allocatedCents += ((newPaid - oldPaid) * 100).round();
-        verifiedUpdates.add({
-          'id': requested['id'],
-          'old_paid': oldPaid,
-          'paid_amount': newPaid,
-          'status': status,
-        });
+        final invoice = invoices.first;
+        final invoiceTotal = (invoice['total_amount'] as num).toDouble();
+        final invoiceNet = (invoice['net_amount'] as num).toDouble();
+        final invoiceTax = (invoice['tax_amount'] as num).toDouble();
+        if (!_hasCentPrecision(invoiceTotal) ||
+            !_hasCentPrecision(invoiceNet) ||
+            !_hasCentPrecision(invoiceTax)) {
+          throw StateError('بيانات الفاتورة غير متسقة؛ لا يمكن تحصيلها');
+        }
+        final invoiceTotalCents = InternalTax.toMinorUnits(invoiceTotal);
+        if (invoiceTotalCents !=
+            InternalTax.toMinorUnits(invoiceNet + invoiceTax)) {
+          throw StateError('بيانات الفاتورة غير متسقة؛ لا يمكن تحصيلها');
+        }
+        final paidRows = await txn.rawQuery(
+          '''
+          SELECT COALESCE(SUM(amount), 0) AS paid_amount
+          FROM voucher_invoice_allocations
+          WHERE invoice_id = ?
+          ''',
+          [invoiceId],
+        );
+        final invoicePaid = (paidRows.first['paid_amount'] as num).toDouble();
+        if (!_hasCentPrecision(invoicePaid)) {
+          throw StateError('تخصيصات الفاتورة السابقة غير دقيقة ماليًا');
+        }
+        final remainingInvoiceCents =
+            invoiceTotalCents - InternalTax.toMinorUnits(invoicePaid);
+        final receiptCents = (amount * 100).round();
+        if (remainingInvoiceCents <= 0 ||
+            receiptCents > remainingInvoiceCents) {
+          throw StateError('المبلغ يتجاوز المتبقي على الفاتورة؛ أعد تحميلها');
+        }
+
+        final installmentTotal = (invoice['installment_amount'] as num)
+            .toDouble();
+        final oldPaid =
+            (invoice['installment_paid_amount'] as num?)?.toDouble() ?? 0;
+        if (!_hasCentPrecision(installmentTotal) ||
+            !_hasCentPrecision(oldPaid) ||
+            oldPaid < 0 ||
+            oldPaid > installmentTotal ||
+            InternalTax.toMinorUnits(installmentTotal) !=
+                InternalTax.toMinorUnits(invoiceNet)) {
+          throw StateError('مبلغ القسط أو تحصيله غير متسق مع الفاتورة');
+        }
+        final installmentRemainingCents =
+            InternalTax.toMinorUnits(installmentTotal) -
+            InternalTax.toMinorUnits(oldPaid);
+        final principalCents = receiptCents < installmentRemainingCents
+            ? receiptCents
+            : installmentRemainingCents;
+        if (principalCents > 0) {
+          final newPaidCents =
+              InternalTax.toMinorUnits(oldPaid) + principalCents;
+          final newPaid = newPaidCents / 100;
+          final status =
+              newPaidCents >= InternalTax.toMinorUnits(installmentTotal)
+              ? 'Paid'
+              : 'Partially Paid';
+          verifiedUpdates.add({
+            'id': invoice['installment_id'],
+            'old_paid': oldPaid,
+            'paid_amount': newPaid,
+            'status': status,
+            'allocated_amount': principalCents / 100,
+          });
+        }
+        allocatedCents = receiptCents;
+      } else {
+        for (final requested in installmentsToUpdate) {
+          final rows = await txn.rawQuery(
+            '''
+            SELECT ci.* FROM contract_installments ci
+            JOIN contracts c ON c.id = ci.contract_id
+            WHERE ci.id = ? AND c.tenant_id = ? AND c.status = 'Active'
+            ''',
+            [requested['id'], tenantId],
+          );
+          if (rows.isEmpty)
+            throw StateError(
+              'القسط المحدد لا يتبع هذا المستأجر أو أن عقده غير نشط',
+            );
+          final current = rows.first;
+          final linkedInvoices = await txn.query(
+            'tax_invoices',
+            columns: ['id'],
+            where: 'installment_id = ?',
+            whereArgs: [requested['id']],
+            limit: 1,
+          );
+          if (linkedInvoices.isNotEmpty) {
+            throw StateError(
+              'القسط مرتبط بفاتورة؛ سجل القبض من وضع سداد الفاتورة',
+            );
+          }
+          final total = (current['amount'] as num).toDouble();
+          final oldPaid = (current['paid_amount'] as num?)?.toDouble() ?? 0;
+          final newPaid = (requested['paid_amount'] as num?)?.toDouble();
+          if (newPaid == null ||
+              !_hasCentPrecision(newPaid) ||
+              !_hasCentPrecision(oldPaid) ||
+              newPaid <= oldPaid ||
+              newPaid > total + 0.001) {
+            throw StateError(
+              'تغير رصيد القسط أو أن المبلغ يتجاوز المستحق؛ أعد تحميل الأقساط',
+            );
+          }
+          final status = newPaid >= total - 0.001 ? 'Paid' : 'Partially Paid';
+          if (requested['status'] != status)
+            throw ArgumentError('حالة القسط لا تطابق المبلغ المدفوع');
+          final allocatedAmount = newPaid - oldPaid;
+          allocatedCents += (allocatedAmount * 100).round();
+          verifiedUpdates.add({
+            'id': requested['id'],
+            'old_paid': oldPaid,
+            'paid_amount': newPaid,
+            'status': status,
+            'allocated_amount': allocatedAmount,
+          });
+        }
       }
       if (allocatedCents != (amount * 100).round()) {
-        throw ArgumentError('مجموع توزيع الدفعة لا يساوي مبلغ السند');
+        throw ArgumentError('مجموع تخصيص الدفعة لا يساوي مبلغ السند');
       }
 
       final journalId = await txn.insert('journal_entries', {
         'entry_date': voucherDate,
-        'description': 'سند قبض مستأجر',
+        'description': invoiceId == null
+            ? 'سند قبض مستأجر'
+            : 'سداد فاتورة داخلية رقم $invoiceId',
         'is_posted': 1,
       });
       await txn.insert('journal_lines', {
@@ -3227,14 +3503,18 @@ class DatabaseHelper {
         'account_id': cashAccountId,
         'debit': amount,
         'credit': 0.0,
-        'description': 'تحصيل دفعة مستأجر',
+        'description': invoiceId == null
+            ? 'تحصيل دفعة مستأجر'
+            : 'سداد فاتورة داخلية رقم $invoiceId',
       });
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
         'account_id': tenantAccountId,
         'debit': 0.0,
         'credit': amount,
-        'description': 'تحصيل دفعة مستأجر',
+        'description': invoiceId == null
+            ? 'تحصيل دفعة مستأجر'
+            : 'سداد فاتورة داخلية رقم $invoiceId',
       });
       await _updateBalanceTx(txn, cashAccountId, amount, 0.0);
       await _updateBalanceTx(txn, tenantAccountId, 0.0, amount);
@@ -3246,16 +3526,22 @@ class DatabaseHelper {
         'tenant_id': tenantId,
         'party_name': tenantRows.first['name'],
         'journal_entry_id': journalId,
-        'description': 'تحصيل دفعة إيجار',
+        'description': invoiceId == null
+            ? 'تحصيل دفعة إيجار'
+            : 'سداد فاتورة رقم $invoiceId',
       });
+      if (invoiceId != null) {
+        await txn.insert('voucher_invoice_allocations', {
+          'voucher_id': voucherId,
+          'invoice_id': invoiceId,
+          'amount': amount,
+        });
+      }
       for (final installment in verifiedUpdates) {
-        final allocatedAmount =
-            (installment['paid_amount'] as num).toDouble() -
-            (installment['old_paid'] as num).toDouble();
         await txn.insert('voucher_installment_allocations', {
           'voucher_id': voucherId,
           'installment_id': installment['id'],
-          'amount': allocatedAmount,
+          'amount': installment['allocated_amount'],
         });
       }
       for (final installment in verifiedUpdates) {
@@ -3445,16 +3731,39 @@ class DatabaseHelper {
       ''',
       [voucherId],
     );
+    final invoices = await db.rawQuery(
+      '''
+      SELECT
+        via.invoice_id,
+        via.amount AS allocated_amount,
+        ti.contract_id,
+        ti.installment_id,
+        ti.invoice_date,
+        ti.net_amount,
+        ti.tax_amount,
+        ti.total_amount,
+        ti.tax_rate,
+        ci.due_date
+      FROM voucher_invoice_allocations via
+      JOIN tax_invoices ti ON ti.id = via.invoice_id
+      LEFT JOIN contract_installments ci ON ci.id = ti.installment_id
+      WHERE via.voucher_id = ?
+      ORDER BY ti.invoice_date, ti.id
+      ''',
+      [voucherId],
+    );
     return {
       'voucher': headers.first,
       'journal_lines': lines,
       'installments': installments,
+      'invoices': invoices,
     };
   }
 
   Future<int> insertTaxInvoice({
     required int contractId,
     required int tenantId,
+    required int installmentId,
     required String invoiceDate,
     required double netAmount,
     required double taxAmount,
@@ -3478,6 +3787,58 @@ class DatabaseHelper {
       );
       if (contractRows.isEmpty) {
         throw StateError('العقد المحدد لا يتبع المستأجر المختار');
+      }
+      final installmentRows = await txn.rawQuery(
+        '''
+        SELECT ci.*
+        FROM contract_installments ci
+        JOIN contracts c ON c.id = ci.contract_id
+        WHERE ci.id = ? AND c.id = ? AND c.tenant_id = ? AND c.status = 'Active'
+        LIMIT 1
+        ''',
+        [installmentId, contractId, tenantId],
+      );
+      if (installmentRows.isEmpty) {
+        throw StateError('القسط المحدد لا يتبع العقد أو المستأجر المختار');
+      }
+      final installment = installmentRows.first;
+      final scheduledNet = (installment['amount'] as num).toDouble();
+      final paidBeforeInvoice =
+          (installment['paid_amount'] as num?)?.toDouble() ?? 0.0;
+      if (!_hasCentPrecision(scheduledNet) ||
+          !_hasCentPrecision(paidBeforeInvoice) ||
+          paidBeforeInvoice < 0 ||
+          paidBeforeInvoice > scheduledNet ||
+          InternalTax.toMinorUnits(netAmount) !=
+              InternalTax.toMinorUnits(scheduledNet)) {
+        throw StateError('صافي الفاتورة يجب أن يطابق مبلغ القسط المسجل');
+      }
+      final priorAllocations = await txn.rawQuery(
+        '''
+        SELECT via.voucher_id, via.amount, v.tenant_id, v.voucher_type
+        FROM voucher_installment_allocations via
+        JOIN vouchers v ON v.id = via.voucher_id
+        WHERE via.installment_id = ?
+        ORDER BY via.id
+        ''',
+        [installmentId],
+      );
+      var priorAllocatedCents = 0;
+      for (final allocation in priorAllocations) {
+        final amount = (allocation['amount'] as num).toDouble();
+        if (!_hasCentPrecision(amount) ||
+            (allocation['tenant_id'] as num?)?.toInt() != tenantId ||
+            allocation['voucher_type'] != 'قبض مستأجر') {
+          throw StateError(
+            'توجد تخصيصات قبض غير متسقة للقسط؛ راجعها يدويًا قبل إصدار الفاتورة',
+          );
+        }
+        priorAllocatedCents += InternalTax.toMinorUnits(amount);
+      }
+      if (priorAllocatedCents != InternalTax.toMinorUnits(paidBeforeInvoice)) {
+        throw StateError(
+          'لا يمكن مطابقة المدفوع السابق مع سندات قبض القسط؛ راجع السجل يدويًا قبل إصدار الفاتورة',
+        );
       }
       final companyRows = await txn.query(
         'company_info',
@@ -3507,20 +3868,12 @@ class DatabaseHelper {
       }
       final duplicates = await txn.query(
         'tax_invoices',
-        where:
-            'contract_id = ? AND invoice_date = ? AND total_amount = ? AND tax_amount = ?',
-        whereArgs: [
-          contractId,
-          invoiceDate,
-          netAmount + calculatedTaxAmount,
-          calculatedTaxAmount,
-        ],
+        where: 'installment_id = ?',
+        whereArgs: [installmentId],
         limit: 1,
       );
       if (duplicates.isNotEmpty) {
-        throw StateError(
-          'هذه الفاتورة صادرة مسبقاً لهذا العقد والتاريخ والمبلغ',
-        );
+        throw StateError('صدرت فاتورة لهذا القسط مسبقًا');
       }
       final tenantRows = await txn.query(
         'tenants',
@@ -3578,14 +3931,24 @@ class DatabaseHelper {
         await _updateBalanceTx(txn, taxAccountId!, 0.0, calculatedTaxAmount);
       }
 
-      return txn.insert('tax_invoices', {
+      final invoiceId = await txn.insert('tax_invoices', {
         'contract_id': contractId,
+        'installment_id': installmentId,
+        'journal_entry_id': journalId,
         'invoice_date': invoiceDate,
         'net_amount': netAmount,
         'total_amount': grossAmount,
         'tax_amount': calculatedTaxAmount,
         'tax_rate': configuredTaxRate,
       });
+      for (final allocation in priorAllocations) {
+        await txn.insert('voucher_invoice_allocations', {
+          'voucher_id': allocation['voucher_id'],
+          'invoice_id': invoiceId,
+          'amount': allocation['amount'],
+        });
+      }
+      return invoiceId;
     });
   }
 
@@ -3674,9 +4037,20 @@ class DatabaseHelper {
         (SELECT COUNT(*) FROM units WHERE status = 'شاغرة') AS vacant_units_count,
         (SELECT COUNT(*) FROM tenants) AS tenants_count,
         (SELECT COUNT(*) FROM contracts WHERE status = 'Active') AS active_contracts_count,
-        (SELECT COALESCE(SUM(MAX(ci.amount - ci.paid_amount, 0)), 0)
-          FROM contract_installments ci JOIN contracts c ON c.id = ci.contract_id
-          WHERE c.status = 'Active' AND ci.status != 'Paid') AS outstanding_amount
+        (SELECT COALESCE(SUM(
+          CASE WHEN ti.id IS NOT NULL
+            THEN MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0)
+            ELSE MAX(ci.amount - ci.paid_amount, 0)
+          END
+        ), 0)
+          FROM contract_installments ci
+          JOIN contracts c ON c.id = ci.contract_id
+          LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
+          LEFT JOIN (
+            SELECT invoice_id, SUM(amount) AS paid_amount
+            FROM voucher_invoice_allocations GROUP BY invoice_id
+          ) vip ON vip.invoice_id = ti.id
+          WHERE c.status = 'Active') AS outstanding_amount
     ''');
     return rows.first;
   }
@@ -3766,8 +4140,23 @@ class DatabaseHelper {
         p.name as property_name,
         u.unit_number as unit_number,
         c.status as contract_status,
-        (SELECT SUM(amount) FROM contract_installments WHERE contract_id = c.id) as total_amount,
-        (SELECT SUM(paid_amount) FROM contract_installments WHERE contract_id = c.id) as paid_amount
+        (SELECT COALESCE(SUM(
+          CASE WHEN ti.id IS NULL THEN ci.amount ELSE ti.total_amount END
+        ), 0)
+          FROM contract_installments ci
+          LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
+          WHERE ci.contract_id = c.id) as total_amount,
+        (SELECT COALESCE(SUM(
+          CASE WHEN ti.id IS NULL THEN ci.paid_amount
+            ELSE COALESCE((
+              SELECT SUM(via.amount) FROM voucher_invoice_allocations via
+              WHERE via.invoice_id = ti.id
+            ), 0)
+          END
+        ), 0)
+          FROM contract_installments ci
+          LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
+          WHERE ci.contract_id = c.id) as paid_amount
       FROM tenants t
       LEFT JOIN contracts c ON t.id = c.tenant_id
       LEFT JOIN units u ON c.unit_id = u.id
@@ -3789,17 +4178,32 @@ class DatabaseHelper {
       SELECT
         ci.id as installment_id,
         ci.due_date,
-        ci.amount,
-        ci.paid_amount,
-        (ci.amount - ci.paid_amount) AS remaining_amount,
+        ci.amount AS installment_amount,
+        COALESCE(ti.total_amount, ci.amount) AS amount,
+        CASE WHEN ti.id IS NULL THEN ci.paid_amount
+          ELSE COALESCE(vip.paid_amount, 0)
+        END AS paid_amount,
+        CASE WHEN ti.id IS NULL
+          THEN ROUND(MAX(ci.amount - ci.paid_amount, 0), 2)
+          ELSE ROUND(MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0), 2)
+        END AS remaining_amount,
+        ti.id AS invoice_id,
         ci.status,
         t.name as tenant_name,
         t.id as tenant_id
       FROM contract_installments ci
       JOIN contracts c ON ci.contract_id = c.id
       JOIN tenants t ON c.tenant_id = t.id
-      WHERE ci.status != 'Paid'
-        AND c.status = 'Active'
+      LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
+      LEFT JOIN (
+        SELECT invoice_id, SUM(amount) AS paid_amount
+        FROM voucher_invoice_allocations GROUP BY invoice_id
+      ) vip ON vip.invoice_id = ti.id
+      WHERE c.status = 'Active'
+        AND (CASE WHEN ti.id IS NULL
+          THEN MAX(ci.amount - ci.paid_amount, 0)
+          ELSE MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0)
+        END) > 0
         AND ci.due_date <= ?
       ORDER BY ci.due_date ASC
     ''',

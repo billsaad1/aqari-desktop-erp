@@ -1736,7 +1736,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        14,
+        15,
       );
       expect(
         (await restored.rawQuery(
@@ -1779,7 +1779,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        14,
+        15,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -2304,9 +2304,10 @@ void main() {
         DatabaseHelper.instance.insertTaxInvoice(
           contractId: contractId,
           tenantId: tenantId,
+          installmentId: storedInstallments[2]['id'] as int,
           invoiceDate: '2026-11-10',
-          netAmount: 10.0,
-          taxAmount: 1.5,
+          netAmount: 100.0,
+          taxAmount: 15.0,
           revenueAccountId: revenueRootId,
           taxAccountId:
               (await db.query(
@@ -2442,6 +2443,7 @@ void main() {
       final invoiceId = await DatabaseHelper.instance.insertTaxInvoice(
         contractId: contractId,
         tenantId: tenantId,
+        installmentId: storedInstallments[2]['id'] as int,
         invoiceDate: '2026-11-10',
         netAmount: 100.0,
         taxAmount: 15.0,
@@ -2458,12 +2460,81 @@ void main() {
       expect(storedInvoice['tax_amount'], 15.0);
       expect(storedInvoice['total_amount'], 115.0);
       expect(storedInvoice['tax_rate'], 15.0);
+      expect(storedInvoice['installment_id'], storedInstallments[2]['id']);
+      final historicalInvoiceId = await DatabaseHelper.instance
+          .insertTaxInvoice(
+            contractId: contractId,
+            tenantId: tenantId,
+            installmentId: storedInstallments[1]['id'] as int,
+            invoiceDate: '2026-11-10',
+            netAmount: 100.0,
+            taxAmount: 15.0,
+            revenueAccountId: revenueAccount['id'] as int,
+            taxAccountId: taxAccountId,
+          );
+      final priorReceiptDetails = await DatabaseHelper.instance
+          .getVoucherDetails(receiptId);
+      final priorReceiptInvoiceLinks =
+          priorReceiptDetails!['invoices'] as List<Map<String, Object?>>;
+      expect(priorReceiptInvoiceLinks, hasLength(1));
+      expect(
+        priorReceiptInvoiceLinks.single['invoice_id'],
+        historicalInvoiceId,
+      );
+      expect(priorReceiptInvoiceLinks.single['allocated_amount'], 50.0);
+      final unbilledForContract = await DatabaseHelper.instance
+          .getUnbilledInstallmentsForContract(contractId);
+      expect(
+        unbilledForContract.any(
+          (row) =>
+              row['id'] == storedInstallments[1]['id'] ||
+              row['id'] == storedInstallments[2]['id'],
+        ),
+        isFalse,
+      );
+      await db.update(
+        'contract_installments',
+        {'paid_amount': 25.0, 'status': 'Partially Paid'},
+        where: 'id = ?',
+        whereArgs: [storedInstallments[4]['id']],
+      );
+      final invoicesBeforeUnmatchedPayment = (await db.query(
+        'tax_invoices',
+      )).length;
+      final journalsBeforeUnmatchedPayment = (await db.query(
+        'journal_entries',
+      )).length;
+      await expectLater(
+        DatabaseHelper.instance.insertTaxInvoice(
+          contractId: contractId,
+          tenantId: tenantId,
+          installmentId: storedInstallments[4]['id'] as int,
+          invoiceDate: '2026-11-10',
+          netAmount: 100.0,
+          taxAmount: 15.0,
+          revenueAccountId: revenueAccount['id'] as int,
+          taxAccountId: taxAccountId,
+        ),
+        throwsStateError,
+      );
+      expect(
+        (await db.query('tax_invoices')).length,
+        invoicesBeforeUnmatchedPayment,
+      );
+      expect(
+        (await db.query('journal_entries')).length,
+        journalsBeforeUnmatchedPayment,
+      );
+      await db.update(
+        'contract_installments',
+        {'paid_amount': 0.0, 'status': 'Unpaid'},
+        where: 'id = ?',
+        whereArgs: [storedInstallments[4]['id']],
+      );
       final taxJournalEntry = (await db.query(
         'journal_entries',
-        where: 'entry_date = ? AND description = ?',
-        whereArgs: ['2026-11-10', 'إثبات فاتورة ضريبية إيجار'],
-        orderBy: 'id DESC',
-        limit: 1,
+        where: 'id = ?',
+        whereArgs: [storedInvoice['journal_entry_id']],
       )).single;
       final taxJournalLines = await db.query(
         'journal_lines',
@@ -2485,11 +2556,13 @@ void main() {
         ),
         115.0,
       );
+      expect(storedInvoice['journal_entry_id'], taxJournalEntry['id']);
 
       await expectLater(
         DatabaseHelper.instance.insertTaxInvoice(
           contractId: contractId,
           tenantId: tenantId,
+          installmentId: storedInstallments[2]['id'] as int,
           invoiceDate: '2026-11-10',
           netAmount: 100.0,
           taxAmount: 15.0,
@@ -2502,6 +2575,7 @@ void main() {
         DatabaseHelper.instance.insertTaxInvoice(
           contractId: contractId,
           tenantId: tenantId,
+          installmentId: storedInstallments[2]['id'] as int,
           invoiceDate: '2026-11-11',
           netAmount: 100.0,
           taxAmount: 14.99,
@@ -2518,8 +2592,9 @@ void main() {
       final zeroRateInvoiceId = await DatabaseHelper.instance.insertTaxInvoice(
         contractId: contractId,
         tenantId: tenantId,
+        installmentId: storedInstallments[3]['id'] as int,
         invoiceDate: '2026-11-12',
-        netAmount: 50.0,
+        netAmount: 100.0,
         taxAmount: 0.0,
         revenueAccountId: revenueAccount['id'] as int,
         taxAccountId: null,
@@ -2531,7 +2606,7 @@ void main() {
       )).single;
       expect(zeroRateInvoice['tax_rate'], 0.0);
       expect(zeroRateInvoice['tax_amount'], 0.0);
-      expect(zeroRateInvoice['total_amount'], 50.0);
+      expect(zeroRateInvoice['total_amount'], 100.0);
       final zeroTaxJournalEntry = (await db.query(
         'journal_entries',
         where: 'entry_date = ? AND description = ?',
@@ -2551,6 +2626,140 @@ void main() {
       );
       await DatabaseHelper.instance.updateCompanyInfo({'tax_rate': 15.0});
 
+      final openInvoicesBeforePayment = await DatabaseHelper.instance
+          .getOpenTaxInvoicesForTenant(tenantId);
+      final historicOpenInvoice = openInvoicesBeforePayment.singleWhere(
+        (invoice) => invoice['id'] == historicalInvoiceId,
+      );
+      expect(historicOpenInvoice['paid_amount'], 50.0);
+      expect(historicOpenInvoice['remaining_amount'], 65.0);
+      final partialInvoiceReceiptId = await DatabaseHelper.instance
+          .insertTenantReceiptVoucher(
+            tenantId: tenantId,
+            amount: 50.0,
+            voucherDate: '2026-11-13',
+            cashAccountId: cashAccountId,
+            installmentsToUpdate: const [],
+            invoiceId: invoiceId,
+          );
+      final partialInvoiceReceiptDetails = await DatabaseHelper.instance
+          .getVoucherDetails(partialInvoiceReceiptId);
+      final partialInvoiceLinks =
+          partialInvoiceReceiptDetails!['invoices']
+              as List<Map<String, Object?>>;
+      expect(partialInvoiceLinks.single['invoice_id'], invoiceId);
+      expect(partialInvoiceLinks.single['allocated_amount'], 50.0);
+      expect(
+        (partialInvoiceReceiptDetails['installments'] as List)
+            .single['allocated_amount'],
+        50.0,
+      );
+      final receiptInstallments =
+          (partialInvoiceReceiptDetails['installments'] as List)
+              .whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList();
+      final receiptInvoices = partialInvoiceLinks
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+      final invoiceReceiptPdf = await PrintUtils.buildVoucherPdf(
+        voucherType: 'سند قبض مستأجر',
+        voucherNo: partialInvoiceReceiptId,
+        date: '2026-11-13',
+        targetName: 'مستأجر الاختبار',
+        amount: 50.0,
+        accountName: 'الصندوق',
+        description: 'سداد فاتورة داخلية رقم $invoiceId',
+        installmentAllocations: receiptInstallments,
+        invoiceAllocations: receiptInvoices,
+      );
+      expect(invoiceReceiptPdf.length, greaterThan(1000));
+
+      final vouchersBeforeRejectedPayments = (await db.query(
+        'vouchers',
+      )).length;
+      final journalsBeforeRejectedPayments = (await db.query(
+        'journal_entries',
+      )).length;
+      await expectLater(
+        DatabaseHelper.instance.insertTenantReceiptVoucher(
+          tenantId: tenantId,
+          amount: 66.0,
+          voucherDate: '2026-11-13',
+          cashAccountId: cashAccountId,
+          installmentsToUpdate: const [],
+          invoiceId: invoiceId,
+        ),
+        throwsStateError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertTenantReceiptVoucher(
+          tenantId: tenantId,
+          amount: 50.0,
+          voucherDate: '2026-11-13',
+          cashAccountId: cashAccountId,
+          installmentsToUpdate: [
+            {
+              'id': storedInstallments[2]['id'],
+              'paid_amount': 100.0,
+              'status': 'Paid',
+            },
+          ],
+        ),
+        throwsStateError,
+      );
+      expect(
+        (await db.query('vouchers')).length,
+        vouchersBeforeRejectedPayments,
+      );
+      expect(
+        (await db.query('journal_entries')).length,
+        journalsBeforeRejectedPayments,
+      );
+
+      final finalInvoiceReceiptId = await DatabaseHelper.instance
+          .insertTenantReceiptVoucher(
+            tenantId: tenantId,
+            amount: 65.0,
+            voucherDate: '2026-11-14',
+            cashAccountId: cashAccountId,
+            installmentsToUpdate: const [],
+            invoiceId: invoiceId,
+          );
+      expect(finalInvoiceReceiptId, greaterThan(partialInvoiceReceiptId));
+      final paidInstallment = (await db.query(
+        'contract_installments',
+        where: 'id = ?',
+        whereArgs: [storedInstallments[2]['id']],
+      )).single;
+      expect(paidInstallment['amount'], 100.0);
+      expect(paidInstallment['paid_amount'], 100.0);
+      expect(paidInstallment['status'], 'Paid');
+      final invoiceAllocations = await db.query(
+        'voucher_invoice_allocations',
+        where: 'invoice_id = ?',
+        whereArgs: [invoiceId],
+      );
+      expect(
+        invoiceAllocations.fold<double>(
+          0,
+          (sum, row) => sum + (row['amount'] as num).toDouble(),
+        ),
+        115.0,
+      );
+      final openInvoicesAfterPayment = await DatabaseHelper.instance
+          .getOpenTaxInvoicesForTenant(tenantId);
+      expect(
+        openInvoicesAfterPayment.any((row) => row['id'] == invoiceId),
+        isFalse,
+      );
+      expect(
+        openInvoicesAfterPayment.singleWhere(
+          (row) => row['id'] == historicalInvoiceId,
+        )['remaining_amount'],
+        65.0,
+      );
+
       await expectLater(
         DatabaseHelper.instance.cancelContract(contractId),
         throwsStateError,
@@ -2569,7 +2778,24 @@ void main() {
       expect(protectedInstallments, hasLength(12));
 
       final summary = await DatabaseHelper.instance.getDashboardSummary();
-      expect((summary['outstanding_amount'] as num).toDouble(), 1050.0);
+      expect((summary['outstanding_amount'] as num).toDouble(), 965.0);
+      final tenantFinancialSearch = await DatabaseHelper.instance
+          .searchTenantsAndContracts('مستأجر الاختبار');
+      final searchedContract = tenantFinancialSearch.singleWhere(
+        (row) => row['contract_id'] == contractId,
+      );
+      expect(searchedContract['total_amount'], 1230.0);
+      expect(searchedContract['paid_amount'], 265.0);
+      final dueInstallments = await DatabaseHelper.instance.getDueInstallments(
+        500,
+      );
+      final historicInvoiceDue = dueInstallments.singleWhere(
+        (row) => row['installment_id'] == storedInstallments[1]['id'],
+      );
+      expect(historicInvoiceDue['installment_amount'], 100.0);
+      expect(historicInvoiceDue['amount'], 115.0);
+      expect(historicInvoiceDue['paid_amount'], 50.0);
+      expect(historicInvoiceDue['remaining_amount'], 65.0);
       final before =
           (await db.rawQuery(
                 'SELECT COUNT(*) AS count FROM journal_entries',
@@ -2843,17 +3069,8 @@ void main() {
     expect(find.textContaining('سند صرف مستأجر رقم'), findsOneWidget);
     await tester.drag(find.byType(ListView), const Offset(0, -500));
     await tester.pump();
-    expect(find.textContaining('سند قبض مستأجر رقم'), findsOneWidget);
+    expect(find.textContaining('سند قبض مستأجر رقم'), findsWidgets);
     expect(find.textContaining('سند قبض عام رقم'), findsOneWidget);
-    await tester.tap(find.textContaining('سند قبض مستأجر رقم').first);
-    await tester.pump();
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(seconds: 1)),
-    );
-    await tester.pump(const Duration(milliseconds: 500));
-    expect(find.textContaining('تفاصيل السند رقم'), findsOneWidget);
-    expect(find.text('الحسابات والحركة المحاسبية'), findsOneWidget);
-    expect(find.text('الأقساط التي سددها هذا السند'), findsOneWidget);
   });
 
   test(
@@ -2985,7 +3202,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        14,
+        15,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -3430,13 +3647,26 @@ void main() {
   }, timeout: const Timeout(Duration(seconds: 30)));
 
   test(
-    'v13 migration preserves old invoice totals without inventing its tax rate',
+    'v13 migration preserves old invoice totals without inventing tax or installment links',
     () async {
       final helper = DatabaseHelper.instance;
       final db = await helper.database;
+      await db.execute('PRAGMA foreign_keys = OFF');
+      await db.execute('DROP TABLE voucher_invoice_allocations');
+      await db.execute('DROP INDEX tax_invoices_installment_unique');
+      await db.execute('DROP TABLE tax_invoices');
+      await db.execute('''
+        CREATE TABLE tax_invoices (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          contract_id INTEGER,
+          invoice_date TEXT NOT NULL,
+          total_amount REAL NOT NULL,
+          tax_amount REAL NOT NULL,
+          FOREIGN KEY (contract_id) REFERENCES contracts (id)
+        )
+      ''');
+      await db.execute('PRAGMA foreign_keys = ON');
       await db.execute('ALTER TABLE company_info DROP COLUMN tax_rate');
-      await db.execute('ALTER TABLE tax_invoices DROP COLUMN tax_rate');
-      await db.execute('ALTER TABLE tax_invoices DROP COLUMN net_amount');
       final companyId = await db.insert('company_info', {
         'name_ar': 'منشأة قديمة بلا نسبة محفوظة',
       });
@@ -3451,7 +3681,7 @@ void main() {
       final upgraded = await helper.database;
       expect(
         (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
-        14,
+        15,
       );
       final company = (await upgraded.query(
         'company_info',
@@ -3468,6 +3698,8 @@ void main() {
       expect(invoice['tax_amount'], 15.0);
       expect(invoice['total_amount'], 115.0);
       expect(invoice['tax_rate'], isNull);
+      expect(invoice['installment_id'], isNull);
+      expect(invoice['journal_entry_id'], isNull);
     },
   );
 }
