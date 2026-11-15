@@ -8,6 +8,7 @@ import 'package:pdf/widgets.dart' as pw;
 import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
+import '../../core/internal_tax.dart';
 import '../../core/permission_policy.dart';
 
 class TaxInvoiceScreen extends StatefulWidget {
@@ -25,6 +26,9 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   int? _revenueAccountId;
   int? _taxAccountId;
   bool _isProcessing = false;
+  bool _taxSettingsLoading = true;
+  double _taxRate = 0;
+  String? _taxSettingsError;
 
   final _dateController = TextEditingController(
     text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
@@ -33,9 +37,43 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   final _taxAmountController = TextEditingController();
   final _grossAmountController = TextEditingController();
 
+  @override
+  void initState() {
+    super.initState();
+    _loadTaxSettings();
+  }
+
+  Future<void> _loadTaxSettings() async {
+    try {
+      final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+      final rate = (companyInfo?['tax_rate'] as num?)?.toDouble() ?? 0;
+      if (!InternalTax.isValidRate(rate)) {
+        throw StateError('نسبة الضريبة المحفوظة خارج النطاق المسموح');
+      }
+      if (!mounted) return;
+      setState(() {
+        _taxRate = rate;
+        _taxSettingsError = null;
+        _taxSettingsLoading = false;
+      });
+      _calculateGross();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _taxSettingsError =
+            'تعذر تحميل نسبة الضريبة من إعدادات المنشأة: $error';
+        _taxSettingsLoading = false;
+      });
+    }
+  }
+
   void _calculateGross() {
-    double net = double.tryParse(_netAmountController.text) ?? 0.0;
-    double tax = double.tryParse(_taxAmountController.text) ?? 0.0;
+    final parsedNet = double.tryParse(_netAmountController.text);
+    final net = parsedNet != null && parsedNet.isFinite && parsedNet >= 0
+        ? parsedNet
+        : 0.0;
+    final tax = InternalTax.calculate(net, _taxRate);
+    _taxAmountController.text = tax.toStringAsFixed(2);
     _grossAmountController.text = (net + tax).toStringAsFixed(2);
   }
 
@@ -50,11 +88,17 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
 
   Future<void> _processInvoice({required bool saveAsPdf}) async {
     if (_isProcessing) return;
+    if (_taxSettingsLoading || _taxSettingsError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تحقق من إعداد نسبة الضريبة أولاً')),
+      );
+      return;
+    }
     if (!_formKey.currentState!.validate() ||
         _selectedContractId == null ||
         _selectedTenantId == null ||
         _revenueAccountId == null ||
-        _taxAccountId == null) {
+        (_taxRate > 0 && _taxAccountId == null)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('الرجاء تعبئة جميع الحقول المطلوبة')),
       );
@@ -62,7 +106,9 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     }
     final net = double.tryParse(_netAmountController.text) ?? 0.0;
     final tax = double.tryParse(_taxAmountController.text) ?? 0.0;
-    if (net <= 0 ||
+    if (!net.isFinite ||
+        net <= 0 ||
+        !tax.isFinite ||
         tax < 0 ||
         DateTime.tryParse(_dateController.text) == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -74,7 +120,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     final contractId = _selectedContractId!;
     final tenantId = _selectedTenantId!;
     final revenueAccountId = _revenueAccountId!;
-    final taxAccountId = _taxAccountId!;
+    final int? taxAccountId = _taxRate > 0 ? _taxAccountId : null;
     final invoiceDate = _dateController.text;
     final leasingProvider = Provider.of<LeasingProvider>(
       context,
@@ -95,12 +141,15 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
         contractId: contractId,
         tenantId: tenantId,
         invoiceDate: invoiceDate,
-        totalAmount: net,
+        netAmount: net,
         taxAmount: tax,
         revenueAccountId: revenueAccountId,
         taxAccountId: taxAccountId,
       );
     } catch (e) {
+      if (e.toString().contains('نسبة المنشأة الحالية')) {
+        await _loadTaxSettings();
+      }
       if (mounted)
         ScaffoldMessenger.of(
           context,
@@ -121,6 +170,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
         net: net,
         tax: tax,
         gross: net + tax,
+        taxRate: _taxRate,
         date: invoiceDate,
         saveAsPdf: saveAsPdf,
       );
@@ -157,6 +207,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     required double net,
     required double tax,
     required double gross,
+    required double taxRate,
     required String date,
     required bool saveAsPdf,
   }) async {
@@ -239,7 +290,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                 PrintUtils.formatPdfAmount(net),
               ],
               [
-                'ضريبة القيمة المضافة',
+                'الضريبة (${taxRate.toStringAsFixed(2)}%)',
                 currency,
                 PrintUtils.formatPdfAmount(tax),
               ],
@@ -416,7 +467,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   Widget build(BuildContext context) {
     return Consumer2<LeasingProvider, AccountingProvider>(
       builder: (context, leasingProv, accProv, child) {
-        if (leasingProv.isLoading || accProv.isLoading)
+        if (leasingProv.isLoading || accProv.isLoading || _taxSettingsLoading)
           return const Center(child: CircularProgressIndicator());
 
         return Padding(
@@ -436,6 +487,19 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
+                    if (_taxSettingsError != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        _taxSettingsError!,
+                        style: const TextStyle(color: Colors.red),
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'نسبة الضريبة الداخلية المعتمدة: ${_taxRate.toStringAsFixed(2)}%',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ],
                     const SizedBox(height: 32),
                     Row(
                       children: [
@@ -533,10 +597,13 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                                   ),
                                 )
                                 .toList(),
-                            onChanged: (val) =>
-                                setState(() => _taxAccountId = val),
-                            decoration: const InputDecoration(
-                              labelText: 'حساب ضريبة القيمة المضافة (Credit)',
+                            onChanged: _taxRate > 0
+                                ? (val) => setState(() => _taxAccountId = val)
+                                : null,
+                            decoration: InputDecoration(
+                              labelText: _taxRate > 0
+                                  ? 'حساب الضريبة (Credit)'
+                                  : 'حساب الضريبة (غير مطلوب عند 0%)',
                               border: OutlineInputBorder(),
                             ),
                           ),
@@ -584,7 +651,9 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                             onChanged: (val) => _calculateGross(),
                             validator: (v) {
                               final value = double.tryParse(v ?? '');
-                              return value == null || value <= 0
+                              return value == null ||
+                                      !value.isFinite ||
+                                      value <= 0
                                   ? 'أدخل مبلغاً موجباً'
                                   : null;
                             },
@@ -594,18 +663,12 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                         Expanded(
                           child: TextFormField(
                             controller: _taxAmountController,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                              labelText: 'مبلغ الضريبة',
+                            readOnly: true,
+                            decoration: InputDecoration(
+                              labelText:
+                                  'الضريبة (${_taxRate.toStringAsFixed(2)}%)',
                               border: OutlineInputBorder(),
                             ),
-                            onChanged: (val) => _calculateGross(),
-                            validator: (v) {
-                              final value = double.tryParse(v ?? '');
-                              return value == null || value < 0
-                                  ? 'أدخل ضريبة صحيحة'
-                                  : null;
-                            },
                           ),
                         ),
                         const SizedBox(width: 16),
@@ -628,6 +691,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                           child: ElevatedButton.icon(
                             onPressed:
                                 _isProcessing ||
+                                    _taxSettingsError != null ||
                                     !PermissionRuntime.allows(
                                       'tenant_financial',
                                       AppPermissionAction.post,
@@ -657,6 +721,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                             child: OutlinedButton.icon(
                               onPressed:
                                   _isProcessing ||
+                                      _taxSettingsError != null ||
                                       !PermissionRuntime.allows(
                                         'tenant_financial',
                                         AppPermissionAction.post,
