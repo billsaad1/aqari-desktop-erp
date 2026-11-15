@@ -164,7 +164,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
         if (leasingProv.isLoading || accProv.isLoading)
           return const Center(child: CircularProgressIndicator());
 
-        final cashAccounts = accProv.accounts
+        final cashAccounts = accProv.detailAccounts
             .where(
               (a) =>
                   a['account_type'] == 'Asset' &&
@@ -172,7 +172,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
                   a['parent_id'] != null,
             )
             .toList();
-        final offsetAccounts = accProv.accounts
+        final offsetAccounts = accProv.detailAccounts
             .where(
               (a) =>
                   [

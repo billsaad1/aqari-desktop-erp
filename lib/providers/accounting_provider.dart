@@ -9,6 +9,20 @@ class AccountingProvider with ChangeNotifier {
   int _loadGeneration = 0;
 
   List<Map<String, dynamic>> get accounts => _accounts;
+  List<Map<String, dynamic>> get detailAccounts {
+    final parentIds = _accounts
+        .map((account) => account['parent_id'])
+        .whereType<int>()
+        .toSet();
+    return _accounts
+        .where(
+          (account) =>
+              account['parent_id'] != null &&
+              !parentIds.contains(account['id']),
+        )
+        .toList();
+  }
+
   List<Map<String, dynamic>> get costCenters => _costCenters;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
@@ -50,8 +64,19 @@ class AccountingProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> addAccount(Map<String, dynamic> account) async {
-    await DatabaseHelper.instance.insertAccount(account);
+  Future<int> addAccount(Map<String, dynamic> account) async {
+    final id = await DatabaseHelper.instance.insertAccount(account);
+    await loadAccounts();
+    return id;
+  }
+
+  Future<void> updateAccount(int accountId, String name) async {
+    await DatabaseHelper.instance.updateAccount(accountId, name);
+    await loadAccounts();
+  }
+
+  Future<void> deleteAccount(int accountId) async {
+    await DatabaseHelper.instance.deleteAccount(accountId);
     await loadAccounts();
   }
 

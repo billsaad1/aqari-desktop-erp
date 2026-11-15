@@ -25,6 +25,7 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
   List<JournalLine> lines = [];
   Uint8List? _lastPdf;
   String? _lastPdfName;
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -79,98 +80,106 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
     }
   }
 
-  void _saveEntry() async {
-    if (isValidEntry) {
-      // Validate all lines have accounts
-      if (lines.any((l) => l.accountId == null)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('الرجاء اختيار الحساب لجميع الأسطر')),
+  Future<void> _saveEntry() async {
+    if (_isSaving || !isValidEntry) return;
+    if (lines.any((line) => line.accountId == null)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('الرجاء اختيار الحساب لجميع الأسطر')),
+      );
+      return;
+    }
+
+    final savedDate = _dateController.text;
+    final savedDescription = _descController.text;
+    final savedLines = lines
+        .map(
+          (line) => <String, dynamic>{
+            'account_id': line.accountId,
+            'debit': line.debit ?? 0.0,
+            'credit': line.credit ?? 0.0,
+            'cost_center_id': line.costCenterId,
+            'description': line.description,
+          },
+        )
+        .toList();
+    final header = {
+      'entry_date': savedDate,
+      'description': savedDescription,
+      'is_posted': 1,
+    };
+    final linesData = savedLines;
+
+    setState(() {
+      _isSaving = true;
+      _lastPdf = null;
+      _lastPdfName = null;
+    });
+    try {
+      final journalId = await Provider.of<AccountingProvider>(
+        context,
+        listen: false,
+      ).saveJournalEntry(header, linesData);
+      if (!mounted) return;
+      final accounts = Provider.of<AccountingProvider>(
+        context,
+        listen: false,
+      ).accounts;
+      final pdfLines = savedLines.map((line) {
+        final account = accounts.firstWhere(
+          (item) => item['id'] == line['account_id'],
+          orElse: () => <String, dynamic>{},
         );
-        return;
-      }
-
-      final header = {
-        'entry_date': _dateController.text,
-        'description': _descController.text,
-        'is_posted': 1,
-      };
-
-      final linesData = lines
-          .map(
-            (l) => {
-              'account_id': l.accountId,
-              'debit': l.debit ?? 0.0,
-              'credit': l.credit ?? 0.0,
-              'cost_center_id': l.costCenterId,
-              'description': l.description,
-            },
-          )
-          .toList();
-
+        return {
+          'account_name': '${account['code'] ?? ''} ${account['name'] ?? ''}'
+              .trim(),
+          'description': line['description'] ?? savedDescription,
+          'debit': line['debit'],
+          'credit': line['credit'],
+        };
+      }).toList();
       try {
-        final journalId = await Provider.of<AccountingProvider>(
-          context,
-          listen: false,
-        ).saveJournalEntry(header, linesData);
+        final bytes = await PrintUtils.buildJournalEntryPdf(
+          journalNo: journalId,
+          date: savedDate,
+          description: savedDescription,
+          lines: pdfLines,
+        );
+        if (!mounted) return;
+        setState(() {
+          _lastPdf = bytes;
+          _lastPdfName = 'قيد_يومية_$journalId';
+        });
+      } catch (error) {
         if (mounted) {
-          final accounts = Provider.of<AccountingProvider>(
-            context,
-            listen: false,
-          ).accounts;
-          final pdfLines = lines.map((line) {
-            final account = accounts.firstWhere(
-              (a) => a['id'] == line.accountId,
-              orElse: () => <String, dynamic>{},
-            );
-            return {
-              'account_name':
-                  '${account['code'] ?? ''} ${account['name'] ?? ''}'.trim(),
-              'description': line.description ?? _descController.text,
-              'debit': line.debit ?? 0.0,
-              'credit': line.credit ?? 0.0,
-            };
-          }).toList();
-          try {
-            final bytes = await PrintUtils.buildJournalEntryPdf(
-              journalNo: journalId,
-              date: _dateController.text,
-              description: _descController.text,
-              lines: pdfLines,
-            );
-            if (!mounted) return;
-            setState(() {
-              _lastPdf = bytes;
-              _lastPdfName = 'قيد_يومية_$journalId';
-            });
-          } catch (e) {
-            if (mounted)
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                    'حُفظ القيد رقم $journalId، لكن تعذر تجهيز PDF: $e',
-                  ),
-                ),
-              );
-          }
-          if (mounted)
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('تم حفظ القيد رقم $journalId')),
-            );
-          for (final line in lines) {
-            line.debitController.dispose();
-            line.creditController.dispose();
-          }
-          setState(() {
-            _descController.clear();
-            lines = [JournalLine(), JournalLine()];
-          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'حُفظ القيد رقم $journalId، لكن تعذر تجهيز PDF: $error',
+              ),
+            ),
+          );
         }
-      } catch (e) {
-        if (mounted)
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('خطأ: $e')));
       }
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('تم حفظ القيد رقم $journalId')));
+      for (final line in lines) {
+        line.debitController.dispose();
+        line.creditController.dispose();
+      }
+      setState(() {
+        _descController.clear();
+        lines = [JournalLine(), JournalLine()];
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('خطأ: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
@@ -229,170 +238,183 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
           padding: const EdgeInsets.all(24.0),
           child: Form(
             key: _formKey,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  'قيد يومية يدوي',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 24),
-                // Header
-                Row(
-                  children: [
-                    Expanded(
-                      flex: 1,
-                      child: TextFormField(
-                        controller: _dateController,
-                        decoration: const InputDecoration(
-                          labelText: 'التاريخ',
-                          border: OutlineInputBorder(),
+            child: AbsorbPointer(
+              absorbing: _isSaving,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'قيد يومية يدوي',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 24),
+                  // Header
+                  Row(
+                    children: [
+                      Expanded(
+                        flex: 1,
+                        child: TextFormField(
+                          controller: _dateController,
+                          decoration: const InputDecoration(
+                            labelText: 'التاريخ',
+                            border: OutlineInputBorder(),
+                          ),
+                          readOnly: true,
+                          onTap: () async {
+                            final date = await showDatePicker(
+                              context: context,
+                              initialDate: DateTime.now(),
+                              firstDate: DateTime(2000),
+                              lastDate: DateTime(2100),
+                            );
+                            if (date != null) {
+                              setState(() {
+                                _dateController.text = DateFormat(
+                                  'yyyy-MM-dd',
+                                ).format(date);
+                              });
+                            }
+                          },
                         ),
-                        readOnly: true,
-                        onTap: () async {
-                          final date = await showDatePicker(
-                            context: context,
-                            initialDate: DateTime.now(),
-                            firstDate: DateTime(2000),
-                            lastDate: DateTime(2100),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        flex: 3,
+                        child: TextFormField(
+                          controller: _descController,
+                          decoration: const InputDecoration(
+                            labelText: 'البيان العام',
+                            border: OutlineInputBorder(),
+                          ),
+                          validator: (v) => v!.isEmpty ? 'مطلوب' : null,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  // Lines
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ListView.builder(
+                        itemCount: lines.length,
+                        itemBuilder: (context, index) {
+                          return _buildLineRow(
+                            index,
+                            provider.detailAccounts,
+                            provider.costCenters,
                           );
-                          if (date != null) {
-                            setState(() {
-                              _dateController.text = DateFormat(
-                                'yyyy-MM-dd',
-                              ).format(date);
-                            });
-                          }
                         },
                       ),
                     ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      flex: 3,
-                      child: TextFormField(
-                        controller: _descController,
-                        decoration: const InputDecoration(
-                          labelText: 'البيان العام',
-                          border: OutlineInputBorder(),
-                        ),
-                        validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                // Lines
-                Expanded(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade300),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: ListView.builder(
-                      itemCount: lines.length,
-                      itemBuilder: (context, index) {
-                        return _buildLineRow(
-                          index,
-                          provider.accounts,
-                          provider.costCenters,
-                        );
-                      },
-                    ),
                   ),
-                ),
-                const SizedBox(height: 16),
-                // Footer & Totals
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    TextButton.icon(
-                      onPressed:
-                          PermissionRuntime.allows(
-                            'accounting',
-                            AppPermissionAction.add,
-                          )
-                          ? _addLine
-                          : null,
-                      icon: const Icon(Icons.add),
-                      label: const Text('إضافة سطر'),
-                    ),
-                    Row(
-                      children: [
-                        _buildTotalBox(
-                          'إجمالي المدين',
-                          totalDebit,
-                          AppPalette.navy,
-                        ),
-                        const SizedBox(width: 16),
-                        _buildTotalBox(
-                          'إجمالي الدائن',
-                          totalCredit,
-                          Colors.green,
-                        ),
-                        const SizedBox(width: 16),
-                        _buildTotalBox(
-                          'الفرق',
-                          difference,
-                          difference == 0 ? Colors.grey : Colors.red,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed:
-                            isValidEntry &&
-                                PermissionRuntime.allows(
-                                  'accounting',
-                                  AppPermissionAction.post,
-                                )
-                            ? _saveEntry
-                            : null,
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.all(16),
-                          backgroundColor: isValidEntry
-                              ? AppPalette.navy
-                              : Colors.grey,
-                        ),
-                        child: const Text(
-                          'حفظ وترحيل القيد',
-                          style: TextStyle(fontSize: 18),
-                        ),
-                      ),
-                    ),
-                    if (_lastPdf != null) ...[
-                      const SizedBox(width: 12),
-                      OutlinedButton.icon(
+                  const SizedBox(height: 16),
+                  // Footer & Totals
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      TextButton.icon(
                         onPressed:
                             PermissionRuntime.allows(
                               'accounting',
-                              AppPermissionAction.print,
+                              AppPermissionAction.add,
                             )
-                            ? _printLastPdf
+                            ? _addLine
                             : null,
-                        icon: const Icon(Icons.print),
-                        label: const Text('طباعة آخر قيد'),
+                        icon: const Icon(Icons.add),
+                        label: const Text('إضافة سطر'),
                       ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed:
-                            PermissionRuntime.allows(
-                              'accounting',
-                              AppPermissionAction.print,
-                            )
-                            ? _saveLastPdf
-                            : null,
-                        icon: const Icon(Icons.picture_as_pdf),
-                        label: const Text('حفظ PDF'),
+                      Row(
+                        children: [
+                          _buildTotalBox(
+                            'إجمالي المدين',
+                            totalDebit,
+                            AppPalette.navy,
+                          ),
+                          const SizedBox(width: 16),
+                          _buildTotalBox(
+                            'إجمالي الدائن',
+                            totalCredit,
+                            Colors.green,
+                          ),
+                          const SizedBox(width: 16),
+                          _buildTotalBox(
+                            'الفرق',
+                            difference,
+                            difference == 0 ? Colors.grey : Colors.red,
+                          ),
+                        ],
                       ),
                     ],
-                  ],
-                ),
-              ],
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed:
+                              !_isSaving &&
+                                  isValidEntry &&
+                                  PermissionRuntime.allows(
+                                    'accounting',
+                                    AppPermissionAction.post,
+                                  )
+                              ? _saveEntry
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.all(16),
+                            backgroundColor: isValidEntry
+                                ? AppPalette.navy
+                                : Colors.grey,
+                          ),
+                          child: _isSaving
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Text(
+                                  'حفظ وترحيل القيد',
+                                  style: TextStyle(fontSize: 18),
+                                ),
+                        ),
+                      ),
+                      if (_lastPdf != null) ...[
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed:
+                              PermissionRuntime.allows(
+                                'accounting',
+                                AppPermissionAction.print,
+                              )
+                              ? _printLastPdf
+                              : null,
+                          icon: const Icon(Icons.print),
+                          label: const Text('طباعة آخر قيد'),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton.icon(
+                          onPressed:
+                              PermissionRuntime.allows(
+                                'accounting',
+                                AppPermissionAction.print,
+                              )
+                              ? _saveLastPdf
+                              : null,
+                          icon: const Icon(Icons.picture_as_pdf),
+                          label: const Text('حفظ PDF'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -438,7 +460,6 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
             child: DropdownButtonFormField<int>(
               value: line.accountId,
               items: accounts
-                  .where((a) => a['parent_id'] != null)
                   .map(
                     (a) => DropdownMenuItem<int>(
                       value: a['id'],

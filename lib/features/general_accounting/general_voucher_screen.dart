@@ -228,7 +228,7 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                         Expanded(
                           child: DropdownButtonFormField<int>(
                             value: _cashAccountId,
-                            items: provider.accounts
+                            items: provider.detailAccounts
                                 .where(
                                   (a) =>
                                       a['account_type'] == 'Asset' &&
@@ -256,23 +256,21 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                         Expanded(
                           child: DropdownButtonFormField<int>(
                             value: _oppositeAccountId,
-                            items: provider.accounts
+                            items: provider.detailAccounts
                                 .where(
-                                  (a) =>
-                                      a['parent_id'] != null &&
-                                      (isReceipt
-                                          ? [
-                                              'Asset',
-                                              'Liability',
-                                              'Equity',
-                                              'Revenue',
-                                            ].contains(a['account_type'])
-                                          : [
-                                              'Asset',
-                                              'Liability',
-                                              'Equity',
-                                              'Expense',
-                                            ].contains(a['account_type'])),
+                                  (a) => (isReceipt
+                                      ? [
+                                          'Asset',
+                                          'Liability',
+                                          'Equity',
+                                          'Revenue',
+                                        ].contains(a['account_type'])
+                                      : [
+                                          'Asset',
+                                          'Liability',
+                                          'Equity',
+                                          'Expense',
+                                        ].contains(a['account_type'])),
                                 )
                                 .map(
                                   (a) => DropdownMenuItem<int>(
