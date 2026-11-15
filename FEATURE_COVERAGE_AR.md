@@ -26,8 +26,8 @@
 
 ## فرع التطوير الحالي
 
-- الفرع الحالي `feature/phase5-chart-account-integrity` يستكمل دليل الحسابات وترحيل القيود والحسابات التفصيلية في السندات والفواتير. لا يوجد PR مفتوح لهذه الدفعة حتى الآن.
-- آخر تحقق محلي لهذه الدفعة: `flutter test --reporter=expanded` نجح (46 اختبارًا)، و`flutter analyze --no-fatal-infos` انتهى دون أخطاء أو تحذيرات (74 ملاحظة `info` غير مانعة)، و`git diff --check` ناجح. بناء Windows سيُفحص عبر CI بعد فتح PR.
+- [PR #15](https://github.com/billsaad1/aqari-desktop-erp/pull/15) لفرع `feature/phase5-chart-account-integrity` يستكمل دليل الحسابات وترحيل القيود والحسابات التفصيلية في السندات والفواتير؛ وهو مفتوح وفحوص AppVeyor/Windows قيد التشغيل.
+- آخر تحقق محلي لهذه الدفعة: `flutter test --reporter=expanded` نجح (46 اختبارًا)، و`flutter analyze --no-fatal-infos` انتهى دون أخطاء أو تحذيرات (74 ملاحظة `info` غير مانعة)، و`git diff --check` ناجح.
 
 ## ترتيب التنفيذ الجاري
 
