@@ -220,7 +220,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         if (leasingProv.isLoading || accProv.isLoading)
           return const Center(child: CircularProgressIndicator());
 
-        final cashAccounts = accProv.accounts
+        final cashAccounts = accProv.detailAccounts
             .where(
               (a) =>
                   a['account_type'] == 'Asset' &&

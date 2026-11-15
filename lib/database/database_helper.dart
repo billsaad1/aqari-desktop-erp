@@ -21,6 +21,31 @@ class DatabaseHelper {
     'unit_types',
     'cost_centers',
   };
+  static const Map<String, String> _accountTypeRootCodes = {
+    'Asset': '1',
+    'Liability': '2',
+    'Equity': '3',
+    'Revenue': '4',
+    'Expense': '5',
+  };
+  static const Set<String> _protectedSystemAccountCodes = {
+    '1',
+    '11',
+    '1101',
+    '1102',
+    '1201',
+    '2',
+    '2101',
+    '2102',
+    '2103',
+    '4',
+    '4101',
+    '4102',
+    '5',
+    '5101',
+    '5102',
+    '5103',
+  };
 
   DatabaseHelper._init();
 
@@ -1704,38 +1729,260 @@ class DatabaseHelper {
   Future<String> generateAccountCode(int parentId) async {
     PermissionRuntime.require('accounting', AppPermissionAction.add);
     final db = await instance.database;
-    final parentResult = await db.query(
+    return _nextAccountCodeTx(db, parentId);
+  }
+
+  Future<String> _nextAccountCodeTx(
+    DatabaseExecutor executor,
+    int parentId,
+  ) async {
+    final parentRows = await executor.query(
       'accounts',
+      columns: ['id', 'code', 'parent_id', 'account_type', 'balance'],
       where: 'id = ?',
       whereArgs: [parentId],
-    );
-    if (parentResult.isEmpty) throw Exception('Parent account not found');
-
-    final parentCode = parentResult.first['code'] as String;
-
-    final childrenResult = await db.query(
-      'accounts',
-      where: 'parent_id = ?',
-      whereArgs: [parentId],
-      orderBy: 'code DESC',
       limit: 1,
     );
-
-    if (childrenResult.isEmpty) {
-      return '${parentCode}0001';
-    } else {
-      final lastChildCode = childrenResult.first['code'] as String;
-      final sequenceStr = lastChildCode.substring(parentCode.length);
-      int sequence = int.tryParse(sequenceStr) ?? 0;
-      sequence++;
-      return '$parentCode${sequence.toString().padLeft(4, '0')}';
+    if (parentRows.isEmpty) throw StateError('الحساب الأعلى غير موجود');
+    final parent = parentRows.first;
+    final parentCode = parent['code']?.toString() ?? '';
+    final accountType = parent['account_type']?.toString();
+    if (parentCode.isEmpty || !_accountTypeRootCodes.containsKey(accountType)) {
+      throw StateError('نوع أو رمز الحساب الأعلى غير صالح');
     }
+
+    final children = await executor.query(
+      'accounts',
+      columns: ['code'],
+      where: 'parent_id = ?',
+      whereArgs: [parentId],
+    );
+    const linkedEntityColumns = {
+      'owners': 'account_id',
+      'tenants': 'account_id',
+      'banks': 'account_id',
+      'users': 'cash_box_account_id',
+    };
+    for (final reference in linkedEntityColumns.entries) {
+      final linkedRows = await executor.query(
+        reference.key,
+        columns: ['id'],
+        where: '${reference.value} = ?',
+        whereArgs: [parentId],
+        limit: 1,
+      );
+      if (linkedRows.isNotEmpty) {
+        throw StateError('لا يمكن إضافة حساب فرعي لحساب مرتبط بسجل تشغيلي');
+      }
+    }
+    if (children.isEmpty) {
+      final activity = await executor.query(
+        'journal_lines',
+        columns: ['id'],
+        where: 'account_id = ?',
+        whereArgs: [parentId],
+        limit: 1,
+      );
+      final balance = (parent['balance'] as num?)?.toDouble() ?? 0.0;
+      if (activity.isNotEmpty || !balance.isFinite || balance.abs() >= 0.005) {
+        throw StateError('لا يمكن تحويل حساب له رصيد أو حركة إلى حساب تجميعي');
+      }
+    }
+
+    final suffixLength = parent['parent_id'] == null ? 1 : 2;
+    final maximumSequence = suffixLength == 1 ? 9 : 99;
+    final allCodes = (await executor.query(
+      'accounts',
+      columns: ['code'],
+    )).map((account) => account['code']?.toString() ?? '').toList();
+    var sequence = 0;
+    for (final child in children) {
+      final childCode = child['code']?.toString() ?? '';
+      if (!childCode.startsWith(parentCode) ||
+          childCode.length <= parentCode.length) {
+        continue;
+      }
+      final suffix = childCode.substring(parentCode.length);
+      if (suffix.length > suffixLength) continue;
+      final parsed = int.tryParse(suffix);
+      if (parsed != null && parsed > sequence) sequence = parsed;
+    }
+
+    while (sequence < maximumSequence) {
+      sequence++;
+      final code =
+          '$parentCode${sequence.toString().padLeft(suffixLength, '0')}';
+      final isAmbiguousPrefix = allCodes.any(
+        (existingCode) =>
+            existingCode.length > code.length && existingCode.startsWith(code),
+      );
+      if (!allCodes.contains(code) && !isAmbiguousPrefix) return code;
+    }
+    throw StateError('اكتمل عدد الحسابات الفرعية المتاح لهذا الحساب');
   }
 
   Future<int> insertAccount(Map<String, dynamic> account) async {
     PermissionRuntime.require('accounting', AppPermissionAction.add);
+    final name = (account['name'] as String?)?.trim() ?? '';
+    final parentValue = account['parent_id'];
+    if (name.isEmpty) throw ArgumentError('اسم الحساب مطلوب');
+    if (parentValue != null && (parentValue is! int || parentValue <= 0)) {
+      throw ArgumentError('الحساب الأعلى غير صالح');
+    }
     final db = await instance.database;
-    return await db.insert('accounts', account);
+    return db.transaction((txn) async {
+      late final String code;
+      late final String accountType;
+      if (parentValue == null) {
+        accountType = account['account_type']?.toString() ?? '';
+        final rootCode = _accountTypeRootCodes[accountType];
+        if (rootCode == null)
+          throw ArgumentError('نوع الحساب الرئيسي غير صالح');
+        final existingType = await txn.query(
+          'accounts',
+          columns: ['id'],
+          where: 'parent_id IS NULL AND account_type = ?',
+          whereArgs: [accountType],
+          limit: 1,
+        );
+        if (existingType.isNotEmpty) {
+          throw StateError('يوجد حساب رئيسي لهذا النوع بالفعل');
+        }
+        code = rootCode;
+      } else {
+        final parentId = parentValue as int;
+        final parentRows = await txn.query(
+          'accounts',
+          columns: ['id', 'account_type'],
+          where: 'id = ?',
+          whereArgs: [parentId],
+          limit: 1,
+        );
+        if (parentRows.isEmpty) throw StateError('الحساب الأعلى غير موجود');
+        accountType = parentRows.first['account_type']?.toString() ?? '';
+        if (!_accountTypeRootCodes.containsKey(accountType)) {
+          throw StateError('نوع الحساب الأعلى غير صالح');
+        }
+        final requestedType = account['account_type']?.toString();
+        if (requestedType != null && requestedType != accountType) {
+          throw ArgumentError('الحساب الفرعي يرث نوع الحساب الأعلى');
+        }
+        code = await _nextAccountCodeTx(txn, parentId);
+      }
+
+      final codeCollision = await txn.query(
+        'accounts',
+        columns: ['id'],
+        where: 'code = ?',
+        whereArgs: [code],
+        limit: 1,
+      );
+      if (codeCollision.isNotEmpty)
+        throw StateError('رمز الحساب مستخدم بالفعل');
+
+      final id = await txn.insert('accounts', {
+        'code': code,
+        'name': name,
+        'parent_id': parentValue,
+        'account_type': accountType,
+        'balance': 0.0,
+      });
+      await txn.insert('audit_logs', {
+        'user_id': PermissionRuntime.userId,
+        'action': 'ACCOUNT_CREATE',
+        'details': 'إنشاء الحساب $code - $name',
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+      return id;
+    });
+  }
+
+  Future<int> updateAccount(int accountId, String accountName) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.edit);
+    final name = accountName.trim();
+    if (accountId <= 0 || name.isEmpty) {
+      throw ArgumentError('معرف الحساب والاسم حقول مطلوبة');
+    }
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'accounts',
+        columns: ['id', 'code', 'name'],
+        where: 'id = ?',
+        whereArgs: [accountId],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('الحساب غير موجود');
+      final oldName = rows.first['name']?.toString() ?? '';
+      final changed = await txn.update(
+        'accounts',
+        {'name': name},
+        where: 'id = ?',
+        whereArgs: [accountId],
+      );
+      if (changed != 1) throw StateError('تعذر تحديث الحساب');
+      await txn.insert('audit_logs', {
+        'user_id': PermissionRuntime.userId,
+        'action': 'ACCOUNT_RENAME',
+        'details': 'تعديل اسم الحساب ${rows.first['code']}: $oldName ← $name',
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+      return changed;
+    });
+  }
+
+  Future<int> deleteAccount(int accountId) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.delete);
+    if (accountId <= 0) throw ArgumentError('معرف الحساب غير صالح');
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'accounts',
+        columns: ['id', 'code', 'name', 'balance'],
+        where: 'id = ?',
+        whereArgs: [accountId],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('الحساب غير موجود');
+      final account = rows.first;
+      final code = account['code']?.toString() ?? '';
+      final balance = (account['balance'] as num?)?.toDouble() ?? 0.0;
+      if (_protectedSystemAccountCodes.contains(code)) {
+        throw StateError('لا يمكن حذف حساب أساسي يستخدمه النظام');
+      }
+      if (!balance.isFinite || balance.abs() >= 0.005) {
+        throw StateError('لا يمكن حذف حساب له رصيد');
+      }
+
+      const references = {
+        'accounts': 'parent_id',
+        'journal_lines': 'account_id',
+        'owners': 'account_id',
+        'tenants': 'account_id',
+        'banks': 'account_id',
+        'users': 'cash_box_account_id',
+      };
+      for (final entry in references.entries) {
+        final linkedRows = await txn.query(
+          entry.key,
+          columns: ['id'],
+          where: '${entry.value} = ?',
+          whereArgs: [accountId],
+          limit: 1,
+        );
+        if (linkedRows.isNotEmpty) {
+          throw StateError('لا يمكن حذف حساب مرتبط بحركات أو بيانات أخرى');
+        }
+      }
+
+      await txn.insert('audit_logs', {
+        'user_id': PermissionRuntime.userId,
+        'action': 'ACCOUNT_DELETE',
+        'details': 'حذف الحساب $code - ${account['name']}',
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+      return txn.delete('accounts', where: 'id = ?', whereArgs: [accountId]);
+    });
   }
 
   // Journal Entries with Transactions
@@ -1744,16 +1991,35 @@ class DatabaseHelper {
     List<Map<String, dynamic>> lines,
   ) async {
     PermissionRuntime.require('accounting', AppPermissionAction.post);
-    if (DateTime.tryParse(header['entry_date']?.toString() ?? '') == null) {
+    final rawDate = header['entry_date']?.toString().trim() ?? '';
+    final dateText = rawDate.length >= 10 ? rawDate.substring(0, 10) : '';
+    final parsedDate = DateTime.tryParse(rawDate);
+    final parsedDay = DateTime.tryParse(dateText);
+    if (parsedDate == null ||
+        parsedDay == null ||
+        parsedDay.toIso8601String().substring(0, 10) != dateText ||
+        (rawDate.length > 10 && rawDate[10] != 'T' && rawDate[10] != ' ')) {
       throw ArgumentError('تاريخ القيد غير صحيح');
     }
-    if (lines.length < 2)
+    final description = (header['description'] as String?)?.trim() ?? '';
+    if (description.isEmpty) throw ArgumentError('بيان القيد مطلوب');
+    if (lines.length < 2) {
       throw ArgumentError('يجب أن يحتوي القيد على سطرين على الأقل');
+    }
     int debitCents = 0;
     int creditCents = 0;
+    final validatedLines = <Map<String, dynamic>>[];
     for (final line in lines) {
+      final accountId = line['account_id'];
       final debit = (line['debit'] as num? ?? 0).toDouble();
       final credit = (line['credit'] as num? ?? 0).toDouble();
+      final costCenterId = line['cost_center_id'];
+      if (accountId is! int || accountId <= 0) {
+        throw ArgumentError('اختر حساباً صالحاً لكل سطر');
+      }
+      if (costCenterId != null && (costCenterId is! int || costCenterId <= 0)) {
+        throw ArgumentError('مركز تكلفة أحد الأسطر غير صالح');
+      }
       if (!_hasCentPrecision(debit) ||
           !_hasCentPrecision(credit) ||
           debit < 0 ||
@@ -1764,6 +2030,13 @@ class DatabaseHelper {
       }
       debitCents += (debit * 100).round();
       creditCents += (credit * 100).round();
+      validatedLines.add({
+        'account_id': accountId,
+        'debit': debit,
+        'credit': credit,
+        'cost_center_id': costCenterId,
+        'description': (line['description'] as String?)?.trim(),
+      });
     }
     if (debitCents != creditCents || debitCents == 0) {
       throw ArgumentError(
@@ -1773,28 +2046,26 @@ class DatabaseHelper {
 
     final db = await instance.database;
     return db.transaction((txn) async {
-      // 1. Insert header
-      final journalId = await txn.insert('journal_entries', header);
+      final journalId = await txn.insert('journal_entries', {
+        'entry_date': dateText,
+        'description': description,
+        'is_posted': 1,
+      });
 
-      // 2. Insert lines
-      for (var line in lines) {
-        final accountId = line['account_id'];
-        final accountRows = accountId == null
-            ? <Map<String, Object?>>[]
-            : await txn.query(
-                'accounts',
-                where: 'id = ? AND parent_id IS NOT NULL',
-                whereArgs: [accountId],
-              );
-        if (accountRows.isEmpty)
-          throw ArgumentError('اختر حساباً تفصيلياً صالحاً لكل سطر');
-        line['journal_entry_id'] = journalId;
-        await txn.insert('journal_lines', line);
-
-        // 3. Update account balances
+      for (final line in validatedLines) {
+        final accountId = line['account_id'] as int;
+        await _requireLeafAccountTx(txn, accountId);
+        await _requireCostCenterTx(txn, line['cost_center_id']);
+        await txn.insert('journal_lines', {
+          'journal_entry_id': journalId,
+          'account_id': accountId,
+          'debit': line['debit'],
+          'credit': line['credit'],
+          'cost_center_id': line['cost_center_id'],
+          'description': line['description'],
+        });
         final debit = (line['debit'] as num? ?? 0).toDouble();
         final credit = (line['credit'] as num? ?? 0).toDouble();
-
         await _updateBalanceTx(txn, accountId, debit, credit);
       }
       return journalId;
@@ -1825,33 +2096,26 @@ class DatabaseHelper {
     }
     final db = await instance.database;
     return db.transaction((txn) async {
-      final cashRows = await txn.query(
-        'accounts',
-        where: 'id = ?',
-        whereArgs: [cashAccountId],
+      final cashAccount = await _requireLeafAccountTx(
+        txn,
+        cashAccountId,
+        expectedType: 'Asset',
       );
-      final oppositeRows = await txn.query(
-        'accounts',
-        where: 'id = ?',
-        whereArgs: [oppositeAccountId],
+      final oppositeAccount = await _requireLeafAccountTx(
+        txn,
+        oppositeAccountId,
       );
-      if (cashRows.isEmpty ||
-          cashRows.first['account_type'] != 'Asset' ||
-          cashRows.first['parent_id'] == null ||
-          !(cashRows.first['code'] as String).startsWith('11')) {
+      if (!(cashAccount['code'] as String).startsWith('11')) {
         throw ArgumentError('حساب النقدية يجب أن يكون صندوقاً أو بنكاً');
       }
       final allowedCounterpartTypes = voucherType == 'قبض عام'
           ? ['Asset', 'Liability', 'Equity', 'Revenue']
           : ['Asset', 'Liability', 'Equity', 'Expense'];
-      if (oppositeRows.isEmpty ||
-          oppositeAccountId == cashAccountId ||
-          oppositeRows.first['parent_id'] == null ||
-          !allowedCounterpartTypes.contains(
-            oppositeRows.first['account_type'],
-          )) {
+      if (oppositeAccountId == cashAccountId ||
+          !allowedCounterpartTypes.contains(oppositeAccount['account_type'])) {
         throw ArgumentError('الحساب المقابل غير صالح');
       }
+      await _requireCostCenterTx(txn, costCenterId);
       final amount = (voucher['amount'] as num).toDouble();
       final date = voucher['voucher_date'];
       final description =
@@ -1935,6 +2199,15 @@ class DatabaseHelper {
     double debit,
     double credit,
   ) async {
+    if (!_hasCentPrecision(debit) ||
+        !_hasCentPrecision(credit) ||
+        debit < 0 ||
+        credit < 0 ||
+        (debit > 0 && credit > 0)) {
+      throw ArgumentError('قيمة حركة الحساب غير صحيحة');
+    }
+    final debitCents = (debit * 100).round();
+    final creditCents = (credit * 100).round();
     int? currentAccountId = accountId;
 
     while (currentAccountId != null) {
@@ -1943,32 +2216,97 @@ class DatabaseHelper {
         where: 'id = ?',
         whereArgs: [currentAccountId],
       );
-      if (accountResult.isNotEmpty) {
-        final accountMap = accountResult.first;
-        final accountType = accountMap['account_type'] as String?;
-        double currentBalance =
-            (accountMap['balance'] as num?)?.toDouble() ?? 0.0;
-
-        if (accountType == 'Asset' || accountType == 'Expense') {
-          currentBalance += (debit - credit);
-        } else if (accountType == 'Liability' ||
-            accountType == 'Revenue' ||
-            accountType == 'Equity') {
-          currentBalance += (credit - debit);
-        }
-
-        await txn.update(
-          'accounts',
-          {'balance': currentBalance},
-          where: 'id = ?',
-          whereArgs: [currentAccountId],
-        );
-
-        currentAccountId = accountMap['parent_id'] as int?;
-      } else {
-        break;
+      if (accountResult.isEmpty) {
+        throw StateError('تعذر تحديث رصيد حساب غير موجود');
       }
+      final accountMap = accountResult.first;
+      final accountType = accountMap['account_type']?.toString();
+      final currentBalance = (accountMap['balance'] as num?)?.toDouble() ?? 0.0;
+      if (!currentBalance.isFinite ||
+          !_accountTypeRootCodes.containsKey(accountType)) {
+        throw StateError('رصيد أو نوع الحساب غير صالح');
+      }
+      final currentCents = (currentBalance * 100).round();
+      final deltaCents = accountType == 'Asset' || accountType == 'Expense'
+          ? debitCents - creditCents
+          : creditCents - debitCents;
+      final nextBalance = (currentCents + deltaCents) / 100.0;
+      await txn.update(
+        'accounts',
+        {'balance': nextBalance},
+        where: 'id = ?',
+        whereArgs: [currentAccountId],
+      );
+      currentAccountId = accountMap['parent_id'] as int?;
     }
+  }
+
+  Future<Map<String, dynamic>> _requireLeafAccountTx(
+    DatabaseExecutor executor,
+    int accountId, {
+    String? expectedType,
+  }) async {
+    final rows = await executor.query(
+      'accounts',
+      where: 'id = ?',
+      whereArgs: [accountId],
+      limit: 1,
+    );
+    if (rows.isEmpty || rows.first['parent_id'] == null) {
+      throw ArgumentError('اختر حساباً تفصيلياً صالحاً');
+    }
+    final account = rows.first;
+    final accountType = account['account_type']?.toString();
+    if (!_accountTypeRootCodes.containsKey(accountType) ||
+        (expectedType != null && accountType != expectedType)) {
+      throw ArgumentError('نوع الحساب لا يناسب هذه الحركة');
+    }
+    final children = await executor.query(
+      'accounts',
+      columns: ['id'],
+      where: 'parent_id = ?',
+      whereArgs: [accountId],
+      limit: 1,
+    );
+    if (children.isNotEmpty)
+      throw ArgumentError('لا يمكن الترحيل على حساب تجميعي');
+
+    final visited = <int>{accountId};
+    var parentId = account['parent_id'] as int?;
+    while (parentId != null) {
+      if (!visited.add(parentId)) throw StateError('تسلسل الحسابات يحتوي دورة');
+      final parentRows = await executor.query(
+        'accounts',
+        columns: ['parent_id', 'account_type'],
+        where: 'id = ?',
+        whereArgs: [parentId],
+        limit: 1,
+      );
+      if (parentRows.isEmpty ||
+          parentRows.first['account_type'] != accountType) {
+        throw StateError('نوع الحساب لا يطابق سلسلة الحسابات الأعلى');
+      }
+      parentId = parentRows.first['parent_id'] as int?;
+    }
+    return account;
+  }
+
+  Future<void> _requireCostCenterTx(
+    DatabaseExecutor executor,
+    Object? costCenterId,
+  ) async {
+    if (costCenterId == null) return;
+    if (costCenterId is! int || costCenterId <= 0) {
+      throw ArgumentError('مركز التكلفة غير صالح');
+    }
+    final rows = await executor.query(
+      'cost_centers',
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [costCenterId],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw ArgumentError('مركز التكلفة المحدد غير موجود');
   }
 
   // --- Owner & Property Operations ---
@@ -2011,27 +2349,7 @@ class DatabaseHelper {
         throw Exception('حساب الملاك الرئيسي غير موجود (2101)');
 
       final parentId = parentResult.first['id'] as int;
-      final parentCode = parentResult.first['code'] as String;
-
-      // 2. Generate Account Code for the new owner
-      final childrenResult = await txn.query(
-        'accounts',
-        where: 'parent_id = ?',
-        whereArgs: [parentId],
-        orderBy: 'code DESC',
-        limit: 1,
-      );
-
-      String newCode;
-      if (childrenResult.isEmpty) {
-        newCode = '${parentCode}0001';
-      } else {
-        final lastChildCode = childrenResult.first['code'] as String;
-        final sequenceStr = lastChildCode.substring(parentCode.length);
-        int sequence = int.tryParse(sequenceStr) ?? 0;
-        sequence++;
-        newCode = '$parentCode${sequence.toString().padLeft(4, '0')}';
-      }
+      final newCode = await _nextAccountCodeTx(txn, parentId);
 
       // 3. Create the sub-account
       final newAccount = {
@@ -2448,27 +2766,7 @@ class DatabaseHelper {
         throw Exception('حساب ذمم المستأجرين غير موجود (1201)');
 
       final parentId = parentResult.first['id'] as int;
-      final parentCode = parentResult.first['code'] as String;
-
-      // 2. Generate Account Code for the new tenant
-      final childrenResult = await txn.query(
-        'accounts',
-        where: 'parent_id = ?',
-        whereArgs: [parentId],
-        orderBy: 'code DESC',
-        limit: 1,
-      );
-
-      String newCode;
-      if (childrenResult.isEmpty) {
-        newCode = '${parentCode}0001';
-      } else {
-        final lastChildCode = childrenResult.first['code'] as String;
-        final sequenceStr = lastChildCode.substring(parentCode.length);
-        int sequence = int.tryParse(sequenceStr) ?? 0;
-        sequence++;
-        newCode = '$parentCode${sequence.toString().padLeft(4, '0')}';
-      }
+      final newCode = await _nextAccountCodeTx(txn, parentId);
 
       // 3. Create the sub-account
       final newAccount = {
@@ -2822,15 +3120,13 @@ class DatabaseHelper {
       );
       if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
       final tenantAccountId = tenantRows.first['account_id'] as int;
-      final cashRows = await txn.query(
-        'accounts',
-        where: 'id = ?',
-        whereArgs: [cashAccountId],
+      await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
+      final cashAccount = await _requireLeafAccountTx(
+        txn,
+        cashAccountId,
+        expectedType: 'Asset',
       );
-      if (cashRows.isEmpty ||
-          cashRows.first['account_type'] != 'Asset' ||
-          cashRows.first['parent_id'] == null ||
-          !(cashRows.first['code'] as String).startsWith('11')) {
+      if (!(cashAccount['code'] as String).startsWith('11')) {
         throw ArgumentError('اختر حساب صندوق أو بنك صالحاً');
       }
 
@@ -2958,30 +3254,23 @@ class DatabaseHelper {
         whereArgs: [tenantId],
       );
       if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
-      final cashRows = await txn.query(
-        'accounts',
-        where: 'id = ?',
-        whereArgs: [cashAccountId],
+      final tenantAccountId = tenantRows.first['account_id'] as int;
+      await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
+      final cashAccount = await _requireLeafAccountTx(
+        txn,
+        cashAccountId,
+        expectedType: 'Asset',
       );
-      final offsetRows = await txn.query(
-        'accounts',
-        where: 'id = ?',
-        whereArgs: [offsetAccountId],
-      );
-      if (cashRows.isEmpty ||
-          cashRows.first['account_type'] != 'Asset' ||
-          cashRows.first['parent_id'] == null ||
-          !(cashRows.first['code'] as String).startsWith('11')) {
+      final offsetAccount = await _requireLeafAccountTx(txn, offsetAccountId);
+      if (!(cashAccount['code'] as String).startsWith('11')) {
         throw ArgumentError('اختر حساب صندوق أو بنك صالحاً');
       }
-      if (offsetRows.isEmpty ||
-          offsetAccountId == cashAccountId ||
-          offsetRows.first['parent_id'] == null ||
+      if (offsetAccountId == cashAccountId ||
           ![
             'Liability',
             'Expense',
             'Revenue',
-          ].contains(offsetRows.first['account_type'])) {
+          ].contains(offsetAccount['account_type'])) {
         throw ArgumentError('الحساب المقابل غير صالح');
       }
 
@@ -3170,26 +3459,13 @@ class DatabaseHelper {
       );
       if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
       final tenantAccountId = tenantRows.first['account_id'] as int;
-      final revenueRows = await txn.query(
-        'accounts',
-        where: 'id = ?',
-        whereArgs: [revenueAccountId],
+      await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
+      await _requireLeafAccountTx(
+        txn,
+        revenueAccountId,
+        expectedType: 'Revenue',
       );
-      final taxRows = await txn.query(
-        'accounts',
-        where: 'id = ?',
-        whereArgs: [taxAccountId],
-      );
-      if (revenueRows.isEmpty ||
-          revenueRows.first['account_type'] != 'Revenue' ||
-          revenueRows.first['parent_id'] == null) {
-        throw ArgumentError('اختر حساب إيراد صالحاً');
-      }
-      if (taxRows.isEmpty ||
-          taxRows.first['account_type'] != 'Liability' ||
-          taxRows.first['parent_id'] == null) {
-        throw ArgumentError('اختر حساب ضريبة من الخصوم');
-      }
+      await _requireLeafAccountTx(txn, taxAccountId, expectedType: 'Liability');
 
       final grossAmount = totalAmount + taxAmount;
       final journalId = await txn.insert('journal_entries', {

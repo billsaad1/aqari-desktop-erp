@@ -12,6 +12,7 @@ import 'package:app/core/permission_policy.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/database/database_integrity_migrations.dart';
+import 'package:app/features/general_accounting/chart_of_accounts_screen.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
 import 'package:app/features/tenants_leasing/tenants_screen.dart';
 import 'package:app/providers/auth_provider.dart';
@@ -2201,6 +2202,100 @@ void main() {
                 whereArgs: ['1101'],
               )).single['id']
               as int;
+      final cashGroupId =
+          (await db.query(
+                'accounts',
+                where: 'code = ?',
+                whereArgs: ['11'],
+              )).single['id']
+              as int;
+      final revenueRootId =
+          (await db.query(
+                'accounts',
+                where: 'code = ?',
+                whereArgs: ['4'],
+              )).single['id']
+              as int;
+      final groupedPostingVouchersBefore = (await db.query('vouchers')).length;
+      final groupedPostingEntriesBefore = (await db.query(
+        'journal_entries',
+      )).length;
+      await expectLater(
+        DatabaseHelper.instance.insertTenantReceiptVoucher(
+          tenantId: tenantId,
+          amount: 10.0,
+          voucherDate: '2026-11-10',
+          cashAccountId: cashGroupId,
+          installmentsToUpdate: [
+            {
+              'id': storedInstallments[2]['id'],
+              'paid_amount': 10.0,
+              'status': 'Partially Paid',
+            },
+          ],
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertGeneralVoucher(
+          {
+            'voucher_type': 'قبض عام',
+            'voucher_date': '2026-11-10',
+            'amount': 10.0,
+            'description': 'حساب نقدية تجميعي',
+          },
+          cashGroupId,
+          (await db.query(
+                'accounts',
+                where: "account_type = 'Revenue' AND parent_id IS NOT NULL",
+                limit: 1,
+              )).single['id']
+              as int,
+          null,
+          'قبض عام',
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertTenantPaymentVoucher(
+          tenantId: tenantId,
+          amount: 10.0,
+          voucherDate: '2026-11-10',
+          cashAccountId: cashGroupId,
+          offsetAccountId:
+              (await db.query(
+                    'accounts',
+                    where: "account_type = 'Expense' AND parent_id IS NOT NULL",
+                    limit: 1,
+                  )).single['id']
+                  as int,
+          description: 'حساب نقدية تجميعي',
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertTaxInvoice(
+          contractId: contractId,
+          tenantId: tenantId,
+          invoiceDate: '2026-11-10',
+          totalAmount: 10.0,
+          taxAmount: 1.5,
+          revenueAccountId: revenueRootId,
+          taxAccountId:
+              (await db.query(
+                    'accounts',
+                    where: 'code = ?',
+                    whereArgs: ['2103'],
+                  )).single['id']
+                  as int,
+        ),
+        throwsArgumentError,
+      );
+      expect((await db.query('vouchers')).length, groupedPostingVouchersBefore);
+      expect(
+        (await db.query('journal_entries')).length,
+        groupedPostingEntriesBefore,
+      );
       final receiptId = await DatabaseHelper.instance
           .insertTenantReceiptVoucher(
             tenantId: tenantId,
@@ -2784,6 +2879,511 @@ void main() {
       await rollback.delete();
     },
   );
+
+  test(
+    'chart of accounts and manual posting preserve ledger integrity',
+    () async {
+      PermissionRuntime.activate(
+        userId: 1,
+        role: 'SuperAdmin',
+        permissionRows: const [],
+      );
+      final helper = DatabaseHelper.instance;
+      final db = await helper.database;
+      final equityId = await helper.insertAccount({
+        'name': 'حقوق ملكية اختبارية',
+        'parent_id': null,
+        'account_type': 'Equity',
+        'code': 'IGNORED',
+        'balance': 99999.0,
+      });
+      var equity = (await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [equityId],
+      )).single;
+      expect(equity['code'], '3');
+      expect(equity['account_type'], 'Equity');
+      expect(equity['balance'], 0.0);
+      await expectLater(
+        helper.insertAccount({
+          'name': 'جذر حقوق ملكية مكرر',
+          'parent_id': null,
+          'account_type': 'Equity',
+        }),
+        throwsStateError,
+      );
+
+      final assetGroup = (await db.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['11'],
+      )).single;
+      final assetGroupId = assetGroup['id'] as int;
+      await expectLater(
+        helper.insertAccount({
+          'name': 'حساب بنوع موروث خاطئ',
+          'parent_id': assetGroupId,
+          'account_type': 'Expense',
+        }),
+        throwsArgumentError,
+      );
+
+      final leafId = await helper.insertAccount({
+        'name': 'حساب نقدية اختباري',
+        'parent_id': assetGroupId,
+        'account_type': 'Asset',
+        'code': 'IGNORED-CHILD-CODE',
+        'balance': 200.0,
+      });
+      var leaf = (await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [leafId],
+      )).single;
+      expect(leaf['code'], '1103');
+      expect(leaf['balance'], 0.0);
+      await helper.updateAccount(leafId, 'حساب نقدية محدث');
+      leaf = (await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [leafId],
+      )).single;
+      expect(leaf['name'], 'حساب نقدية محدث');
+      expect(leaf['code'], '1103');
+      expect(leaf['account_type'], 'Asset');
+
+      final assetRoot = (await db.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['1'],
+      )).single;
+      final assetRootChildId = await helper.insertAccount({
+        'name': 'حساب أصول مباشر لاختبار البادئة',
+        'parent_id': assetRoot['id'],
+        'account_type': 'Asset',
+      });
+      final assetRootChild = (await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [assetRootChildId],
+      )).single;
+      expect(assetRootChild['code'], '13');
+      final revenue = (await db.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['4101'],
+      )).single;
+      final revenueRoot = (await db.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['4'],
+      )).single;
+      final accountProvider = AccountingProvider();
+      await accountProvider.loadAccounts();
+      final detailAccountIds = accountProvider.detailAccounts
+          .map((account) => account['id'])
+          .toSet();
+      expect(detailAccountIds, contains(leafId));
+      expect(detailAccountIds, contains(revenue['id']));
+      expect(detailAccountIds, isNot(contains(assetGroup['id'])));
+      accountProvider.dispose();
+      final beforeEntries = (await db.query('journal_entries')).length;
+      await expectLater(
+        helper.insertJournalEntryWithLines(
+          {'entry_date': '2026-11-15 نص زائد', 'description': 'تاريخ غير صالح'},
+          [
+            {'account_id': leafId, 'debit': 1.0, 'credit': 0.0},
+            {'account_id': revenue['id'], 'debit': 0.0, 'credit': 1.0},
+          ],
+        ),
+        throwsArgumentError,
+      );
+      final entryId = await helper.insertJournalEntryWithLines(
+        {
+          'id': 999999,
+          'entry_date': '2026-11-15',
+          'description': 'قيد اختباري متوازن',
+          'is_posted': 0,
+        },
+        [
+          {
+            'journal_entry_id': 999999,
+            'account_id': leafId,
+            'debit': 12.34,
+            'credit': 0.0,
+            'description': 'مدين',
+          },
+          {
+            'account_id': revenue['id'],
+            'debit': 0.0,
+            'credit': 12.34,
+            'description': 'دائن',
+          },
+        ],
+      );
+      final journalHeader = (await db.query(
+        'journal_entries',
+        where: 'id = ?',
+        whereArgs: [entryId],
+      )).single;
+      expect(journalHeader['is_posted'], 1);
+      expect(journalHeader['id'], isNot(999999));
+      final balances = <Map<String, dynamic>>[];
+      for (final account in [
+        leaf,
+        assetGroup,
+        assetRoot,
+        revenue,
+        revenueRoot,
+      ]) {
+        balances.add(
+          (await db.query(
+            'accounts',
+            where: 'id = ?',
+            whereArgs: [account['id']],
+          )).single,
+        );
+      }
+      expect(balances.map((row) => row['balance']), [
+        12.34,
+        12.34,
+        12.34,
+        12.34,
+        12.34,
+      ]);
+
+      await expectLater(
+        helper.insertAccount({
+          'name': 'فرع لحساب ذي حركة',
+          'parent_id': leafId,
+        }),
+        throwsStateError,
+      );
+      await expectLater(helper.deleteAccount(leafId), throwsStateError);
+
+      final entriesBeforeInvalid = (await db.query('journal_entries')).length;
+      await expectLater(
+        helper.insertJournalEntryWithLines(
+          {
+            'entry_date': '2026-11-15',
+            'description': 'ترحيل إلى حساب تجميعي',
+            'is_posted': 1,
+          },
+          [
+            {'account_id': assetGroupId, 'debit': 1.0, 'credit': 0.0},
+            {'account_id': revenue['id'], 'debit': 0.0, 'credit': 1.0},
+          ],
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        helper.insertJournalEntryWithLines(
+          {
+            'entry_date': '2026-11-15',
+            'description': 'مركز تكلفة غير موجود',
+            'is_posted': 0,
+          },
+          [
+            {
+              'account_id': leafId,
+              'debit': 1.0,
+              'credit': 0.0,
+              'cost_center_id': 999999,
+            },
+            {'account_id': revenue['id'], 'debit': 0.0, 'credit': 1.0},
+          ],
+        ),
+        throwsArgumentError,
+      );
+      expect((await db.query('journal_entries')).length, entriesBeforeInvalid);
+      await expectLater(helper.deleteAccount(1), throwsStateError);
+      expect(await helper.deleteAccount(equityId), 1);
+      expect(await helper.deleteAccount(assetRootChildId), 1);
+      final deletedEquity = await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [equityId],
+      );
+      expect(deletedEquity, isEmpty);
+      expect((await db.query('journal_entries')).length, beforeEntries + 1);
+    },
+  );
+
+  test(
+    'tenant and owner accounts share the safe account code allocator',
+    () async {
+      PermissionRuntime.activate(
+        userId: 1,
+        role: 'SuperAdmin',
+        permissionRows: const [],
+      );
+      final helper = DatabaseHelper.instance;
+      final db = await helper.database;
+
+      Future<void> verifyAllocator({
+        required String table,
+        required String parentCode,
+        required String accountType,
+        required Future<void> Function(String name, int ordinal) createEntity,
+      }) async {
+        final parent = (await db.query(
+          'accounts',
+          where: 'code = ?',
+          whereArgs: [parentCode],
+          limit: 1,
+        )).single;
+        final parentId = parent['id'] as int;
+        final allCodes = (await db.query(
+          'accounts',
+          columns: ['code'],
+        )).map((row) => row['code'].toString()).toSet();
+        var legacySequence = 9000;
+        while (allCodes.contains('$parentCode$legacySequence') ||
+            allCodes.contains('$parentCode${legacySequence + 1}')) {
+          legacySequence += 2;
+        }
+        final legacyCodes = [
+          '$parentCode$legacySequence',
+          '$parentCode${legacySequence + 1}',
+        ];
+        final legacyAccountIds = <int>[];
+        for (var index = 0; index < legacyCodes.length; index++) {
+          legacyAccountIds.add(
+            await db.insert('accounts', {
+              'code': legacyCodes[index],
+              'name': 'حساب قديم ${table}_$index',
+              'parent_id': parentId,
+              'account_type': accountType,
+              'balance': 0.0,
+            }),
+          );
+        }
+
+        final firstName = '__phase5_${table}_1';
+        final firstExpectedCode = await helper.generateAccountCode(parentId);
+        await createEntity(firstName, 1);
+        final entities = await db.query(
+          table,
+          columns: ['id', 'account_id'],
+          where: 'name = ?',
+          whereArgs: [firstName],
+          limit: 1,
+        );
+        final firstAccountId = entities.single['account_id'] as int;
+        expect(
+          (await db.query(
+            'accounts',
+            columns: ['code'],
+            where: 'id = ?',
+            whereArgs: [firstAccountId],
+          )).single['code'],
+          firstExpectedCode,
+        );
+        await expectLater(
+          helper.insertAccount({
+            'name': 'حساب فرعي لحساب مرتبط',
+            'parent_id': firstAccountId,
+          }),
+          throwsStateError,
+        );
+
+        final manualExpectedCode = await helper.generateAccountCode(parentId);
+        final manualAccountId = await helper.insertAccount({
+          'name': 'حساب يدوي بين سجلات $table',
+          'parent_id': parentId,
+          'account_type': accountType,
+        });
+        expect(
+          (await db.query(
+            'accounts',
+            columns: ['code'],
+            where: 'id = ?',
+            whereArgs: [manualAccountId],
+          )).single['code'],
+          manualExpectedCode,
+        );
+
+        final secondName = '__phase5_${table}_2';
+        final secondExpectedCode = await helper.generateAccountCode(parentId);
+        await createEntity(secondName, 2);
+        final secondEntity = (await db.query(
+          table,
+          columns: ['id', 'account_id'],
+          where: 'name = ?',
+          whereArgs: [secondName],
+          limit: 1,
+        )).single;
+        final secondAccountId = secondEntity['account_id'] as int;
+        expect(
+          (await db.query(
+            'accounts',
+            columns: ['code'],
+            where: 'id = ?',
+            whereArgs: [secondAccountId],
+          )).single['code'],
+          secondExpectedCode,
+        );
+        expect(
+          {firstExpectedCode, manualExpectedCode, secondExpectedCode}.length,
+          3,
+        );
+
+        await db.delete(
+          table,
+          where: 'name IN (?, ?)',
+          whereArgs: [firstName, secondName],
+        );
+        for (final accountId in {
+          firstAccountId,
+          secondAccountId,
+          manualAccountId,
+          ...legacyAccountIds,
+        }) {
+          await helper.deleteAccount(accountId);
+        }
+      }
+
+      await verifyAllocator(
+        table: 'tenants',
+        parentCode: '1201',
+        accountType: 'Asset',
+        createEntity: (name, ordinal) => helper.insertTenantWithAccount({
+          'name': name,
+          'mobile': '77790000$ordinal',
+        }),
+      );
+      await verifyAllocator(
+        table: 'owners',
+        parentCode: '2101',
+        accountType: 'Liability',
+        createEntity: (name, ordinal) => helper.insertOwnerWithAccount({
+          'name': name,
+          'commission_rate': ordinal.toDouble(),
+        }),
+      );
+    },
+  );
+
+  testWidgets('chart account screen creates a root using its standard code', (
+    tester,
+  ) async {
+    PermissionRuntime.activate(
+      userId: 1,
+      role: 'SuperAdmin',
+      permissionRows: const [],
+    );
+    final provider = _TestAccountingProvider();
+    await provider.loadAccounts();
+    await tester.pumpWidget(
+      ChangeNotifierProvider<AccountingProvider>.value(
+        value: provider,
+        child: const MaterialApp(home: Scaffold(body: ChartOfAccountsScreen())),
+      ),
+    );
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 500)),
+    );
+    await tester.pump();
+
+    expect(find.text('دليل الحسابات'), findsOneWidget);
+    await tester.tap(find.text('إضافة حساب رئيسي'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('طبيعة الحساب الرئيسي'), findsOneWidget);
+    await tester.enterText(
+      find.byType(TextFormField).last,
+      'حقوق ملكية من الواجهة',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'إنشاء الحساب'));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 500)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final saved = provider.accounts.singleWhere(
+      (account) => account['name'] == 'حقوق ملكية من الواجهة',
+    );
+    expect(saved['code'], '3');
+    expect(find.text('حقوق ملكية من الواجهة'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    provider.dispose();
+  }, timeout: const Timeout(Duration(seconds: 30)));
+}
+
+class _TestAccountingProvider extends AccountingProvider {
+  final List<Map<String, dynamic>> _accounts = [
+    {
+      'id': 1,
+      'code': '1',
+      'name': 'الأصول',
+      'parent_id': null,
+      'account_type': 'Asset',
+      'balance': 0.0,
+    },
+    {
+      'id': 2,
+      'code': '2',
+      'name': 'الخصوم',
+      'parent_id': null,
+      'account_type': 'Liability',
+      'balance': 0.0,
+    },
+    {
+      'id': 3,
+      'code': '4',
+      'name': 'الإيرادات',
+      'parent_id': null,
+      'account_type': 'Revenue',
+      'balance': 0.0,
+    },
+    {
+      'id': 4,
+      'code': '5',
+      'name': 'المصروفات',
+      'parent_id': null,
+      'account_type': 'Expense',
+      'balance': 0.0,
+    },
+  ];
+
+  @override
+  List<Map<String, dynamic>> get accounts => _accounts;
+
+  @override
+  bool get isLoading => false;
+
+  @override
+  String? get errorMessage => null;
+
+  @override
+  Future<void> loadAccounts() async {}
+
+  @override
+  Future<int> addAccount(Map<String, dynamic> account) async {
+    final rootCodes = {
+      'Asset': '1',
+      'Liability': '2',
+      'Equity': '3',
+      'Revenue': '4',
+      'Expense': '5',
+    };
+    const id = 5;
+    _accounts.add({
+      'id': id,
+      'code': rootCodes[account['account_type']],
+      'name': account['name'],
+      'parent_id': null,
+      'account_type': account['account_type'],
+      'balance': 0.0,
+    });
+    notifyListeners();
+    return id;
+  }
 }
 
 class _TestLeasingProvider extends LeasingProvider {

@@ -495,7 +495,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                         Expanded(
                           child: DropdownButtonFormField<int>(
                             initialValue: _revenueAccountId,
-                            items: accProv.accounts
+                            items: accProv.detailAccounts
                                 .where(
                                   (a) =>
                                       a['account_type'] == 'Revenue' &&
@@ -520,7 +520,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                         Expanded(
                           child: DropdownButtonFormField<int>(
                             initialValue: _taxAccountId,
-                            items: accProv.accounts
+                            items: accProv.detailAccounts
                                 .where(
                                   (a) =>
                                       a['account_type'] == 'Liability' &&
