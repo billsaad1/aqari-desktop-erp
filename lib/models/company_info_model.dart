@@ -3,9 +3,10 @@ class CompanyInfo {
   final String nameAr;
   final String? nameEn;
   final String? activity; // Retaining for backwards compatibility
-  final String? address;  // Retaining for backwards compatibility
+  final String? address; // Retaining for backwards compatibility
   final String? defaultCurrency;
   final String? taxNumber;
+  final double taxRate;
   final String? commercialRegister;
   final String? logoPath;
   final String? termsConditions;
@@ -26,6 +27,7 @@ class CompanyInfo {
     this.address,
     this.defaultCurrency,
     this.taxNumber,
+    this.taxRate = 0,
     this.commercialRegister,
     this.logoPath,
     this.termsConditions,
@@ -48,6 +50,7 @@ class CompanyInfo {
       address: map['address'],
       defaultCurrency: map['default_currency'],
       taxNumber: map['tax_number'],
+      taxRate: (map['tax_rate'] as num?)?.toDouble() ?? 0,
       commercialRegister: map['commercial_register'],
       logoPath: map['logo_path'],
       termsConditions: map['terms_conditions'],
@@ -71,6 +74,7 @@ class CompanyInfo {
       'address': address,
       'default_currency': defaultCurrency,
       'tax_number': taxNumber,
+      'tax_rate': taxRate,
       'commercial_register': commercialRegister,
       'logo_path': logoPath,
       'terms_conditions': termsConditions,

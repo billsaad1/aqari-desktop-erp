@@ -4,6 +4,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart';
 import 'dart:io';
 
+import '../core/internal_tax.dart';
 import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
@@ -12,7 +13,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 13;
+  static const int _schemaVersion = 14;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -294,6 +295,7 @@ class DatabaseHelper {
         'address',
         'default_currency',
         'tax_number',
+        'tax_rate',
         'commercial_register',
         'logo_path',
         'terms_conditions',
@@ -414,8 +416,10 @@ class DatabaseHelper {
         'id',
         'contract_id',
         'invoice_date',
+        'net_amount',
         'total_amount',
         'tax_amount',
+        'tax_rate',
       ],
       'credit_notes': ['id', 'invoice_id', 'note_date', 'amount'],
       'vouchers': [
@@ -686,6 +690,33 @@ class DatabaseHelper {
         'INTEGER NOT NULL DEFAULT 1',
       );
     }
+    if (oldVersion < 14) {
+      await _ensureColumn(
+        db,
+        'company_info',
+        'tax_rate',
+        'REAL NOT NULL DEFAULT 0 CHECK (tax_rate >= 0 AND tax_rate <= 100)',
+      );
+      await _ensureColumn(
+        db,
+        'tax_invoices',
+        'net_amount',
+        'REAL NOT NULL DEFAULT 0',
+      );
+      await _ensureColumn(
+        db,
+        'tax_invoices',
+        'tax_rate',
+        'REAL CHECK (tax_rate IS NULL OR (tax_rate >= 0 AND tax_rate <= 100))',
+      );
+      // Historical invoices did not retain a rate. Preserve their recorded
+      // gross/tax and derive only the net; leave tax_rate NULL rather than
+      // inventing the setting that was in effect at the time.
+      await db.execute('''
+        UPDATE tax_invoices
+        SET net_amount = ROUND(MAX(total_amount - tax_amount, 0), 2)
+      ''');
+    }
   }
 
   Future<void> _ensureColumn(
@@ -710,6 +741,7 @@ class DatabaseHelper {
         address TEXT,
         default_currency TEXT,
         tax_number TEXT,
+        tax_rate REAL NOT NULL DEFAULT 0 CHECK (tax_rate >= 0 AND tax_rate <= 100),
         commercial_register TEXT,
         logo_path TEXT,
         terms_conditions TEXT,
@@ -930,8 +962,10 @@ class DatabaseHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         contract_id INTEGER,
         invoice_date TEXT NOT NULL,
+        net_amount REAL NOT NULL DEFAULT 0,
         total_amount REAL NOT NULL,
         tax_amount REAL NOT NULL,
+        tax_rate REAL CHECK (tax_rate IS NULL OR (tax_rate >= 0 AND tax_rate <= 100)),
         FOREIGN KEY (contract_id) REFERENCES contracts (id)
       )
     ''');
@@ -1603,6 +1637,16 @@ class DatabaseHelper {
     final db = await instance.database;
     final rows = await db.query('company_info', columns: ['id'], limit: 1);
     final values = Map<String, dynamic>.from(info)..remove('id');
+    if (values.containsKey('tax_rate')) {
+      final rawRate = values['tax_rate'];
+      final rate = rawRate is num
+          ? rawRate.toDouble()
+          : double.tryParse(rawRate?.toString() ?? '') ?? double.nan;
+      if (!InternalTax.isValidRate(rate)) {
+        throw ArgumentError('نسبة الضريبة يجب أن تكون بين 0 و100');
+      }
+      values['tax_rate'] = rate;
+    }
     if (rows.isEmpty) return db.insert('company_info', values);
     final id = info['id'] ?? rows.first['id'];
     return db.update('company_info', values, where: 'id = ?', whereArgs: [id]);
@@ -3412,14 +3456,14 @@ class DatabaseHelper {
     required int contractId,
     required int tenantId,
     required String invoiceDate,
-    required double totalAmount,
+    required double netAmount,
     required double taxAmount,
     required int revenueAccountId,
-    required int taxAccountId,
+    required int? taxAccountId,
   }) async {
     PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
-    if (totalAmount <= 0 ||
-        !_hasCentPrecision(totalAmount) ||
+    if (netAmount <= 0 ||
+        !_hasCentPrecision(netAmount) ||
         !_hasCentPrecision(taxAmount) ||
         taxAmount < 0 ||
         DateTime.tryParse(invoiceDate) == null) {
@@ -3435,6 +3479,32 @@ class DatabaseHelper {
       if (contractRows.isEmpty) {
         throw StateError('العقد المحدد لا يتبع المستأجر المختار');
       }
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['tax_rate'],
+        limit: 1,
+      );
+      final configuredTaxRate = companyRows.isEmpty
+          ? 0.0
+          : (companyRows.first['tax_rate'] as num?)?.toDouble() ?? 0.0;
+      if (!InternalTax.isValidRate(configuredTaxRate)) {
+        throw StateError(
+          'نسبة الضريبة المحفوظة غير صالحة؛ راجع إعدادات المنشأة',
+        );
+      }
+      final calculatedTaxAmount = InternalTax.calculate(
+        netAmount,
+        configuredTaxRate,
+      );
+      if (InternalTax.toMinorUnits(calculatedTaxAmount) !=
+          InternalTax.toMinorUnits(taxAmount)) {
+        throw ArgumentError(
+          'مبلغ الضريبة لا يطابق نسبة المنشأة الحالية؛ أعد تحميل إعدادات الفاتورة',
+        );
+      }
+      if (calculatedTaxAmount > 0 && taxAccountId == null) {
+        throw ArgumentError('اختر حساب ضريبة تفصيليًا قبل إصدار الفاتورة');
+      }
       final duplicates = await txn.query(
         'tax_invoices',
         where:
@@ -3442,8 +3512,8 @@ class DatabaseHelper {
         whereArgs: [
           contractId,
           invoiceDate,
-          totalAmount + taxAmount,
-          taxAmount,
+          netAmount + calculatedTaxAmount,
+          calculatedTaxAmount,
         ],
         limit: 1,
       );
@@ -3465,9 +3535,15 @@ class DatabaseHelper {
         revenueAccountId,
         expectedType: 'Revenue',
       );
-      await _requireLeafAccountTx(txn, taxAccountId, expectedType: 'Liability');
+      if (calculatedTaxAmount > 0) {
+        await _requireLeafAccountTx(
+          txn,
+          taxAccountId!,
+          expectedType: 'Liability',
+        );
+      }
 
-      final grossAmount = totalAmount + taxAmount;
+      final grossAmount = netAmount + calculatedTaxAmount;
       final journalId = await txn.insert('journal_entries', {
         'entry_date': invoiceDate,
         'description': 'إثبات فاتورة ضريبية إيجار',
@@ -3484,29 +3560,31 @@ class DatabaseHelper {
         'journal_entry_id': journalId,
         'account_id': revenueAccountId,
         'debit': 0.0,
-        'credit': totalAmount,
+        'credit': netAmount,
         'description': 'إيراد إيجار',
       });
-      if (taxAmount > 0) {
+      if (calculatedTaxAmount > 0) {
         await txn.insert('journal_lines', {
           'journal_entry_id': journalId,
-          'account_id': taxAccountId,
+          'account_id': taxAccountId!,
           'debit': 0.0,
-          'credit': taxAmount,
+          'credit': calculatedTaxAmount,
           'description': 'ضريبة قيمة مضافة',
         });
       }
       await _updateBalanceTx(txn, tenantAccountId, grossAmount, 0.0);
-      await _updateBalanceTx(txn, revenueAccountId, 0.0, totalAmount);
-      if (taxAmount > 0) {
-        await _updateBalanceTx(txn, taxAccountId, 0.0, taxAmount);
+      await _updateBalanceTx(txn, revenueAccountId, 0.0, netAmount);
+      if (calculatedTaxAmount > 0) {
+        await _updateBalanceTx(txn, taxAccountId!, 0.0, calculatedTaxAmount);
       }
 
       return txn.insert('tax_invoices', {
         'contract_id': contractId,
         'invoice_date': invoiceDate,
+        'net_amount': netAmount,
         'total_amount': grossAmount,
-        'tax_amount': taxAmount,
+        'tax_amount': calculatedTaxAmount,
+        'tax_rate': configuredTaxRate,
       });
     });
   }

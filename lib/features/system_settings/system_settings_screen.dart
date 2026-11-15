@@ -94,6 +94,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   final _addressArController = TextEditingController();
   final _addressEnController = TextEditingController();
   final _taxNumberController = TextEditingController();
+  final _taxRateController = TextEditingController(text: '0');
   final _commercialRegisterController = TextEditingController();
   final _poBoxController = TextEditingController();
   final _telephoneController = TextEditingController();
@@ -137,6 +138,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       _addressArController.text = _companyInfo!.addressAr ?? '';
       _addressEnController.text = _companyInfo!.addressEn ?? '';
       _taxNumberController.text = _companyInfo!.taxNumber ?? '';
+      _taxRateController.text = _companyInfo!.taxRate.toString();
       _commercialRegisterController.text =
           _companyInfo!.commercialRegister ?? '';
       _poBoxController.text = _companyInfo!.poBox ?? '';
@@ -291,6 +293,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
       addressAr: _addressArController.text,
       addressEn: _addressEnController.text,
       taxNumber: _taxNumberController.text,
+      taxRate: double.parse(_taxRateController.text.trim()),
       commercialRegister: _commercialRegisterController.text,
       poBox: _poBoxController.text,
       telephone: _telephoneController.text,
@@ -344,6 +347,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
     _addressArController.dispose();
     _addressEnController.dispose();
     _taxNumberController.dispose();
+    _taxRateController.dispose();
     _commercialRegisterController.dispose();
     _poBoxController.dispose();
     _telephoneController.dispose();
@@ -455,6 +459,30 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _taxRateController,
+              enabled: canEditCompanyInfo,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(
+                labelText: 'نسبة الضريبة الداخلية (%)',
+                border: OutlineInputBorder(),
+                helperText: 'تبدأ من 0% ولا تتجاوز 100%',
+              ),
+              validator: (value) {
+                final rate = double.tryParse((value ?? '').trim());
+                return rate == null || !rate.isFinite || rate < 0 || rate > 100
+                    ? 'أدخل نسبة بين 0 و100'
+                    : null;
+              },
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'تستخدم النسبة لحساب الفواتير داخل النظام فقط، ولا تعني وجود تكامل رسمي أو اعتماد ضريبي إلكتروني.',
+              style: TextStyle(color: Colors.blueGrey.shade700, fontSize: 12),
             ),
             const SizedBox(height: 16),
             Row(

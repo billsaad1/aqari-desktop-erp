@@ -7,11 +7,13 @@ import 'package:app/core/crypto_utils.dart';
 import 'package:app/core/company_logo_storage.dart';
 import 'package:app/core/lease_contract_pdf.dart';
 import 'package:app/core/contract_party_snapshot.dart';
+import 'package:app/core/internal_tax.dart';
 import 'package:app/core/lease_contract_terms.dart';
 import 'package:app/core/permission_policy.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/database/database_integrity_migrations.dart';
+import 'package:app/models/company_info_model.dart';
 import 'package:app/features/general_accounting/chart_of_accounts_screen.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
 import 'package:app/features/tenants_leasing/tenants_screen.dart';
@@ -87,6 +89,27 @@ void main() {
         CryptoUtils.verifyPassword('not-123456', legacyAdminHash),
         isFalse,
       );
+    });
+  });
+
+  group('internal tax calculation', () {
+    test('calculates from the configured percent with cent rounding', () {
+      expect(InternalTax.calculate(100, 15), 15.0);
+      expect(InternalTax.calculate(19.99, 7.5), 1.5);
+      expect(InternalTax.calculate(0.01, 50), 0.01);
+      expect(InternalTax.calculate(100, 0), 0.0);
+    });
+
+    test('rejects invalid tax percentages and preserves company settings', () {
+      expect(() => InternalTax.calculate(100, 100.01), throwsArgumentError);
+      expect(() => InternalTax.calculate(-1, 15), throwsArgumentError);
+
+      final company = CompanyInfo.fromMap({
+        'name_ar': 'شركة اختبار',
+        'tax_rate': 7.5,
+      });
+      expect(company.taxRate, 7.5);
+      expect(company.toMap()['tax_rate'], 7.5);
     });
   });
 
@@ -1713,7 +1736,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        13,
+        14,
       );
       expect(
         (await restored.rawQuery(
@@ -1756,7 +1779,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        13,
+        14,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -2124,6 +2147,10 @@ void main() {
     'posts leasing receipts and invoices atomically and rejects invalid duplicates',
     () async {
       final db = await DatabaseHelper.instance.database;
+      await DatabaseHelper.instance.updateCompanyInfo({
+        'name_ar': 'منشأة اختبار الفاتورة',
+        'tax_rate': 15.0,
+      });
       final ownerId = await db.insert('owners', {'name': 'مالك الاختبار'});
       final propertyId = await db.insert('properties', {
         'name': 'عقار الاختبار',
@@ -2278,7 +2305,7 @@ void main() {
           contractId: contractId,
           tenantId: tenantId,
           invoiceDate: '2026-11-10',
-          totalAmount: 10.0,
+          netAmount: 10.0,
           taxAmount: 1.5,
           revenueAccountId: revenueRootId,
           taxAccountId:
@@ -2416,25 +2443,113 @@ void main() {
         contractId: contractId,
         tenantId: tenantId,
         invoiceDate: '2026-11-10',
-        totalAmount: 100.0,
+        netAmount: 100.0,
         taxAmount: 15.0,
         revenueAccountId: revenueAccount['id'] as int,
         taxAccountId: taxAccountId,
       );
       expect(invoiceId, greaterThan(0));
+      final storedInvoice = (await db.query(
+        'tax_invoices',
+        where: 'id = ?',
+        whereArgs: [invoiceId],
+      )).single;
+      expect(storedInvoice['net_amount'], 100.0);
+      expect(storedInvoice['tax_amount'], 15.0);
+      expect(storedInvoice['total_amount'], 115.0);
+      expect(storedInvoice['tax_rate'], 15.0);
+      final taxJournalEntry = (await db.query(
+        'journal_entries',
+        where: 'entry_date = ? AND description = ?',
+        whereArgs: ['2026-11-10', 'إثبات فاتورة ضريبية إيجار'],
+        orderBy: 'id DESC',
+        limit: 1,
+      )).single;
+      final taxJournalLines = await db.query(
+        'journal_lines',
+        where: 'journal_entry_id = ?',
+        whereArgs: [taxJournalEntry['id']],
+      );
+      expect(taxJournalLines, hasLength(3));
+      expect(
+        taxJournalLines.fold<double>(
+          0,
+          (sum, line) => sum + (line['debit'] as num).toDouble(),
+        ),
+        115.0,
+      );
+      expect(
+        taxJournalLines.fold<double>(
+          0,
+          (sum, line) => sum + (line['credit'] as num).toDouble(),
+        ),
+        115.0,
+      );
 
       await expectLater(
         DatabaseHelper.instance.insertTaxInvoice(
           contractId: contractId,
           tenantId: tenantId,
           invoiceDate: '2026-11-10',
-          totalAmount: 100.0,
+          netAmount: 100.0,
           taxAmount: 15.0,
           revenueAccountId: revenueAccount['id'] as int,
           taxAccountId: taxAccountId,
         ),
         throwsStateError,
       );
+      await expectLater(
+        DatabaseHelper.instance.insertTaxInvoice(
+          contractId: contractId,
+          tenantId: tenantId,
+          invoiceDate: '2026-11-11',
+          netAmount: 100.0,
+          taxAmount: 14.99,
+          revenueAccountId: revenueAccount['id'] as int,
+          taxAccountId: taxAccountId,
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.updateCompanyInfo({'tax_rate': 100.01}),
+        throwsArgumentError,
+      );
+      await DatabaseHelper.instance.updateCompanyInfo({'tax_rate': 0.0});
+      final zeroRateInvoiceId = await DatabaseHelper.instance.insertTaxInvoice(
+        contractId: contractId,
+        tenantId: tenantId,
+        invoiceDate: '2026-11-12',
+        netAmount: 50.0,
+        taxAmount: 0.0,
+        revenueAccountId: revenueAccount['id'] as int,
+        taxAccountId: null,
+      );
+      final zeroRateInvoice = (await db.query(
+        'tax_invoices',
+        where: 'id = ?',
+        whereArgs: [zeroRateInvoiceId],
+      )).single;
+      expect(zeroRateInvoice['tax_rate'], 0.0);
+      expect(zeroRateInvoice['tax_amount'], 0.0);
+      expect(zeroRateInvoice['total_amount'], 50.0);
+      final zeroTaxJournalEntry = (await db.query(
+        'journal_entries',
+        where: 'entry_date = ? AND description = ?',
+        whereArgs: ['2026-11-12', 'إثبات فاتورة ضريبية إيجار'],
+        orderBy: 'id DESC',
+        limit: 1,
+      )).single;
+      final zeroTaxJournalLines = await db.query(
+        'journal_lines',
+        where: 'journal_entry_id = ?',
+        whereArgs: [zeroTaxJournalEntry['id']],
+      );
+      expect(zeroTaxJournalLines, hasLength(2));
+      expect(
+        zeroTaxJournalLines.any((line) => line['account_id'] == taxAccountId),
+        isFalse,
+      );
+      await DatabaseHelper.instance.updateCompanyInfo({'tax_rate': 15.0});
 
       await expectLater(
         DatabaseHelper.instance.cancelContract(contractId),
@@ -2870,7 +2985,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        13,
+        14,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -3313,6 +3428,48 @@ void main() {
     await tester.pump();
     provider.dispose();
   }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test(
+    'v13 migration preserves old invoice totals without inventing its tax rate',
+    () async {
+      final helper = DatabaseHelper.instance;
+      final db = await helper.database;
+      await db.execute('ALTER TABLE company_info DROP COLUMN tax_rate');
+      await db.execute('ALTER TABLE tax_invoices DROP COLUMN tax_rate');
+      await db.execute('ALTER TABLE tax_invoices DROP COLUMN net_amount');
+      final companyId = await db.insert('company_info', {
+        'name_ar': 'منشأة قديمة بلا نسبة محفوظة',
+      });
+      final invoiceId = await db.insert('tax_invoices', {
+        'invoice_date': '2025-05-10',
+        'total_amount': 115.0,
+        'tax_amount': 15.0,
+      });
+      await db.execute('PRAGMA user_version = 13');
+      await helper.close();
+
+      final upgraded = await helper.database;
+      expect(
+        (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
+        14,
+      );
+      final company = (await upgraded.query(
+        'company_info',
+        where: 'id = ?',
+        whereArgs: [companyId],
+      )).single;
+      expect(company['tax_rate'], 0.0);
+      final invoice = (await upgraded.query(
+        'tax_invoices',
+        where: 'id = ?',
+        whereArgs: [invoiceId],
+      )).single;
+      expect(invoice['net_amount'], 100.0);
+      expect(invoice['tax_amount'], 15.0);
+      expect(invoice['total_amount'], 115.0);
+      expect(invoice['tax_rate'], isNull);
+    },
+  );
 }
 
 class _TestAccountingProvider extends AccountingProvider {
