@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/erp_data_table.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/property_provider.dart';
@@ -282,7 +283,12 @@ class _OwnersScreenState extends State<OwnersScreen> {
                   ),
                   const SizedBox(width: 10),
                   FilledButton.icon(
-                    onPressed: provider.isLoading
+                    onPressed:
+                        provider.isLoading ||
+                            !PermissionRuntime.allows(
+                              'properties',
+                              AppPermissionAction.add,
+                            )
                         ? null
                         : () => _showOwnerDialog(context, provider),
                     icon: const Icon(Icons.person_add_alt_1),
@@ -359,11 +365,17 @@ class _OwnersScreenState extends State<OwnersScreen> {
                                             fontWeight: FontWeight.w600,
                                           ),
                                         ),
-                                        onTap: () => _showOwnerDialog(
-                                          context,
-                                          provider,
-                                          owner: owner,
-                                        ),
+                                        onTap:
+                                            PermissionRuntime.allows(
+                                              'properties',
+                                              AppPermissionAction.edit,
+                                            )
+                                            ? () => _showOwnerDialog(
+                                                context,
+                                                provider,
+                                                owner: owner,
+                                              )
+                                            : null,
                                       ),
                                       DataCell(
                                         Text(
@@ -384,11 +396,17 @@ class _OwnersScreenState extends State<OwnersScreen> {
                                       DataCell(
                                         IconButton(
                                           tooltip: 'تعديل بيانات المالك',
-                                          onPressed: () => _showOwnerDialog(
-                                            context,
-                                            provider,
-                                            owner: owner,
-                                          ),
+                                          onPressed:
+                                              PermissionRuntime.allows(
+                                                'properties',
+                                                AppPermissionAction.edit,
+                                              )
+                                              ? () => _showOwnerDialog(
+                                                  context,
+                                                  provider,
+                                                  owner: owner,
+                                                )
+                                              : null,
                                           icon: const Icon(Icons.edit_outlined),
                                         ),
                                       ),

@@ -4,6 +4,7 @@ import '../../providers/accounting_provider.dart';
 import 'package:intl/intl.dart';
 import '../../core/print_utils.dart';
 import '../../core/pdf_preview_dialog.dart';
+import '../../core/permission_policy.dart';
 
 class GeneralVoucherScreen extends StatefulWidget {
   final String voucherType; // 'قبض عام' or 'صرف عام'
@@ -138,6 +139,7 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
+          permissionModule: 'accounting',
         );
       }
     } catch (e) {
@@ -334,7 +336,12 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                       children: [
                         Expanded(
                           child: ElevatedButton.icon(
-                            onPressed: _isProcessing
+                            onPressed:
+                                _isProcessing ||
+                                    !PermissionRuntime.allows(
+                                      'accounting',
+                                      AppPermissionAction.post,
+                                    )
                                 ? null
                                 : () => _saveVoucher(saveAsPdf: false),
                             icon: const Icon(Icons.print),
@@ -342,22 +349,39 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                               padding: const EdgeInsets.all(16),
                               backgroundColor: primaryColor,
                             ),
-                            label: const Text('حفظ وترحيل وطباعة'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _isProcessing
-                                ? null
-                                : () => _saveVoucher(saveAsPdf: true),
-                            icon: const Icon(Icons.picture_as_pdf),
-                            style: OutlinedButton.styleFrom(
-                              padding: const EdgeInsets.all(16),
+                            label: Text(
+                              PermissionRuntime.allows(
+                                    'accounting',
+                                    AppPermissionAction.print,
+                                  )
+                                  ? 'حفظ وترحيل وطباعة'
+                                  : 'حفظ وترحيل ومعاينة',
                             ),
-                            label: const Text('حفظ السند PDF'),
                           ),
                         ),
+                        if (PermissionRuntime.allows(
+                          'accounting',
+                          AppPermissionAction.print,
+                        )) ...[
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed:
+                                  _isProcessing ||
+                                      !PermissionRuntime.allows(
+                                        'accounting',
+                                        AppPermissionAction.post,
+                                      )
+                                  ? null
+                                  : () => _saveVoucher(saveAsPdf: true),
+                              icon: const Icon(Icons.picture_as_pdf),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.all(16),
+                              ),
+                              label: const Text('حفظ السند PDF'),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ],

@@ -4,17 +4,31 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
+import '../core/permission_policy.dart';
 
 class SmsProvider with ChangeNotifier {
   Map<String, dynamic>? _settings;
   List<Map<String, dynamic>> _logs = [];
   bool _isLoading = false;
   String? _errorMessage;
+  int _loadGeneration = 0;
+  int? _authorizedUserId;
+  bool _hadSmsView = false;
 
   Map<String, dynamic>? get settings => _settings;
   List<Map<String, dynamic>> get logs => _logs;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
+
+  /// Called by the app-level auth proxy. SMS logs can contain personal data,
+  /// so discard them whenever the session changes or loses sms.view.
+  void syncAuthorization({required int? userId, required bool canViewSms}) {
+    if (_authorizedUserId != userId || (_hadSmsView && !canViewSms)) {
+      clearSensitiveData(notify: false);
+    }
+    _authorizedUserId = userId;
+    _hadSmsView = canViewSms;
+  }
 
   bool _isSecureEndpoint(Uri uri) =>
       uri.host.isNotEmpty &&
@@ -32,19 +46,45 @@ class SmsProvider with ChangeNotifier {
     return 'تعذر إرسال الرسالة؛ تحقق من إعداد المزود والاتصال';
   }
 
+  Map<String, dynamic>? _publicSettings(Map<String, dynamic>? settings) {
+    if (settings == null) return null;
+    final safeSettings = Map<String, dynamic>.from(settings);
+    safeSettings.remove('api_key');
+    return safeSettings;
+  }
+
   Future<void> loadSmsData() async {
+    final generation = ++_loadGeneration;
     _isLoading = true;
     notifyListeners();
     try {
-      _settings = await DatabaseHelper.instance.getSmsSettings();
-      _logs = await DatabaseHelper.instance.getAllSmsLogs();
+      final settings = await DatabaseHelper.instance
+          .getSmsSettingsForDashboard();
+      final logs = await DatabaseHelper.instance.getAllSmsLogs();
+      if (generation != _loadGeneration) return;
+      _settings = _publicSettings(settings);
+      _logs = logs;
       _errorMessage = null;
     } catch (e) {
+      if (generation != _loadGeneration) return;
+      _settings = null;
+      _logs = [];
       _errorMessage = 'تعذر تحميل إعدادات الرسائل وسجلها: $e';
     } finally {
-      _isLoading = false;
-      notifyListeners();
+      if (generation == _loadGeneration) {
+        _isLoading = false;
+        notifyListeners();
+      }
     }
+  }
+
+  void clearSensitiveData({bool notify = true}) {
+    _loadGeneration++;
+    _settings = null;
+    _logs = [];
+    _isLoading = false;
+    _errorMessage = null;
+    if (notify) notifyListeners();
   }
 
   Future<void> saveSettings(Map<String, dynamic> newSettings) async {
@@ -58,13 +98,19 @@ class SmsProvider with ChangeNotifier {
       throw ArgumentError('اسم المرسل مطلوب');
     }
     await DatabaseHelper.instance.saveSmsSettings(newSettings);
-    await loadSmsData();
+    _settings = _publicSettings(newSettings);
+    if (PermissionRuntime.allows('sms', AppPermissionAction.view)) {
+      await loadSmsData();
+    } else {
+      notifyListeners();
+    }
   }
 
   Future<void> sendMessage({
     required String recipientNumber,
     required String messageText,
   }) async {
+    PermissionRuntime.require('sms', AppPermissionAction.add);
     if (recipientNumber.trim().isEmpty || messageText.trim().isEmpty) {
       throw ArgumentError('رقم الجوال ونص الرسالة مطلوبان');
     }
@@ -78,9 +124,11 @@ class SmsProvider with ChangeNotifier {
     final now = DateTime.now().toIso8601String();
 
     try {
-      final settings =
-          _settings ?? await DatabaseHelper.instance.getSmsSettings();
+      // Fetch the credential for this request only; never cache it in provider
+      // state that survives screen changes or logout.
+      final settings = await DatabaseHelper.instance.getSmsSettingsForSending();
       if (settings == null) throw StateError('أكمل إعداد مزود الرسائل أولاً');
+      PermissionRuntime.require('sms', AppPermissionAction.add);
       final uri = Uri.tryParse(settings['api_url']?.toString() ?? '');
       if (uri == null || !_isSecureEndpoint(uri)) {
         throw StateError('عنوان مزود الرسائل غير صالح');
@@ -132,10 +180,12 @@ class SmsProvider with ChangeNotifier {
         _errorMessage =
             '${_errorMessage ?? 'تم إرسال الطلب'}؛ وتعذر حفظ سجل الرسالة: $logError';
       }
-      try {
-        _logs = await DatabaseHelper.instance.getAllSmsLogs();
-      } catch (_) {
-        // Keep the prior in-memory log list if storage is unavailable.
+      if (PermissionRuntime.allows('sms', AppPermissionAction.view)) {
+        try {
+          _logs = await DatabaseHelper.instance.getAllSmsLogs();
+        } catch (_) {
+          // Keep the current in-memory log list if storage is unavailable.
+        }
       }
       _isLoading = false;
       notifyListeners();

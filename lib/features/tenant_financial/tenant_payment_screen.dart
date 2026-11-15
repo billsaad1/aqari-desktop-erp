@@ -6,6 +6,7 @@ import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
 import '../../core/print_utils.dart';
 import '../../core/pdf_preview_dialog.dart';
+import '../../core/permission_policy.dart';
 
 class TenantPaymentScreen extends StatefulWidget {
   const TenantPaymentScreen({super.key});
@@ -134,6 +135,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
+          permissionModule: 'tenant_financial',
         );
       }
     } catch (e) {
@@ -297,7 +299,12 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
                       children: [
                         Expanded(
                           child: ElevatedButton.icon(
-                            onPressed: _isProcessing
+                            onPressed:
+                                _isProcessing ||
+                                    !PermissionRuntime.allows(
+                                      'tenant_financial',
+                                      AppPermissionAction.post,
+                                    )
                                 ? null
                                 : () => _processPayment(saveAsPdf: false),
                             icon: const Icon(Icons.print),
@@ -305,22 +312,39 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
                               backgroundColor: Colors.red,
                               padding: const EdgeInsets.all(16),
                             ),
-                            label: const Text('حفظ وترحيل وطباعة'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _isProcessing
-                                ? null
-                                : () => _processPayment(saveAsPdf: true),
-                            icon: const Icon(Icons.picture_as_pdf),
-                            style: OutlinedButton.styleFrom(
-                              padding: const EdgeInsets.all(16),
+                            label: Text(
+                              PermissionRuntime.allows(
+                                    'tenant_financial',
+                                    AppPermissionAction.print,
+                                  )
+                                  ? 'حفظ وترحيل وطباعة'
+                                  : 'حفظ وترحيل ومعاينة',
                             ),
-                            label: const Text('حفظ السند PDF'),
                           ),
                         ),
+                        if (PermissionRuntime.allows(
+                          'tenant_financial',
+                          AppPermissionAction.print,
+                        )) ...[
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed:
+                                  _isProcessing ||
+                                      !PermissionRuntime.allows(
+                                        'tenant_financial',
+                                        AppPermissionAction.post,
+                                      )
+                                  ? null
+                                  : () => _processPayment(saveAsPdf: true),
+                              icon: const Icon(Icons.picture_as_pdf),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.all(16),
+                              ),
+                              label: const Text('حفظ السند PDF'),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ],

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 
@@ -7,12 +8,18 @@ import 'package:app/core/company_logo_storage.dart';
 import 'package:app/core/lease_contract_pdf.dart';
 import 'package:app/core/contract_party_snapshot.dart';
 import 'package:app/core/lease_contract_terms.dart';
+import 'package:app/core/permission_policy.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/database/database_integrity_migrations.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
 import 'package:app/features/tenants_leasing/tenants_screen.dart';
+import 'package:app/providers/auth_provider.dart';
+import 'package:app/providers/accounting_provider.dart';
 import 'package:app/providers/leasing_provider.dart';
+import 'package:app/providers/property_provider.dart';
+import 'package:app/providers/reports_provider.dart';
+import 'package:app/providers/sms_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -27,6 +34,11 @@ void main() {
   const testDocuments = '/tmp/aqari_erp_flutter_test';
 
   setUpAll(() async {
+    PermissionRuntime.activate(
+      userId: 1,
+      role: 'SuperAdmin',
+      permissionRows: const [],
+    );
     final staleTestDirectory = Directory(testDocuments);
     if (await staleTestDirectory.exists()) {
       await staleTestDirectory.delete(recursive: true);
@@ -41,6 +53,7 @@ void main() {
   });
 
   tearDownAll(() async {
+    PermissionRuntime.clear();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pathProvider, null);
     await DatabaseHelper.instance.close();
@@ -74,6 +87,1092 @@ void main() {
         isFalse,
       );
     });
+  });
+
+  group('user permissions', () {
+    test(
+      'explicit screen permissions override role defaults only for that screen',
+      () {
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'Accountant',
+          permissionRows: [
+            {
+              'screen_name': 'properties',
+              'can_view': 1,
+              'can_add': 0,
+              'can_edit': 1,
+              'can_delete': 0,
+              'can_print': 0,
+              'can_post': 0,
+            },
+          ],
+        );
+        expect(
+          PermissionRuntime.allows('properties', AppPermissionAction.view),
+          isTrue,
+        );
+        expect(
+          PermissionRuntime.allows('properties', AppPermissionAction.add),
+          isFalse,
+        );
+        expect(
+          PermissionRuntime.allows('properties', AppPermissionAction.edit),
+          isTrue,
+        );
+        expect(
+          PermissionRuntime.allows('accounting', AppPermissionAction.view),
+          isTrue,
+        );
+        expect(
+          PermissionRuntime.allows('system_settings', AppPermissionAction.view),
+          isFalse,
+        );
+        PermissionRuntime.activate(
+          userId: 1,
+          role: 'SuperAdmin',
+          permissionRows: const [],
+        );
+      },
+    );
+
+    test(
+      'legacy roles receive documented defaults for each permission action',
+      () {
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'Accountant',
+          permissionRows: const [],
+        );
+        expect(
+          PermissionRuntime.allows('accounting', AppPermissionAction.post),
+          isTrue,
+        );
+        expect(
+          PermissionRuntime.allows('accounting', AppPermissionAction.delete),
+          isFalse,
+        );
+        expect(
+          PermissionRuntime.allows('reports', AppPermissionAction.print),
+          isTrue,
+        );
+
+        PermissionRuntime.activate(
+          userId: 43,
+          role: 'DataEntry',
+          permissionRows: const [],
+        );
+        expect(
+          PermissionRuntime.allows('properties', AppPermissionAction.add),
+          isTrue,
+        );
+        expect(
+          PermissionRuntime.allows(
+            'tenant_financial',
+            AppPermissionAction.view,
+          ),
+          isFalse,
+        );
+        expect(
+          PermissionRuntime.allows('leasing', AppPermissionAction.post),
+          isFalse,
+        );
+        PermissionRuntime.activate(
+          userId: 1,
+          role: 'SuperAdmin',
+          permissionRows: const [],
+        );
+      },
+    );
+
+    test(
+      'SMS send permission is checked before any external request',
+      () async {
+        final provider = SmsProvider();
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'DataEntry',
+          permissionRows: const [],
+        );
+        try {
+          await expectLater(
+            provider.sendMessage(
+              recipientNumber: '+15555550123',
+              messageText: 'اختبار صلاحية فقط',
+            ),
+            throwsA(isA<StateError>()),
+          );
+          expect(provider.logs, isEmpty);
+        } finally {
+          provider.dispose();
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+        }
+      },
+    );
+
+    test(
+      'SMS credentials are editor-only and cleared with the session',
+      () async {
+        final db = await DatabaseHelper.instance.database;
+        final provider = SmsProvider();
+        await db.delete('sms_logs');
+        await db.delete('sms_settings');
+        await db.insert('sms_settings', {
+          'api_url': 'https://sms.example.test/send',
+          'api_key': 'test-secret-token',
+          'sender_name': 'Aqari',
+          'reminder_template': 'Reminder',
+          'receipt_template': 'Receipt',
+        });
+        await db.insert('sms_logs', {
+          'recipient_number': '+15555550123',
+          'message_text': 'Sensitive test log',
+          'sent_at': DateTime.now().toIso8601String(),
+          'status': 'Accepted',
+        });
+
+        try {
+          provider.syncAuthorization(userId: 1, canViewSms: true);
+          await provider.loadSmsData();
+          expect(provider.settings?.containsKey('api_key'), isFalse);
+          expect(provider.logs, hasLength(1));
+
+          await provider.saveSettings({
+            'api_url': 'https://sms.example.test/send',
+            'api_key': 'test-secret-token',
+            'sender_name': 'Aqari Updated',
+            'reminder_template': 'Reminder',
+            'receipt_template': 'Receipt',
+          });
+          expect(provider.settings?.containsKey('api_key'), isFalse);
+          expect(
+            (await DatabaseHelper.instance
+                .getSmsSettingsForEditing())?['api_key'],
+            'test-secret-token',
+          );
+
+          PermissionRuntime.activate(
+            userId: 44,
+            role: 'DataEntry',
+            permissionRows: [
+              {
+                'screen_name': 'sms',
+                'can_view': 1,
+                'can_add': 0,
+                'can_edit': 0,
+                'can_delete': 0,
+                'can_print': 0,
+                'can_post': 0,
+              },
+            ],
+          );
+          await expectLater(
+            DatabaseHelper.instance.getSmsSettingsForEditing(),
+            throwsA(isA<StateError>()),
+          );
+
+          provider.syncAuthorization(userId: null, canViewSms: false);
+          expect(provider.settings, isNull);
+          expect(provider.logs, isEmpty);
+        } finally {
+          provider.dispose();
+          await db.delete('sms_logs');
+          await db.delete('sms_settings');
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+        }
+      },
+    );
+
+    test('clearing report data invalidates in-flight report queries', () async {
+      final reports = ReportsProvider();
+      try {
+        final search = reports.search('no matching record expected');
+        reports.clearReportResults(notify: false);
+        await search;
+        expect(reports.searchResults, isEmpty);
+
+        final occupancy = reports.loadOccupancyStats();
+        reports.clearReportResults(notify: false);
+        await occupancy;
+        expect(reports.occupancyStats, isEmpty);
+
+        final statement = reports.loadAccountStatement(
+          1,
+          '2026-01-01',
+          '2026-12-31',
+        );
+        reports.clearReportResults(notify: false);
+        await statement;
+        expect(reports.accountStatement, isEmpty);
+        expect(reports.accountOpeningBalance, 0);
+      } finally {
+        reports.dispose();
+      }
+    });
+
+    test(
+      'stale full property load cannot replace the leasing-only projection',
+      () async {
+        final pendingFullLoad = Completer<PropertyDataSnapshot>();
+        final provider = PropertyProvider(
+          fullDataLoader: () => pendingFullLoad.future,
+          leasingDataLoader: () async => [
+            {'id': 81, 'name': 'اسم العقار فقط'},
+          ],
+        );
+        try {
+          final fullLoad = provider.loadInitialData();
+          await provider.loadForLeasing();
+          pendingFullLoad.complete(
+            PropertyDataSnapshot(
+              owners: [
+                {'id': 4, 'name': 'بيانات مالك خاصة'},
+              ],
+              properties: [
+                {
+                  'id': 81,
+                  'name': 'اسم العقار فقط',
+                  'owner_name': 'بيانات مالك خاصة',
+                },
+              ],
+              cities: const [],
+              propertyTypes: const [],
+              unitTypes: const [],
+              costCenters: const [],
+            ),
+          );
+          await fullLoad;
+
+          expect(provider.owners, isEmpty);
+          expect(provider.properties, [
+            {'id': 81, 'name': 'اسم العقار فقط'},
+          ]);
+          expect(provider.isLoading, isFalse);
+        } finally {
+          provider.dispose();
+        }
+      },
+    );
+
+    test(
+      'least-privilege roles cannot read unrelated records or account balances',
+      () async {
+        final db = await DatabaseHelper.instance.database;
+        final accountId = await db.insert('accounts', {
+          'code': 'PERM-TEST-${DateTime.now().microsecondsSinceEpoch}',
+          'name': 'حساب اختبار صلاحيات',
+          'account_type': 'Asset',
+          'balance': 98765.43,
+        });
+        final suffix = DateTime.now().microsecondsSinceEpoch;
+        final ownerName = 'مالك اختبار $suffix';
+        await DatabaseHelper.instance.insertOwnerWithAccount({
+          'name': ownerName,
+          'identity_number': 'OWNER-ID-$suffix',
+          'mobile': '0550000000',
+          'iban': 'SA0000000000000000000000',
+          'commission_rate': 0,
+        });
+        final owner = (await db.query(
+          'owners',
+          where: 'name = ?',
+          whereArgs: [ownerName],
+          limit: 1,
+        )).single;
+        final ownerId = owner['id'] as int;
+        final ownerAccountId = owner['account_id'] as int;
+        final propertyName = 'عقار اختبار $suffix';
+        final propertyId = await DatabaseHelper.instance.insertProperty({
+          'name': propertyName,
+          'owner_id': ownerId,
+        });
+        await DatabaseHelper.instance.insertUnit({
+          'property_id': propertyId,
+          'unit_number': 'PERM-$suffix',
+          'default_rent': 100,
+          'default_rent_period': 'monthly',
+        });
+        final accountingProvider = AccountingProvider();
+        final propertyProvider = PropertyProvider();
+        await accountingProvider.loadAccounts();
+        expect(
+          accountingProvider.accounts.any(
+            (account) =>
+                account['id'] == accountId && account.containsKey('balance'),
+          ),
+          isTrue,
+        );
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'DataEntry',
+          permissionRows: [
+            {
+              'screen_name': 'sms',
+              'can_view': 1,
+              'can_add': 1,
+              'can_edit': 0,
+              'can_delete': 0,
+              'can_print': 0,
+              'can_post': 0,
+            },
+            for (final module in const [
+              'leasing',
+              'tenant_financial',
+              'properties',
+              'accounting',
+              'lookups',
+              'reports',
+              'system_services',
+            ])
+              {
+                'screen_name': module,
+                'can_view': 0,
+                'can_add': 0,
+                'can_edit': 0,
+                'can_delete': 0,
+                'can_print': 0,
+                'can_post': 0,
+              },
+          ],
+        );
+        try {
+          await expectLater(
+            DatabaseHelper.instance.getAllTenants(),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getAllContracts(),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getDueInstallments(3),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getAllOwners(),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getProperties(),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getUnitsForProperty(1),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getLookupData('users'),
+            throwsArgumentError,
+          );
+          await expectLater(
+            DatabaseHelper.instance.insertLookupData('accounts', const {}),
+            throwsArgumentError,
+          );
+          await expectLater(
+            DatabaseHelper.instance.getLookupData('cost_centers'),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getAllAccounts(),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getAccountById(accountId),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.recordAuthenticationAudit(
+              expectedUserId: 1,
+              isLogin: true,
+            ),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getAuthenticationRecordByUsername('admin'),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getUserPermissionsForAuthentication(1),
+            throwsA(isA<StateError>()),
+          );
+
+          PermissionRuntime.activate(
+            userId: 46,
+            role: 'DataEntry',
+            permissionRows: [
+              {
+                'screen_name': 'reports',
+                'can_view': 1,
+                'can_add': 0,
+                'can_edit': 0,
+                'can_delete': 0,
+                'can_print': 1,
+                'can_post': 0,
+              },
+              for (final module in const [
+                'dashboard',
+                'system_settings',
+                'lookups',
+                'properties',
+                'leasing',
+                'tenant_financial',
+                'accounting',
+                'sms',
+                'system_services',
+                'voucher_history',
+              ])
+                {
+                  'screen_name': module,
+                  'can_view': 0,
+                  'can_add': 0,
+                  'can_edit': 0,
+                  'can_delete': 0,
+                  'can_print': 0,
+                  'can_post': 0,
+                },
+            ],
+          );
+          final reportAccounts = await DatabaseHelper.instance.getAllAccounts();
+          expect(
+            reportAccounts.any((account) => account['id'] == accountId),
+            isTrue,
+          );
+          expect(
+            reportAccounts.every((account) => !account.containsKey('balance')),
+            isTrue,
+          );
+          expect(
+            (await DatabaseHelper.instance.getAccountById(
+              accountId,
+            ))!.containsKey('balance'),
+            isFalse,
+          );
+          expect(
+            await DatabaseHelper.instance.getAccountOpeningBalance(
+              accountId,
+              '2000-01-01',
+            ),
+            0,
+          );
+          expect(
+            await DatabaseHelper.instance.getAccountStatement(
+              accountId,
+              '2000-01-01',
+              '2100-01-01',
+            ),
+            isEmpty,
+          );
+
+          PermissionRuntime.activate(
+            userId: 44,
+            role: 'DataEntry',
+            permissionRows: [
+              {
+                'screen_name': 'leasing',
+                'can_view': 1,
+                'can_add': 0,
+                'can_edit': 0,
+                'can_delete': 0,
+                'can_print': 0,
+                'can_post': 0,
+              },
+              for (final module in const [
+                'properties',
+                'tenant_financial',
+                'accounting',
+                'lookups',
+                'reports',
+                'system_services',
+                'sms',
+              ])
+                {
+                  'screen_name': module,
+                  'can_view': 0,
+                  'can_add': 0,
+                  'can_edit': 0,
+                  'can_delete': 0,
+                  'can_print': 0,
+                  'can_post': 0,
+                },
+            ],
+          );
+          final leasingProperties = await DatabaseHelper.instance
+              .getPropertiesForLeasing();
+          await propertyProvider.loadForLeasing();
+          final leasingProperty = leasingProperties.singleWhere(
+            (item) => item['id'] == propertyId,
+          );
+          expect(leasingProperty.keys.toSet(), {'id', 'name'});
+          expect(leasingProperty['name'], propertyName);
+          expect(propertyProvider.errorMessage, isNull);
+          expect(propertyProvider.owners, isEmpty);
+          expect(propertyProvider.properties, hasLength(1));
+          expect(propertyProvider.properties.single.keys.toSet(), {
+            'id',
+            'name',
+          });
+          await expectLater(
+            DatabaseHelper.instance.getAllOwners(),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getProperties(),
+            throwsA(isA<StateError>()),
+          );
+          await expectLater(
+            DatabaseHelper.instance.getUnitsForProperty(propertyId),
+            throwsA(isA<StateError>()),
+          );
+
+          PermissionRuntime.activate(
+            userId: 43,
+            role: 'DataEntry',
+            permissionRows: [
+              {
+                'screen_name': 'tenant_financial',
+                'can_view': 1,
+                'can_add': 0,
+                'can_edit': 0,
+                'can_delete': 0,
+                'can_print': 0,
+                'can_post': 0,
+              },
+              for (final module in const [
+                'accounting',
+                'leasing',
+                'reports',
+                'system_services',
+                'lookups',
+                'properties',
+                'sms',
+              ])
+                {
+                  'screen_name': module,
+                  'can_view': 0,
+                  'can_add': 0,
+                  'can_edit': 0,
+                  'can_delete': 0,
+                  'can_print': 0,
+                  'can_post': 0,
+                },
+            ],
+          );
+          final financialAccounts = await DatabaseHelper.instance
+              .getAllAccounts();
+          await accountingProvider.loadAccounts();
+          expect(
+            financialAccounts.any((account) => account['id'] == accountId),
+            isTrue,
+          );
+          expect(
+            financialAccounts.every(
+              (account) => !account.containsKey('balance'),
+            ),
+            isTrue,
+          );
+          expect(
+            (await DatabaseHelper.instance.getAccountById(
+              accountId,
+            ))!.containsKey('balance'),
+            isFalse,
+          );
+          expect(
+            accountingProvider.accounts.every(
+              (account) => !account.containsKey('balance'),
+            ),
+            isTrue,
+          );
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          await db.delete(
+            'units',
+            where: 'property_id = ?',
+            whereArgs: [propertyId],
+          );
+          await db.delete(
+            'properties',
+            where: 'id = ?',
+            whereArgs: [propertyId],
+          );
+          await db.delete('owners', where: 'id = ?', whereArgs: [ownerId]);
+          await db.delete(
+            'accounts',
+            where: 'id = ?',
+            whereArgs: [ownerAccountId],
+          );
+          await db.delete('accounts', where: 'id = ?', whereArgs: [accountId]);
+          accountingProvider.dispose();
+          propertyProvider.dispose();
+        }
+      },
+    );
+
+    test(
+      'view-only settings permission cannot export a database backup',
+      () async {
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'Admin',
+          permissionRows: [
+            {
+              'screen_name': 'system_settings',
+              'can_view': 1,
+              'can_add': 0,
+              'can_edit': 0,
+              'can_delete': 0,
+              'can_print': 0,
+              'can_post': 0,
+            },
+          ],
+        );
+        try {
+          expect(
+            PermissionRuntime.allows(
+              'system_settings',
+              AppPermissionAction.view,
+            ),
+            isTrue,
+          );
+          expect(
+            PermissionRuntime.allows(
+              'system_settings',
+              AppPermissionAction.edit,
+            ),
+            isFalse,
+          );
+          await expectLater(
+            DatabaseHelper.instance.backupToFile('/tmp/aqari-denied-backup.db'),
+            throwsA(isA<StateError>()),
+          );
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+        }
+      },
+    );
+
+    test(
+      'permission rows save atomically and can be cleared back to role defaults',
+      () async {
+        final username =
+            'permission_test_${DateTime.now().microsecondsSinceEpoch}';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'مستخدم اختبار الصلاحيات',
+          'password_hash': CryptoUtils.hashPassword('Test-password-1234'),
+          'role': 'DataEntry',
+        });
+        try {
+          final savedUser = (await DatabaseHelper.instance.getAllUsers())
+              .singleWhere((user) => user['id'] == userId);
+          expect(savedUser['must_change_password'], 1);
+          await expectLater(
+            DatabaseHelper.instance.replaceUserPermissions(userId, [
+              {
+                'screen_name': 'accounting',
+                'can_view': false,
+                'can_add': false,
+                'can_edit': false,
+                'can_delete': false,
+                'can_print': true,
+                'can_post': false,
+              },
+            ]),
+            throwsA(isA<ArgumentError>()),
+          );
+          await DatabaseHelper.instance.replaceUserPermissions(userId, [
+            {
+              'screen_name': 'accounting',
+              'can_view': true,
+              'can_add': false,
+              'can_edit': false,
+              'can_delete': false,
+              'can_print': true,
+              'can_post': false,
+            },
+          ]);
+          final saved = await DatabaseHelper.instance.getUserPermissions(
+            userId,
+          );
+          expect(saved, hasLength(1));
+          expect(saved.single['screen_name'], 'accounting');
+          expect(saved.single['can_view'], 1);
+          expect(saved.single['can_print'], 1);
+
+          await DatabaseHelper.instance.replaceUserPermissions(userId, []);
+          expect(
+            await DatabaseHelper.instance.getUserPermissions(userId),
+            isEmpty,
+          );
+        } finally {
+          await DatabaseHelper.instance.deleteUser(userId);
+        }
+      },
+    );
+
+    test(
+      'login loads custom permissions and logout clears the runtime session',
+      () async {
+        final username =
+            'permission_login_${DateTime.now().microsecondsSinceEpoch}';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'مستخدم جلسة اختبار',
+          'password_hash': CryptoUtils.hashPassword('Test-password-1234'),
+          'role': 'DataEntry',
+        });
+        final auth = AuthProvider();
+        try {
+          await DatabaseHelper.instance.replaceUserPermissions(userId, [
+            {
+              'screen_name': 'accounting',
+              'can_view': true,
+              'can_add': false,
+              'can_edit': false,
+              'can_delete': false,
+              'can_print': true,
+              'can_post': false,
+            },
+          ]);
+          expect(await auth.login(username, 'Test-password-1234'), isTrue);
+          expect(auth.currentUser?.mustChangePassword, isTrue);
+          expect(
+            auth.currentUser?.toMap().containsKey('password_hash'),
+            isFalse,
+          );
+          expect(auth.canAccessScreen('accounting'), isTrue);
+          expect(
+            auth.canPerform('accounting', AppPermissionAction.post),
+            isFalse,
+          );
+          final db = await DatabaseHelper.instance.database;
+          await db.update(
+            'user_permissions',
+            {'can_view': 0, 'can_print': 0},
+            where: 'user_id = ? AND screen_name = ?',
+            whereArgs: [userId, 'accounting'],
+          );
+          await auth.refreshCurrentUserPermissions();
+          expect(auth.canAccessScreen('accounting'), isFalse);
+          final pendingRefresh = auth.refreshCurrentUserPermissions();
+          await auth.logout();
+          await pendingRefresh;
+          expect(PermissionRuntime.hasSession, isFalse);
+          expect(auth.canAccessScreen('accounting'), isFalse);
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          final db = await DatabaseHelper.instance.database;
+          await db.delete(
+            'audit_logs',
+            where: 'user_id = ?',
+            whereArgs: [userId],
+          );
+          await DatabaseHelper.instance.deleteUser(userId);
+          auth.dispose();
+        }
+      },
+    );
+
+    test('a stale login cannot replace a newer session', () async {
+      final suffix = DateTime.now().microsecondsSinceEpoch;
+      final firstName = 'older_login_$suffix';
+      final secondName = 'newer_login_$suffix';
+      final password = 'Test-password-1234';
+      final firstId = await DatabaseHelper.instance.insertUser({
+        'username': firstName,
+        'full_name': 'محاولة الدخول الأقدم',
+        'password_hash': CryptoUtils.hashPassword(password),
+        'role': 'DataEntry',
+      });
+      final secondId = await DatabaseHelper.instance.insertUser({
+        'username': secondName,
+        'full_name': 'محاولة الدخول الأحدث',
+        'password_hash': CryptoUtils.hashPassword(password),
+        'role': 'Admin',
+      });
+      final auth = AuthProvider();
+      try {
+        final olderAttempt = auth.login(firstName, password);
+        final newerAttempt = auth.login(secondName, password);
+        expect(await newerAttempt, isTrue);
+        expect(await olderAttempt, isFalse);
+        expect(auth.currentUser?.username, secondName);
+        expect(PermissionRuntime.userId, secondId);
+      } finally {
+        await auth.logout();
+        auth.dispose();
+        PermissionRuntime.activate(
+          userId: 1,
+          role: 'SuperAdmin',
+          permissionRows: const [],
+        );
+        final db = await DatabaseHelper.instance.database;
+        await db.delete(
+          'audit_logs',
+          where: 'user_id IN (?, ?)',
+          whereArgs: [firstId, secondId],
+        );
+        await DatabaseHelper.instance.deleteUser(firstId);
+        await DatabaseHelper.instance.deleteUser(secondId);
+      }
+    });
+
+    test(
+      'an in-flight login cannot activate permissions after dispose',
+      () async {
+        final username =
+            'disposed_login_${DateTime.now().microsecondsSinceEpoch}';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'تسجيل دخول منتهي للاختبار',
+          'password_hash': CryptoUtils.hashPassword('Test-password-1234'),
+          'role': 'DataEntry',
+        });
+        final auth = AuthProvider();
+        final loginFuture = auth.login(username, 'Test-password-1234');
+        auth.dispose();
+        try {
+          expect(await loginFuture, isFalse);
+          expect(auth.currentUser, isNull);
+          expect(PermissionRuntime.hasSession, isFalse);
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          final db = await DatabaseHelper.instance.database;
+          await db.delete(
+            'audit_logs',
+            where: 'user_id = ?',
+            whereArgs: [userId],
+          );
+          await DatabaseHelper.instance.deleteUser(userId);
+        }
+      },
+    );
+
+    test(
+      'deactivated users cannot log in and can be reactivated safely',
+      () async {
+        final username =
+            'inactive_user_${DateTime.now().microsecondsSinceEpoch}';
+        final password = 'Test-password-1234';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'حساب موقوف للاختبار',
+          'password_hash': CryptoUtils.hashPassword(password),
+          'role': 'DataEntry',
+        });
+        final auth = AuthProvider();
+        try {
+          await DatabaseHelper.instance.setUserActive(userId, false);
+          expect(
+            (await (await DatabaseHelper.instance.database).query(
+              'users',
+              columns: ['is_active'],
+              where: 'id = ?',
+              whereArgs: [userId],
+              limit: 1,
+            )).single['is_active'],
+            0,
+          );
+          expect(await auth.login(username, password), isFalse);
+          expect(auth.errorMessage, contains('الحساب موقوف'));
+          expect(PermissionRuntime.hasSession, isFalse);
+
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          await DatabaseHelper.instance.setUserActive(userId, true);
+          expect(await auth.login(username, password), isTrue);
+          final db = await DatabaseHelper.instance.database;
+          await db.update(
+            'users',
+            {'is_active': 0},
+            where: 'id = ?',
+            whereArgs: [userId],
+          );
+          await auth.refreshCurrentUserPermissions();
+          expect(auth.currentUser, isNull);
+          expect(PermissionRuntime.hasSession, isFalse);
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          final db = await DatabaseHelper.instance.database;
+          await db.delete(
+            'audit_logs',
+            where: 'user_id = ?',
+            whereArgs: [userId],
+          );
+          await DatabaseHelper.instance.deleteUser(userId);
+          auth.dispose();
+        }
+      },
+    );
+
+    test('disposing auth invalidates an in-flight session refresh', () async {
+      final username = 'disposed_auth_${DateTime.now().microsecondsSinceEpoch}';
+      final userId = await DatabaseHelper.instance.insertUser({
+        'username': username,
+        'full_name': 'جلسة التخلص للاختبار',
+        'password_hash': CryptoUtils.hashPassword('Test-password-1234'),
+        'role': 'DataEntry',
+      });
+      final auth = AuthProvider();
+      var disposed = false;
+      try {
+        expect(await auth.login(username, 'Test-password-1234'), isTrue);
+        final pendingRefresh = auth.refreshCurrentUserPermissions();
+        auth.dispose();
+        disposed = true;
+        await pendingRefresh;
+        expect(auth.currentUser, isNull);
+        expect(PermissionRuntime.hasSession, isFalse);
+      } finally {
+        if (!disposed) auth.dispose();
+        PermissionRuntime.activate(
+          userId: 1,
+          role: 'SuperAdmin',
+          permissionRows: const [],
+        );
+        final db = await DatabaseHelper.instance.database;
+        await db.delete(
+          'audit_logs',
+          where: 'user_id = ?',
+          whereArgs: [userId],
+        );
+        await DatabaseHelper.instance.deleteUser(userId);
+      }
+    });
+
+    test(
+      'database writes reject an unauthorized role even when called directly',
+      () async {
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'DataEntry',
+          permissionRows: const [],
+        );
+        try {
+          expect(
+            PermissionRuntime.allows('accounting', AppPermissionAction.view),
+            isFalse,
+          );
+          await expectLater(
+            DatabaseHelper.instance.insertAccount({
+              'code': 'TEST-DENIED',
+              'name': 'يجب رفضه',
+              'account_type': 'Asset',
+            }),
+            throwsA(isA<StateError>()),
+          );
+          expect(
+            await (await DatabaseHelper.instance.database).query(
+              'accounts',
+              where: 'code = ?',
+              whereArgs: ['TEST-DENIED'],
+            ),
+            isEmpty,
+          );
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+        }
+      },
+    );
+    test('a user cannot replace their own permissions', () async {
+      await expectLater(
+        DatabaseHelper.instance.replaceUserPermissions(1, []),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test(
+      'only a superadmin can manage superadmin roles, and the last remains',
+      () async {
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'Admin',
+          permissionRows: [
+            {
+              'screen_name': 'system_settings',
+              'can_view': 1,
+              'can_add': 1,
+              'can_edit': 1,
+              'can_delete': 1,
+              'can_print': 1,
+              'can_post': 1,
+            },
+          ],
+        );
+        await expectLater(
+          DatabaseHelper.instance.updateUser({'id': 1, 'role': 'Admin'}),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          DatabaseHelper.instance.deleteUser(1),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          DatabaseHelper.instance.updateUserPassword(
+            1,
+            CryptoUtils.hashPassword('unauthorized-reset-password'),
+          ),
+          throwsA(isA<StateError>()),
+        );
+
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'SuperAdmin',
+          permissionRows: const [],
+        );
+        await expectLater(
+          DatabaseHelper.instance.updateUser({'id': 1, 'role': 'Admin'}),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          DatabaseHelper.instance.deleteUser(1),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          DatabaseHelper.instance.setUserActive(1, false),
+          throwsA(isA<StateError>()),
+        );
+        PermissionRuntime.activate(
+          userId: 1,
+          role: 'SuperAdmin',
+          permissionRows: const [],
+        );
+      },
+    );
   });
 
   group('company logo files', () {
@@ -389,14 +1488,49 @@ void main() {
       );
 
       final backupPath = '$testDocuments/aqari-test-backup.db';
-      await DatabaseHelper.instance.backupToFile(backupPath);
-      final backup = File(backupPath);
-      expect(await backup.exists(), isTrue);
-      expect(await backup.length(), greaterThan(0));
-
-      // Keep the primary test database usable until tearDownAll; remove only the snapshot.
-      await backup.delete();
-      await db.rawQuery('PRAGMA integrity_check');
+      final secretId = await db.insert('sms_settings', {
+        'api_key': 'secret-test-token-must-not-be-backed-up',
+      });
+      try {
+        final dashboardSettings = await DatabaseHelper.instance
+            .getSmsSettingsForDashboard();
+        expect(dashboardSettings?.containsKey('api_key'), isFalse);
+        await DatabaseHelper.instance.backupToFile(backupPath);
+        final backup = File(backupPath);
+        expect(await backup.exists(), isTrue);
+        expect(await backup.length(), greaterThan(0));
+        final backupDb = await databaseFactory.openDatabase(
+          backupPath,
+          options: OpenDatabaseOptions(readOnly: true),
+        );
+        try {
+          final backedUpSmsSettings = await backupDb.query(
+            'sms_settings',
+            columns: ['api_key'],
+          );
+          expect(
+            backedUpSmsSettings.every((row) => row['api_key'] == null),
+            isTrue,
+          );
+        } finally {
+          await backupDb.close();
+        }
+        expect(
+          (await db.query(
+            'sms_settings',
+            columns: ['api_key'],
+            where: 'id = ?',
+            whereArgs: [secretId],
+          )).single['api_key'],
+          'secret-test-token-must-not-be-backed-up',
+        );
+        await backup.delete();
+        await db.rawQuery('PRAGMA integrity_check');
+      } finally {
+        await db.delete('sms_settings', where: 'id = ?', whereArgs: [secretId]);
+        final backup = File(backupPath);
+        if (await backup.exists()) await backup.delete();
+      }
     },
   );
 
@@ -566,6 +1700,7 @@ void main() {
       await legacyDatabase.execute(
         'ALTER TABLE contracts DROP COLUMN party_snapshot',
       );
+      await legacyDatabase.execute('ALTER TABLE users DROP COLUMN is_active');
       await legacyDatabase.execute('DROP TRIGGER units_unique_number_insert');
       await legacyDatabase.execute('DROP TRIGGER units_unique_number_update');
       await legacyDatabase.execute('PRAGMA user_version = 11');
@@ -577,7 +1712,21 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        12,
+        13,
+      );
+      expect(
+        (await restored.rawQuery(
+          'PRAGMA table_info(users)',
+        )).map((row) => row['name']),
+        contains('is_active'),
+      );
+      expect(
+        (await restored.query(
+          'users',
+          columns: ['is_active'],
+          where: 'id = 1',
+        )).single['is_active'],
+        1,
       );
       expect(
         (await restored.rawQuery(
@@ -606,7 +1755,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        12,
+        13,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -1626,7 +2775,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        12,
+        13,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:printing/printing.dart';
 
+import 'permission_policy.dart';
 import 'print_utils.dart';
 
 enum PdfPreviewIntent { save, printDocument }
@@ -14,18 +15,21 @@ class PdfDocumentPreviewDialog extends StatefulWidget {
     required this.bytes,
     required this.fileName,
     required this.preferredIntent,
+    this.permissionModule,
     super.key,
   });
 
   final Uint8List bytes;
   final String fileName;
   final PdfPreviewIntent preferredIntent;
+  final String? permissionModule;
 
   static Future<void> show({
     required BuildContext context,
     required Uint8List bytes,
     required String fileName,
     required PdfPreviewIntent preferredIntent,
+    String? permissionModule,
   }) => showDialog<void>(
     context: context,
     barrierDismissible: false,
@@ -33,6 +37,7 @@ class PdfDocumentPreviewDialog extends StatefulWidget {
       bytes: bytes,
       fileName: fileName,
       preferredIntent: preferredIntent,
+      permissionModule: permissionModule,
     ),
   );
 
@@ -100,6 +105,12 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
     final width = math.min(screen.width * 0.96, 1280.0).toDouble();
     final height = math.min(screen.height * 0.94, 960.0).toDouble();
     final saveIsPrimary = widget.preferredIntent == PdfPreviewIntent.save;
+    final canPrint =
+        widget.permissionModule == null ||
+        PermissionRuntime.allows(
+          widget.permissionModule!,
+          AppPermissionAction.print,
+        );
 
     return Dialog(
       insetPadding: const EdgeInsets.all(16),
@@ -220,25 +231,33 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
                         ),
                       ),
                     ),
+                  if (!canPrint)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        'يمكنك معاينة المستند، لكن صلاحية الحفظ والطباعة غير ممنوحة لحسابك.',
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
                   Row(
                     children: [
                       const Spacer(),
                       if (saveIsPrimary)
                         OutlinedButton.icon(
-                          onPressed: _isWorking ? null : _print,
+                          onPressed: _isWorking || !canPrint ? null : _print,
                           icon: const Icon(Icons.print_outlined),
                           label: const Text('طباعة'),
                         )
                       else
                         OutlinedButton.icon(
-                          onPressed: _isWorking ? null : _save,
+                          onPressed: _isWorking || !canPrint ? null : _save,
                           icon: const Icon(Icons.save_alt_outlined),
                           label: const Text('حفظ PDF'),
                         ),
                       const SizedBox(width: 10),
                       if (saveIsPrimary)
                         FilledButton.icon(
-                          onPressed: _isWorking ? null : _save,
+                          onPressed: _isWorking || !canPrint ? null : _save,
                           icon: _isWorking
                               ? const SizedBox.square(
                                   dimension: 16,
@@ -251,7 +270,7 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
                         )
                       else
                         FilledButton.icon(
-                          onPressed: _isWorking ? null : _print,
+                          onPressed: _isWorking || !canPrint ? null : _print,
                           icon: _isWorking
                               ? const SizedBox.square(
                                   dimension: 16,

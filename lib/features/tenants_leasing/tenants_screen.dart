@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/erp_data_table.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/leasing_provider.dart';
@@ -330,7 +331,12 @@ class _TenantsScreenState extends State<TenantsScreen> {
                   ),
                   const SizedBox(width: 10),
                   FilledButton.icon(
-                    onPressed: provider.isLoading
+                    onPressed:
+                        provider.isLoading ||
+                            !PermissionRuntime.allows(
+                              'leasing',
+                              AppPermissionAction.add,
+                            )
                         ? null
                         : () => _showTenantDialog(context),
                     icon: const Icon(Icons.person_add_alt_1),
@@ -394,7 +400,13 @@ class _TenantsScreenState extends State<TenantsScreen> {
                               if (_searchController.text.isEmpty) ...[
                                 const SizedBox(height: 12),
                                 FilledButton.icon(
-                                  onPressed: () => _showTenantDialog(context),
+                                  onPressed:
+                                      PermissionRuntime.allows(
+                                        'leasing',
+                                        AppPermissionAction.add,
+                                      )
+                                      ? () => _showTenantDialog(context)
+                                      : null,
                                   icon: const Icon(Icons.add),
                                   label: const Text('إضافة أول مستأجر'),
                                 ),
@@ -431,10 +443,16 @@ class _TenantsScreenState extends State<TenantsScreen> {
                                             color: AppPalette.navy,
                                           ),
                                         ),
-                                        onTap: () => _showTenantDialog(
-                                          context,
-                                          tenant: tenant,
-                                        ),
+                                        onTap:
+                                            PermissionRuntime.allows(
+                                              'leasing',
+                                              AppPermissionAction.edit,
+                                            )
+                                            ? () => _showTenantDialog(
+                                                context,
+                                                tenant: tenant,
+                                              )
+                                            : null,
                                       ),
                                       DataCell(
                                         Text(
@@ -457,10 +475,16 @@ class _TenantsScreenState extends State<TenantsScreen> {
                                       DataCell(
                                         IconButton(
                                           tooltip: 'تعديل بيانات المستأجر',
-                                          onPressed: () => _showTenantDialog(
-                                            context,
-                                            tenant: tenant,
-                                          ),
+                                          onPressed:
+                                              PermissionRuntime.allows(
+                                                'leasing',
+                                                AppPermissionAction.edit,
+                                              )
+                                              ? () => _showTenantDialog(
+                                                  context,
+                                                  tenant: tenant,
+                                                )
+                                              : null,
                                           icon: const Icon(Icons.edit_outlined),
                                         ),
                                       ),

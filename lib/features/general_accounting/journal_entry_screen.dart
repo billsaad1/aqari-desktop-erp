@@ -6,6 +6,7 @@ import '../../providers/accounting_provider.dart';
 import 'package:intl/intl.dart';
 import '../../core/print_utils.dart';
 import '../../core/pdf_preview_dialog.dart';
+import '../../core/permission_policy.dart';
 
 class JournalEntryScreen extends StatefulWidget {
   const JournalEntryScreen({super.key});
@@ -184,6 +185,7 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
           bytes: bytes,
           fileName: name,
           preferredIntent: PdfPreviewIntent.printDocument,
+          permissionModule: 'accounting',
         );
       }
     } catch (e) {
@@ -205,6 +207,7 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
           bytes: bytes,
           fileName: name,
           preferredIntent: PdfPreviewIntent.save,
+          permissionModule: 'accounting',
         );
       }
     } catch (e) {
@@ -303,7 +306,13 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     TextButton.icon(
-                      onPressed: _addLine,
+                      onPressed:
+                          PermissionRuntime.allows(
+                            'accounting',
+                            AppPermissionAction.add,
+                          )
+                          ? _addLine
+                          : null,
                       icon: const Icon(Icons.add),
                       label: const Text('إضافة سطر'),
                     ),
@@ -335,7 +344,14 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                   children: [
                     Expanded(
                       child: ElevatedButton(
-                        onPressed: isValidEntry ? _saveEntry : null,
+                        onPressed:
+                            isValidEntry &&
+                                PermissionRuntime.allows(
+                                  'accounting',
+                                  AppPermissionAction.post,
+                                )
+                            ? _saveEntry
+                            : null,
                         style: ElevatedButton.styleFrom(
                           padding: const EdgeInsets.all(16),
                           backgroundColor: isValidEntry
@@ -351,13 +367,25 @@ class _JournalEntryScreenState extends State<JournalEntryScreen> {
                     if (_lastPdf != null) ...[
                       const SizedBox(width: 12),
                       OutlinedButton.icon(
-                        onPressed: _printLastPdf,
+                        onPressed:
+                            PermissionRuntime.allows(
+                              'accounting',
+                              AppPermissionAction.print,
+                            )
+                            ? _printLastPdf
+                            : null,
                         icon: const Icon(Icons.print),
                         label: const Text('طباعة آخر قيد'),
                       ),
                       const SizedBox(width: 8),
                       OutlinedButton.icon(
-                        onPressed: _saveLastPdf,
+                        onPressed:
+                            PermissionRuntime.allows(
+                              'accounting',
+                              AppPermissionAction.print,
+                            )
+                            ? _saveLastPdf
+                            : null,
                         icon: const Icon(Icons.picture_as_pdf),
                         label: const Text('حفظ PDF'),
                       ),

@@ -8,6 +8,7 @@ import 'package:pdf/widgets.dart' as pw;
 import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
+import '../../core/permission_policy.dart';
 
 class TaxInvoiceScreen extends StatefulWidget {
   const TaxInvoiceScreen({super.key});
@@ -356,6 +357,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
+          permissionModule: 'tenant_financial',
         );
       }
       return null;
@@ -624,29 +626,51 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                       children: [
                         Expanded(
                           child: ElevatedButton.icon(
-                            onPressed: _isProcessing
+                            onPressed:
+                                _isProcessing ||
+                                    !PermissionRuntime.allows(
+                                      'tenant_financial',
+                                      AppPermissionAction.post,
+                                    )
                                 ? null
                                 : () => _processInvoice(saveAsPdf: false),
                             icon: const Icon(Icons.print),
                             style: ElevatedButton.styleFrom(
                               padding: const EdgeInsets.all(16),
                             ),
-                            label: const Text('إصدار وترحيل وطباعة'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _isProcessing
-                                ? null
-                                : () => _processInvoice(saveAsPdf: true),
-                            icon: const Icon(Icons.picture_as_pdf),
-                            style: OutlinedButton.styleFrom(
-                              padding: const EdgeInsets.all(16),
+                            label: Text(
+                              PermissionRuntime.allows(
+                                    'tenant_financial',
+                                    AppPermissionAction.print,
+                                  )
+                                  ? 'إصدار وترحيل وطباعة'
+                                  : 'إصدار وترحيل ومعاينة',
                             ),
-                            label: const Text('إصدار وحفظ PDF'),
                           ),
                         ),
+                        if (PermissionRuntime.allows(
+                          'tenant_financial',
+                          AppPermissionAction.print,
+                        )) ...[
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed:
+                                  _isProcessing ||
+                                      !PermissionRuntime.allows(
+                                        'tenant_financial',
+                                        AppPermissionAction.post,
+                                      )
+                                  ? null
+                                  : () => _processInvoice(saveAsPdf: true),
+                              icon: const Icon(Icons.picture_as_pdf),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.all(16),
+                              ),
+                              label: const Text('إصدار وحفظ PDF'),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ],

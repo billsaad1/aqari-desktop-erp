@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/erp_data_table.dart';
+import '../../core/permission_policy.dart';
 import '../../database/database_helper.dart';
 
 class LookupsScreen extends StatefulWidget {
@@ -199,7 +200,10 @@ class _LookupTabState extends State<LookupTab> {
           Align(
             alignment: Alignment.centerLeft,
             child: ElevatedButton.icon(
-              onPressed: () => _showAddEditDialog(),
+              onPressed:
+                  PermissionRuntime.allows('lookups', AppPermissionAction.add)
+                  ? () => _showAddEditDialog()
+                  : null,
               icon: const Icon(Icons.add),
               label: Text('إضافة ${widget.config.title}'),
             ),
@@ -231,11 +235,23 @@ class _LookupTabState extends State<LookupTab> {
                                 Icons.edit,
                                 color: AppPalette.navy,
                               ),
-                              onPressed: () => _showAddEditDialog(row),
+                              onPressed:
+                                  PermissionRuntime.allows(
+                                    'lookups',
+                                    AppPermissionAction.edit,
+                                  )
+                                  ? () => _showAddEditDialog(row)
+                                  : null,
                             ),
                             IconButton(
                               icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () => _deleteItem(row['id']),
+                              onPressed:
+                                  PermissionRuntime.allows(
+                                    'lookups',
+                                    AppPermissionAction.delete,
+                                  )
+                                  ? () => _deleteItem(row['id'])
+                                  : null,
                             ),
                           ],
                         ),
