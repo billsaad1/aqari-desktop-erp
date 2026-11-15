@@ -632,6 +632,7 @@ class PrintUtils {
     String? description,
     List<Map<String, dynamic>> journalLines = const [],
     List<Map<String, dynamic>> installmentAllocations = const [],
+    List<Map<String, dynamic>> invoiceAllocations = const [],
     bool isFinancialDocument = true,
   }) async {
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
@@ -646,6 +647,17 @@ class PrintUtils {
         normalizedMethod.isNotEmpty &&
         normalizedMethod != 'نقداً/بنكي' &&
         normalizedMethod != 'حسب الحسابات المرحلة';
+    final invoiceInstallmentIds = invoiceAllocations
+        .map((invoice) => invoice['installment_id'])
+        .whereType<num>()
+        .map((id) => id.toInt())
+        .toSet();
+    final standaloneInstallmentAllocations = installmentAllocations.where((
+      installment,
+    ) {
+      final id = installment['installment_id'];
+      return id is! num || !invoiceInstallmentIds.contains(id.toInt());
+    }).toList();
 
     pdf.addPage(
       pw.MultiPage(
@@ -791,7 +803,9 @@ class PrintUtils {
               _signature(isReceipt ? 'توقيع المستلم' : 'توقيع المستفيد'),
             ],
           ),
-          if (journalLines.isNotEmpty || installmentAllocations.isNotEmpty) ...[
+          if (journalLines.isNotEmpty ||
+              standaloneInstallmentAllocations.isNotEmpty ||
+              invoiceAllocations.isNotEmpty) ...[
             pw.NewPage(),
             _documentTitle('ملحق تفاصيل السند'),
             buildLabelValue(
@@ -838,7 +852,7 @@ class PrintUtils {
               border: pw.TableBorder.all(color: softBorder, width: 0.5),
             ),
           ],
-          if (installmentAllocations.isNotEmpty) ...[
+          if (standaloneInstallmentAllocations.isNotEmpty) ...[
             pw.SizedBox(height: 10),
             _documentTitle('توزيع الدفعة على الأقساط'),
             pw.SizedBox(height: 5),
@@ -850,7 +864,7 @@ class PrintUtils {
                 'مبلغ القسط',
                 'المبلغ المخصص',
               ],
-              data: installmentAllocations
+              data: standaloneInstallmentAllocations
                   .map(
                     (installment) => [
                       installment['property_name']?.toString() ?? '',
@@ -890,6 +904,96 @@ class PrintUtils {
               },
               border: pw.TableBorder.all(color: softBorder, width: 0.5),
             ),
+          ],
+          if (invoiceAllocations.isNotEmpty) ...[
+            pw.SizedBox(height: 10),
+            _documentTitle('تخصيص السند على الفواتير'),
+            pw.SizedBox(height: 5),
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'الفاتورة / القسط / التاريخ',
+                'الصافي',
+                'الضريبة',
+                'الإجمالي',
+                'مخصص السند',
+              ],
+              data: invoiceAllocations
+                  .map(
+                    (invoice) => [
+                      'رقم ${invoice['invoice_id'] ?? '—'}\n'
+                          'القسط ${invoice['installment_id'] ?? '—'}\n'
+                          '${invoice['invoice_date'] ?? '—'}',
+                      formatPdfAmount(
+                        (invoice['net_amount'] as num?)?.toDouble() ?? 0,
+                      ),
+                      formatPdfAmount(
+                        (invoice['tax_amount'] as num?)?.toDouble() ?? 0,
+                      ),
+                      formatPdfAmount(
+                        (invoice['total_amount'] as num?)?.toDouble() ?? 0,
+                      ),
+                      formatPdfAmount(
+                        (invoice['allocated_amount'] as num?)?.toDouble() ?? 0,
+                      ),
+                    ],
+                  )
+                  .toList(),
+              headerStyle: pw.TextStyle(
+                fontSize: 7.5,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration: pw.BoxDecoration(color: brandNavy),
+              cellStyle: const pw.TextStyle(fontSize: 7.5),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 3,
+                vertical: 4,
+              ),
+              tableDirection: pw.TextDirection.rtl,
+              headerDirection: pw.TextDirection.rtl,
+              columnWidths: const {
+                0: pw.FlexColumnWidth(2),
+                1: pw.FlexColumnWidth(0.9),
+                2: pw.FlexColumnWidth(0.9),
+                3: pw.FlexColumnWidth(0.9),
+                4: pw.FlexColumnWidth(1.1),
+              },
+              border: pw.TableBorder.all(color: softBorder, width: 0.5),
+            ),
+            pw.SizedBox(height: 5),
+            ...invoiceAllocations.map((invoice) {
+              final rawInstallmentId = invoice['installment_id'];
+              final installmentId = rawInstallmentId is num
+                  ? rawInstallmentId.toInt()
+                  : null;
+              final rentAllocation = installmentId == null
+                  ? 0.0
+                  : installmentAllocations
+                        .where(
+                          (item) =>
+                              (item['installment_id'] as num?)?.toInt() ==
+                              installmentId,
+                        )
+                        .fold<double>(
+                          0,
+                          (sum, item) =>
+                              sum +
+                              ((item['allocated_amount'] as num?)?.toDouble() ??
+                                  0),
+                        );
+              final allocated =
+                  (invoice['allocated_amount'] as num?)?.toDouble() ?? 0.0;
+              final taxAllocation = (allocated - rentAllocation)
+                  .clamp(0.0, allocated)
+                  .toDouble();
+              return pw.Text(
+                'الفاتورة رقم ${invoice['invoice_id'] ?? '—'}: من هذا السند للإيجار '
+                '${formatPdfAmount(rentAllocation)}، وللضريبة '
+                '${formatPdfAmount(taxAllocation)}',
+                textDirection: pw.TextDirection.rtl,
+                style: const pw.TextStyle(fontSize: 7.5),
+              );
+            }),
           ],
         ],
       ),

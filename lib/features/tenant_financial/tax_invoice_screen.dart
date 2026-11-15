@@ -22,7 +22,11 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   final _formKey = GlobalKey<FormState>();
 
   int? _selectedContractId;
+  int? _selectedInstallmentId;
   int? _selectedTenantId;
+  List<Map<String, dynamic>> _unbilledInstallments = [];
+  bool _installmentsLoading = false;
+  String? _installmentsError;
   int? _revenueAccountId;
   int? _taxAccountId;
   bool _isProcessing = false;
@@ -46,7 +50,11 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   Future<void> _loadTaxSettings() async {
     try {
       final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
-      final rate = (companyInfo?['tax_rate'] as num?)?.toDouble() ?? 0;
+      final configuredRate = companyInfo?['tax_rate'];
+      if (configuredRate is! num) {
+        throw StateError('نسبة الضريبة غير مضبوطة');
+      }
+      final rate = configuredRate.toDouble();
       if (!InternalTax.isValidRate(rate)) {
         throw StateError('نسبة الضريبة المحفوظة خارج النطاق المسموح');
       }
@@ -77,6 +85,36 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     _grossAmountController.text = (net + tax).toStringAsFixed(2);
   }
 
+  String _formatDueDate(dynamic value) {
+    final parsed = DateTime.tryParse(value?.toString() ?? '');
+    return parsed == null
+        ? (value?.toString() ?? 'غير محدد')
+        : DateFormat('yyyy-MM-dd').format(parsed);
+  }
+
+  Future<void> _loadInstallments(int contractId) async {
+    setState(() {
+      _installmentsLoading = true;
+      _installmentsError = null;
+    });
+    try {
+      final installments = await DatabaseHelper.instance
+          .getUnbilledInstallmentsForContract(contractId);
+      if (!mounted || _selectedContractId != contractId) return;
+      setState(() {
+        _unbilledInstallments = List<Map<String, dynamic>>.from(installments);
+        _installmentsLoading = false;
+      });
+    } catch (error) {
+      if (!mounted || _selectedContractId != contractId) return;
+      setState(() {
+        _unbilledInstallments = [];
+        _installmentsLoading = false;
+        _installmentsError = 'تعذر تحميل الأقساط غير المفوترة: $error';
+      });
+    }
+  }
+
   @override
   void dispose() {
     _dateController.dispose();
@@ -91,6 +129,22 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     if (_taxSettingsLoading || _taxSettingsError != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('تحقق من إعداد نسبة الضريبة أولاً')),
+      );
+      return;
+    }
+    if (!InternalTax.isValidRate(_taxRate)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تعذر التحقق من نسبة الضريبة المحملة')),
+      );
+      return;
+    }
+    if (_selectedInstallmentId == null ||
+        !_unbilledInstallments.any(
+          (installment) =>
+              (installment['id'] as num?)?.toInt() == _selectedInstallmentId,
+        )) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اختر قسطاً غير مفوتر قبل الحفظ')),
       );
       return;
     }
@@ -118,6 +172,11 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     }
 
     final contractId = _selectedContractId!;
+    final installment = _unbilledInstallments.firstWhere(
+      (item) => (item['id'] as num).toInt() == _selectedInstallmentId,
+    );
+    final installmentId = (installment['id'] as num).toInt();
+    final installmentDueDate = _formatDueDate(installment['due_date']);
     final tenantId = _selectedTenantId!;
     final revenueAccountId = _revenueAccountId!;
     final int? taxAccountId = _taxRate > 0 ? _taxAccountId : null;
@@ -139,6 +198,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     try {
       invoiceId = await DatabaseHelper.instance.insertTaxInvoice(
         contractId: contractId,
+        installmentId: installmentId,
         tenantId: tenantId,
         invoiceDate: invoiceDate,
         netAmount: net,
@@ -166,6 +226,8 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
       final printMessage = await _printInvoice(
         invoiceNo: invoiceId,
         contractNo: contractId,
+        installmentNo: installmentId,
+        installmentDueDate: installmentDueDate,
         tenantName: tenantName,
         net: net,
         tax: tax,
@@ -196,13 +258,19 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
       _netAmountController.clear();
       _taxAmountController.clear();
       _grossAmountController.clear();
-      setState(() => _isProcessing = false);
+      setState(() {
+        _selectedInstallmentId = null;
+        _isProcessing = false;
+      });
+      _loadInstallments(contractId);
     }
   }
 
   Future<String?> _printInvoice({
     required int invoiceNo,
     required int contractNo,
+    required int installmentNo,
+    required String installmentDueDate,
     required String tenantName,
     required double net,
     required double tax,
@@ -232,7 +300,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
         build: (_) => [
           pw.Center(
             child: pw.Text(
-              'فاتورة ضريبية',
+              'فاتورة داخلية',
               textDirection: pw.TextDirection.rtl,
               textAlign: pw.TextAlign.center,
               style: pw.TextStyle(
@@ -243,6 +311,13 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
             ),
           ),
           pw.SizedBox(height: 8),
+          pw.Text(
+            'مستند داخلي للحساب والمتابعة؛ لا يمثل فاتورة إلكترونية معتمدة أو تكاملًا رسميًا.',
+            textDirection: pw.TextDirection.rtl,
+            textAlign: pw.TextAlign.center,
+            style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+          ),
+          pw.SizedBox(height: 10),
           pw.Container(
             padding: const pw.EdgeInsets.all(10),
             decoration: pw.BoxDecoration(
@@ -270,6 +345,16 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                   'اسم المستأجر',
                   tenantName,
                   labelWidth: 90,
+                ),
+                PrintUtils.buildLabelValue(
+                  'رقم القسط',
+                  installmentNo.toString(),
+                  labelWidth: 90,
+                ),
+                PrintUtils.buildLabelValue(
+                  'تاريخ استحقاق القسط',
+                  installmentDueDate,
+                  labelWidth: 120,
                 ),
                 PrintUtils.buildLabelValue(
                   'الرقم الضريبي للمنشأة',
@@ -370,7 +455,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                 pw.Column(
                   children: [
                     pw.Text(
-                      'رمز بيانات الفاتورة',
+                      'رمز بيانات داخلي',
                       textDirection: pw.TextDirection.rtl,
                       style: const pw.TextStyle(fontSize: 8),
                     ),
@@ -378,7 +463,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                     pw.BarcodeWidget(
                       barcode: pw.Barcode.qrCode(),
                       data:
-                          'رقم الفاتورة: $invoiceNo\nالمنشأة: $companyName\nالرقم الضريبي: $companyTax\nالمستأجر: $tenantName\nالصافي: ${PrintUtils.formatPdfAmount(net)}\nالضريبة: ${PrintUtils.formatPdfAmount(tax)}\nالإجمالي: ${PrintUtils.formatPdfAmount(gross)}\nالعملة: $currency\nالتاريخ: $date',
+                          'نوع المستند: داخلي\nرقم الفاتورة: $invoiceNo\nالمنشأة: $companyName\nالرقم الضريبي: $companyTax\nالمستأجر: $tenantName\nرقم القسط: $installmentNo\nاستحقاق القسط: $installmentDueDate\nالصافي: ${PrintUtils.formatPdfAmount(net)}\nالضريبة: ${PrintUtils.formatPdfAmount(tax)}\nالإجمالي: ${PrintUtils.formatPdfAmount(gross)}\nالعملة: $currency\nالتاريخ: $date',
                       width: 76,
                       height: 76,
                     ),
@@ -404,7 +489,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
         await PdfDocumentPreviewDialog.show(
           context: context,
           bytes: bytes,
-          fileName: 'فاتورة_ضريبية_$invoiceNo',
+          fileName: 'فاتورة_داخلية_$invoiceNo',
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
@@ -481,7 +566,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const Text(
-                      'إصدار فاتورة ضريبية',
+                      'إصدار فاتورة داخلية',
                       style: TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
@@ -496,7 +581,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                     ] else ...[
                       const SizedBox(height: 8),
                       Text(
-                        'نسبة الضريبة الداخلية المعتمدة: ${_taxRate.toStringAsFixed(2)}%',
+                        'نسبة الضريبة الداخلية المعتمدة: ${_taxRate.toStringAsFixed(2)}% — المستند داخلي وليس تكاملًا رسميًا',
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     ],
@@ -507,6 +592,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                           child: DropdownButtonFormField<int>(
                             value: _selectedContractId,
                             items: leasingProv.contracts
+                                .where((c) => c['status'] == 'Active')
                                 .map(
                                   (c) => DropdownMenuItem<int>(
                                     value: c['id'],
@@ -514,17 +600,28 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                                   ),
                                 )
                                 .toList(),
-                            onChanged: (val) {
-                              setState(() {
-                                _selectedContractId = val;
-                                // Auto select tenant
-                                if (val != null) {
-                                  final contract = leasingProv.contracts
-                                      .firstWhere((c) => c['id'] == val);
-                                  _selectedTenantId = contract['tenant_id'];
-                                }
-                              });
-                            },
+                            onChanged: _isProcessing
+                                ? null
+                                : (val) {
+                                    setState(() {
+                                      _selectedContractId = val;
+                                      _selectedInstallmentId = null;
+                                      _selectedTenantId = null;
+                                      _unbilledInstallments = [];
+                                      _installmentsLoading = false;
+                                      _installmentsError = null;
+                                      _netAmountController.clear();
+                                      _calculateGross();
+                                      // Auto select tenant
+                                      if (val != null) {
+                                        final contract = leasingProv.contracts
+                                            .firstWhere((c) => c['id'] == val);
+                                        _selectedTenantId =
+                                            contract['tenant_id'];
+                                      }
+                                    });
+                                    if (val != null) _loadInstallments(val);
+                                  },
                             decoration: const InputDecoration(
                               labelText: 'اختر العقد المرتبط',
                               border: OutlineInputBorder(),
@@ -554,6 +651,59 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                       ],
                     ),
                     const SizedBox(height: 16),
+                    DropdownButtonFormField<int>(
+                      value: _selectedInstallmentId,
+                      items: _unbilledInstallments.map((installment) {
+                        final installmentId = (installment['id'] as num)
+                            .toInt();
+                        return DropdownMenuItem<int>(
+                          value: installmentId,
+                          child: Text(
+                            'القسط رقم $installmentId — الاستحقاق ${_formatDueDate(installment['due_date'])}',
+                          ),
+                        );
+                      }).toList(),
+                      onChanged:
+                          _isProcessing ||
+                              _selectedContractId == null ||
+                              _installmentsLoading
+                          ? null
+                          : (value) {
+                              final selected = value == null
+                                  ? null
+                                  : _unbilledInstallments.firstWhere(
+                                      (item) =>
+                                          (item['id'] as num).toInt() == value,
+                                    );
+                              setState(() {
+                                _selectedInstallmentId = value;
+                                _netAmountController.text = selected == null
+                                    ? ''
+                                    : ((selected['amount'] as num).toDouble())
+                                          .toStringAsFixed(2);
+                                _calculateGross();
+                              });
+                            },
+                      decoration: InputDecoration(
+                        labelText: 'اختر القسط غير المفوتر',
+                        border: const OutlineInputBorder(),
+                        helperText: _installmentsLoading
+                            ? 'جارٍ تحميل الأقساط...'
+                            : _installmentsError ??
+                                  (_selectedContractId != null &&
+                                          _unbilledInstallments.isEmpty
+                                      ? 'لا توجد أقساط غير مفوترة لهذا العقد'
+                                      : null),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    if (_selectedInstallmentId != null) ...[
+                      Text(
+                        'تاريخ استحقاق القسط: ${_formatDueDate(_unbilledInstallments.firstWhere((item) => (item['id'] as num).toInt() == _selectedInstallmentId)['due_date'])}',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                     Row(
                       children: [
                         Expanded(
@@ -645,10 +795,10 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                             controller: _netAmountController,
                             keyboardType: TextInputType.number,
                             decoration: const InputDecoration(
-                              labelText: 'المبلغ الصافي',
+                              labelText: 'المبلغ الصافي للقسط',
                               border: OutlineInputBorder(),
                             ),
-                            onChanged: (val) => _calculateGross(),
+                            readOnly: true,
                             validator: (v) {
                               final value = double.tryParse(v ?? '');
                               return value == null ||
