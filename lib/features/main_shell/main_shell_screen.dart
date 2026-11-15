@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/company_logo_mark.dart';
+import '../../core/permission_policy.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/navigation_provider.dart';
 import '../auth/login_screen.dart';
@@ -31,20 +32,46 @@ class MainShellScreen extends StatelessWidget {
             Expanded(
               child: Consumer<NavigationProvider>(
                 builder: (context, nav, child) {
-                  final user = context.watch<AuthProvider>().currentUser;
-                  final role = user?.role ?? '';
-                  final canAccess = _canAccessScreen(role, nav.currentIndex);
-                  if (!canAccess) {
+                  final auth = context.watch<AuthProvider>();
+                  final user = auth.currentUser;
+                  if (user == null) return const LoginScreen();
+                  final role = user.role;
+                  final module = AppPermissionCatalog.codeForNavigationIndex(
+                    nav.currentIndex,
+                  );
+                  final canAccess =
+                      module != null && auth.canAccessScreen(module);
+                  final fallbackIndex = _firstAccessibleIndex(auth);
+                  if (!canAccess && fallbackIndex != null) {
                     WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (context.mounted) nav.reset();
+                      if (context.mounted) nav.setIndex(fallbackIndex);
                     });
                   }
-                  final index = canAccess ? nav.currentIndex : 0;
+                  final index = canAccess ? nav.currentIndex : fallbackIndex;
+                  if (index == null) {
+                    return Column(
+                      children: [
+                        _DesktopTopBar(
+                          title: 'لا توجد شاشات متاحة',
+                          userName: user.fullName,
+                          role: role,
+                        ),
+                        const Expanded(
+                          child: Center(
+                            child: Text(
+                              'حسابك لا يملك صلاحية عرض أي قسم. تواصل مع مدير النظام.',
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  }
                   return Column(
                     children: [
                       _DesktopTopBar(
                         title: _screenTitle(index),
-                        userName: user?.fullName ?? '',
+                        userName: user.fullName,
                         role: role,
                       ),
                       Expanded(child: _getScreenForIndex(index)),
@@ -59,31 +86,12 @@ class MainShellScreen extends StatelessWidget {
     );
   }
 
-  bool _canAccessScreen(String role, int index) {
-    final admin = role == 'SuperAdmin' || role == 'Admin';
-    final accountant = role == 'Accountant';
-    final dataEntry = role == 'DataEntry';
-    switch (index) {
-      case 0:
-        return role.isNotEmpty;
-      case 9:
-        return admin;
-      case 1:
-        return role == 'SuperAdmin';
-      case 2:
-      case 3:
-        return admin || dataEntry;
-      case 4:
-        return admin || accountant || dataEntry;
-      case 5:
-      case 6:
-      case 7:
-      case 8:
-      case 10:
-        return admin || accountant;
-      default:
-        return false;
+  int? _firstAccessibleIndex(AuthProvider auth) {
+    for (var index = 0; index <= 10; index++) {
+      final module = AppPermissionCatalog.codeForNavigationIndex(index);
+      if (module != null && auth.canAccessScreen(module)) return index;
     }
+    return null;
   }
 
   String _screenTitle(int index) {
@@ -313,23 +321,19 @@ class AppSidebar extends StatelessWidget {
           Expanded(
             child: Consumer<AuthProvider>(
               builder: (context, auth, child) {
-                final role = auth.currentUser?.role ?? '';
-                final isSuperOrAdmin = role == 'SuperAdmin' || role == 'Admin';
-                final isAccountant = role == 'Accountant';
-                final isDataEntry = role == 'DataEntry';
-
                 return ListView(
                   padding: const EdgeInsetsDirectional.fromSTEB(12, 10, 12, 14),
                   children: [
                     _sectionLabel(context, 'مساحة العمل'),
-                    _buildNavItem(
-                      context,
-                      'الرئيسية',
-                      Icons.grid_view_rounded,
-                      0,
-                      navProvider,
-                    ),
-                    if (role == 'SuperAdmin')
+                    if (auth.canAccessScreen('dashboard'))
+                      _buildNavItem(
+                        context,
+                        'الرئيسية',
+                        Icons.grid_view_rounded,
+                        0,
+                        navProvider,
+                      ),
+                    if (auth.canAccessScreen('system_settings'))
                       _buildNavItem(
                         context,
                         'إعدادات النظام',
@@ -337,7 +341,7 @@ class AppSidebar extends StatelessWidget {
                         1,
                         navProvider,
                       ),
-                    if (isSuperOrAdmin || isDataEntry)
+                    if (auth.canAccessScreen('lookups'))
                       _buildNavItem(
                         context,
                         'البيانات الأساسية',
@@ -345,7 +349,7 @@ class AppSidebar extends StatelessWidget {
                         2,
                         navProvider,
                       ),
-                    if (isSuperOrAdmin || isDataEntry)
+                    if (auth.canAccessScreen('properties'))
                       _buildNavItem(
                         context,
                         'العقارات والملاك',
@@ -353,7 +357,7 @@ class AppSidebar extends StatelessWidget {
                         3,
                         navProvider,
                       ),
-                    if (isSuperOrAdmin || isAccountant || isDataEntry)
+                    if (auth.canAccessScreen('leasing'))
                       _buildNavItem(
                         context,
                         'المستأجرون والعقود',
@@ -361,7 +365,7 @@ class AppSidebar extends StatelessWidget {
                         4,
                         navProvider,
                       ),
-                    if (isSuperOrAdmin || isAccountant) ...[
+                    if (auth.canAccessScreen('tenant_financial'))
                       _buildNavItem(
                         context,
                         'العمليات المالية',
@@ -369,6 +373,7 @@ class AppSidebar extends StatelessWidget {
                         5,
                         navProvider,
                       ),
+                    if (auth.canAccessScreen('voucher_history'))
                       _buildNavItem(
                         context,
                         'سجل السندات',
@@ -376,6 +381,7 @@ class AppSidebar extends StatelessWidget {
                         10,
                         navProvider,
                       ),
+                    if (auth.canAccessScreen('accounting'))
                       _buildNavItem(
                         context,
                         'الحسابات العامة',
@@ -383,6 +389,7 @@ class AppSidebar extends StatelessWidget {
                         6,
                         navProvider,
                       ),
+                    if (auth.canAccessScreen('reports'))
                       _buildNavItem(
                         context,
                         'التقارير',
@@ -390,6 +397,7 @@ class AppSidebar extends StatelessWidget {
                         7,
                         navProvider,
                       ),
+                    if (auth.canAccessScreen('sms'))
                       _buildNavItem(
                         context,
                         'الرسائل النصية',
@@ -397,8 +405,7 @@ class AppSidebar extends StatelessWidget {
                         8,
                         navProvider,
                       ),
-                    ],
-                    if (isSuperOrAdmin) ...[
+                    if (auth.canAccessScreen('system_services')) ...[
                       const SizedBox(height: 14),
                       _sectionLabel(context, 'إدارة النظام'),
                       _buildNavItem(

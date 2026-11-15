@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/erp_data_table.dart';
+import '../../core/permission_policy.dart';
 import '../../core/rent_period.dart';
 import 'package:provider/provider.dart';
 import '../../providers/property_provider.dart';
@@ -287,8 +288,14 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
                       child: Column(
                         children: [
                           FilledButton.icon(
-                            onPressed: () =>
-                                _showAddPropertyDialog(context, provider),
+                            onPressed:
+                                PermissionRuntime.allows(
+                                  'properties',
+                                  AppPermissionAction.add,
+                                )
+                                ? () =>
+                                      _showAddPropertyDialog(context, provider)
+                                : null,
                             icon: const Icon(Icons.add),
                             label: const Text('إضافة عقار'),
                             style: FilledButton.styleFrom(
@@ -347,11 +354,17 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
                                   trailing: IconButton(
                                     tooltip: 'تعديل بيانات العقار',
                                     icon: const Icon(Icons.edit_outlined),
-                                    onPressed: () => _showEditPropertyDialog(
-                                      context,
-                                      provider,
-                                      prop,
-                                    ),
+                                    onPressed:
+                                        PermissionRuntime.allows(
+                                          'properties',
+                                          AppPermissionAction.edit,
+                                        )
+                                        ? () => _showEditPropertyDialog(
+                                            context,
+                                            provider,
+                                            prop,
+                                          )
+                                        : null,
                                   ),
                                   onTap: () {
                                     setState(() {
@@ -853,7 +866,13 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
           Align(
             alignment: Alignment.centerRight,
             child: ElevatedButton.icon(
-              onPressed: _showAddUnitDialog,
+              onPressed:
+                  PermissionRuntime.allows(
+                    'properties',
+                    AppPermissionAction.add,
+                  )
+                  ? _showAddUnitDialog
+                  : null,
               icon: const Icon(Icons.add),
               label: const Text('إضافة وحدة'),
             ),
@@ -896,7 +915,13 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                               ),
                           ],
                         ),
-                        onTap: () => _showEditUnitDialog(unit),
+                        onTap:
+                            PermissionRuntime.allows(
+                              'properties',
+                              AppPermissionAction.edit,
+                            )
+                            ? () => _showEditUnitDialog(unit)
+                            : null,
                       ),
                       DataCell(Text(typeName)),
                       DataCell(
@@ -933,7 +958,13 @@ class _UnitsDetailPaneState extends State<UnitsDetailPane> {
                       DataCell(
                         IconButton(
                           tooltip: 'تعديل بيانات الوحدة',
-                          onPressed: () => _showEditUnitDialog(unit),
+                          onPressed:
+                              PermissionRuntime.allows(
+                                'properties',
+                                AppPermissionAction.edit,
+                              )
+                              ? () => _showEditUnitDialog(unit)
+                              : null,
                           icon: const Icon(Icons.edit_outlined),
                         ),
                       ),

@@ -23,7 +23,7 @@ class _LeasingMainScreenState extends State<LeasingMainScreen>
     _tabController = TabController(length: 2, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Provider.of<LeasingProvider>(context, listen: false).loadInitialData();
-      Provider.of<PropertyProvider>(context, listen: false).loadInitialData();
+      Provider.of<PropertyProvider>(context, listen: false).loadForLeasing();
     });
   }
 

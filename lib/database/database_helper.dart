@@ -5,19 +5,53 @@ import 'package:path/path.dart';
 import 'dart:io';
 
 import '../core/lease_contract_terms.dart';
+import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
 import 'database_integrity_migrations.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 12;
+  static const int _schemaVersion = 13;
+  static const Set<String> _lookupTables = {
+    'cities',
+    'nationalities',
+    'banks',
+    'property_types',
+    'unit_types',
+    'cost_centers',
+  };
 
   DatabaseHelper._init();
 
   bool _hasCentPrecision(num value) {
     final scaled = value.toDouble() * 100;
     return scaled.isFinite && (scaled - scaled.round()).abs() < 0.000001;
+  }
+
+  void _requireAnyView(Iterable<String> modules) {
+    if (!modules.any(
+      (module) => PermissionRuntime.allows(module, AppPermissionAction.view),
+    )) {
+      throw StateError('لا تملك صلاحية عرض هذه البيانات');
+    }
+  }
+
+  void _validateLookupTable(String tableName) {
+    if (!_lookupTables.contains(tableName)) {
+      throw ArgumentError.value(tableName, 'tableName', 'جدول مرجعي غير مسموح');
+    }
+  }
+
+  void _requireLookupReadPermission(String tableName) {
+    final modules = switch (tableName) {
+      'cities' || 'property_types' || 'unit_types' => ['lookups', 'properties'],
+      'nationalities' => ['lookups', 'leasing', 'properties'],
+      'cost_centers' => ['lookups', 'properties', 'accounting'],
+      'banks' => ['lookups', 'accounting', 'tenant_financial'],
+      _ => ['lookups'],
+    };
+    _requireAnyView(modules);
   }
 
   Future<Database> get database async {
@@ -32,6 +66,7 @@ class DatabaseHelper {
   }
 
   Future<void> backupToFile(String targetPath) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.edit);
     final target = File(targetPath).absolute;
     final livePath = File(await getDbPath()).absolute.path;
     if (target.path == livePath) {
@@ -51,6 +86,15 @@ class DatabaseHelper {
       final db = await database;
       final escapedPath = temporary.path.replaceAll("'", "''");
       await db.execute("VACUUM INTO '$escapedPath'");
+      final snapshot = await databaseFactory.openDatabase(
+        temporary.path,
+        options: OpenDatabaseOptions(readOnly: false),
+      );
+      try {
+        await snapshot.update('sms_settings', {'api_key': null});
+      } finally {
+        await snapshot.close();
+      }
       await _validateDatabaseFile(temporary.path, requireCurrentSchema: true);
       if (await target.exists()) {
         throw FileSystemException(
@@ -65,6 +109,7 @@ class DatabaseHelper {
   }
 
   Future<String> restoreFromFile(String sourcePath) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.delete);
     final source = File(sourcePath).absolute;
     final livePath = File(await getDbPath()).absolute;
     if (source.path == livePath.path) {
@@ -244,6 +289,7 @@ class DatabaseHelper {
         'role',
         'cash_box_account_id',
         'must_change_password',
+        'is_active',
       ],
       'user_permissions': [
         'id',
@@ -436,6 +482,7 @@ class DatabaseHelper {
   }
 
   Future<String> factoryReset() async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.delete);
     final path = await getDbPath();
     final rollbackPath = join(
       File(path).parent.path,
@@ -606,6 +653,14 @@ class DatabaseHelper {
     if (oldVersion < 12) {
       await DatabaseIntegrityMigrations.upgradeToV12(db);
     }
+    if (oldVersion < 13) {
+      await _ensureColumn(
+        db,
+        'users',
+        'is_active',
+        'INTEGER NOT NULL DEFAULT 1',
+      );
+    }
   }
 
   Future<void> _ensureColumn(
@@ -653,7 +708,8 @@ class DatabaseHelper {
         full_name TEXT NOT NULL,
         role TEXT NOT NULL,
         cash_box_account_id INTEGER,
-        must_change_password INTEGER NOT NULL DEFAULT 0
+        must_change_password INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1
       )
     ''');
 
@@ -1093,10 +1149,26 @@ class DatabaseHelper {
 
   // --- CRUD Operations for Authentication and Users ---
 
-  Future<Map<String, dynamic>?> getUserByUsername(String username) async {
+  /// Credential lookup for AuthProvider only; this is not a UI user model.
+  Future<Map<String, dynamic>?> getAuthenticationRecordByUsername(
+    String username,
+  ) async {
+    if (PermissionRuntime.hasSession) {
+      throw StateError('واجهة بيانات الاعتماد مخصصة لما قبل تسجيل الدخول');
+    }
     final db = await instance.database;
     final result = await db.query(
       'users',
+      columns: [
+        'id',
+        'username',
+        'password_hash',
+        'full_name',
+        'role',
+        'cash_box_account_id',
+        'must_change_password',
+        'is_active',
+      ],
       where: 'username = ?',
       whereArgs: [username],
     );
@@ -1106,24 +1178,164 @@ class DatabaseHelper {
     return null;
   }
 
-  Future<List<Map<String, dynamic>>> getAllUsers() async {
+  Future<bool> isUserSessionValid({
+    required int userId,
+    required String expectedRole,
+    required String expectedPasswordHash,
+  }) async {
+    if (PermissionRuntime.userId != userId) return false;
     final db = await instance.database;
-    return await db.query('users');
+    final rows = await db.query(
+      'users',
+      columns: ['role', 'is_active', 'password_hash'],
+      where: 'id = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return false;
+    final row = rows.first;
+    return (row['is_active'] as num?)?.toInt() == 1 &&
+        row['role'] == expectedRole &&
+        row['password_hash'] == expectedPasswordHash;
+  }
+
+  Future<List<Map<String, dynamic>>> getAllUsers() async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.view);
+    final db = await instance.database;
+    return await db.query(
+      'users',
+      columns: [
+        'id',
+        'username',
+        'full_name',
+        'role',
+        'cash_box_account_id',
+        'must_change_password',
+        'is_active',
+      ],
+      orderBy: 'full_name COLLATE NOCASE',
+    );
   }
 
   Future<int> insertUser(Map<String, dynamic> user) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.add);
+    final username = user['username']?.toString().trim() ?? '';
+    final fullName = user['full_name']?.toString().trim() ?? '';
+    final passwordHash = user['password_hash']?.toString() ?? '';
+    final role = user['role']?.toString() ?? '';
+    if (username.isEmpty || fullName.isEmpty || passwordHash.isEmpty) {
+      throw ArgumentError('اسم المستخدم والاسم الكامل وكلمة المرور مطلوبة');
+    }
+    if (!const {
+      'SuperAdmin',
+      'Admin',
+      'Accountant',
+      'DataEntry',
+    }.contains(role)) {
+      throw ArgumentError('الدور المحدد غير صالح');
+    }
+    if (role == 'SuperAdmin' && PermissionRuntime.role != 'SuperAdmin') {
+      throw StateError('إنشاء مدير نظام أعلى يتطلب صلاحية مدير النظام الأعلى');
+    }
     final db = await instance.database;
-    return await db.insert('users', user);
+    return db.transaction((txn) async {
+      final id = await txn.insert('users', {
+        'username': username,
+        'full_name': fullName,
+        'password_hash': passwordHash,
+        'role': role,
+        'cash_box_account_id': user['cash_box_account_id'],
+        'must_change_password': user['must_change_password'] ?? 1,
+      });
+      await txn.insert('audit_logs', {
+        'user_id': PermissionRuntime.userId,
+        'action': 'USER_CREATE',
+        'details': 'تم إنشاء المستخدم $username بدور $role',
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+      return id;
+    });
   }
 
   Future<int> updateUser(Map<String, dynamic> user) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.edit);
+    final id = (user['id'] as num?)?.toInt();
+    if (id == null) throw ArgumentError('معرف المستخدم مطلوب');
     final db = await instance.database;
-    return await db.update(
-      'users',
-      user,
-      where: 'id = ?',
-      whereArgs: [user['id']],
-    );
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'users',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('المستخدم غير موجود');
+      final currentRole = rows.first['role']?.toString() ?? '';
+      final nextRole = user['role']?.toString() ?? currentRole;
+      if (currentRole == 'SuperAdmin' &&
+          PermissionRuntime.role != 'SuperAdmin') {
+        throw StateError('تعديل حساب مدير النظام الأعلى يتطلب صلاحية خاصة');
+      }
+      if (!const {
+        'SuperAdmin',
+        'Admin',
+        'Accountant',
+        'DataEntry',
+      }.contains(nextRole)) {
+        throw ArgumentError('الدور المحدد غير صالح');
+      }
+      if (id == PermissionRuntime.userId && nextRole != currentRole) {
+        throw StateError('لا يمكن تغيير دور المستخدم المسجل دخوله');
+      }
+      if (currentRole == 'SuperAdmin' &&
+          nextRole != 'SuperAdmin' &&
+          PermissionRuntime.role != 'SuperAdmin') {
+        throw StateError('تخفيض مدير النظام الأعلى يتطلب صلاحية خاصة');
+      }
+      if (nextRole == 'SuperAdmin' &&
+          currentRole != 'SuperAdmin' &&
+          PermissionRuntime.role != 'SuperAdmin') {
+        throw StateError('ترقية مستخدم إلى مدير نظام أعلى تتطلب صلاحية خاصة');
+      }
+      if (currentRole == 'SuperAdmin' && nextRole != 'SuperAdmin') {
+        final countRows = await txn.rawQuery(
+          "SELECT COUNT(*) AS count FROM users WHERE role = 'SuperAdmin'",
+        );
+        final count = (countRows.first['count'] as num).toInt();
+        if (count <= 1) throw StateError('لا يمكن تخفيض آخر مدير نظام أعلى');
+      }
+      final changes = <String, Object?>{};
+      if (user.containsKey('username')) {
+        final value = user['username']?.toString().trim() ?? '';
+        if (value.isEmpty) throw ArgumentError('اسم المستخدم مطلوب');
+        changes['username'] = value;
+      }
+      if (user.containsKey('full_name')) {
+        final value = user['full_name']?.toString().trim() ?? '';
+        if (value.isEmpty) throw ArgumentError('الاسم الكامل مطلوب');
+        changes['full_name'] = value;
+      }
+      if (user.containsKey('role')) changes['role'] = nextRole;
+      if (user.containsKey('cash_box_account_id')) {
+        changes['cash_box_account_id'] = user['cash_box_account_id'];
+      }
+      if (changes.isEmpty) return 0;
+      final updated = await txn.update(
+        'users',
+        changes,
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (updated > 0) {
+        await txn.insert('audit_logs', {
+          'user_id': PermissionRuntime.userId,
+          'action': 'USER_UPDATE',
+          'details': 'تم تحديث بيانات المستخدم رقم $id',
+          'timestamp': DateTime.now().toIso8601String(),
+        });
+      }
+      return updated;
+    });
   }
 
   Future<int> updateUserPassword(
@@ -1131,7 +1343,26 @@ class DatabaseHelper {
     String passwordHash, {
     bool mustChangePassword = false,
   }) async {
+    if (PermissionRuntime.userId != userId) {
+      PermissionRuntime.require('system_settings', AppPermissionAction.edit);
+    }
     final db = await instance.database;
+    if (PermissionRuntime.userId != userId) {
+      final target = await db.query(
+        'users',
+        columns: ['role'],
+        where: 'id = ?',
+        whereArgs: [userId],
+        limit: 1,
+      );
+      if (target.isNotEmpty &&
+          target.first['role'] == 'SuperAdmin' &&
+          PermissionRuntime.role != 'SuperAdmin') {
+        throw StateError(
+          'إعادة تعيين كلمة مرور مدير النظام الأعلى تتطلب صلاحية خاصة',
+        );
+      }
+    }
     return db.update(
       'users',
       {
@@ -1143,16 +1374,192 @@ class DatabaseHelper {
     );
   }
 
-  Future<int> deleteUser(int id) async {
+  Future<int> setUserActive(int userId, bool isActive) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.edit);
+    if (!isActive && userId == PermissionRuntime.userId) {
+      throw StateError('لا يمكن إيقاف حساب المستخدم المسجل دخوله');
+    }
     final db = await instance.database;
-    return await db.delete('users', where: 'id = ?', whereArgs: [id]);
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'users',
+        columns: ['role', 'is_active'],
+        where: 'id = ?',
+        whereArgs: [userId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return 0;
+      final role = rows.first['role']?.toString() ?? '';
+      final currentlyActive = (rows.first['is_active'] as num?)?.toInt() == 1;
+      if (currentlyActive == isActive) return 0;
+      if (role == 'SuperAdmin' && PermissionRuntime.role != 'SuperAdmin') {
+        throw StateError('تغيير حالة مدير النظام الأعلى يتطلب صلاحية خاصة');
+      }
+      if (!isActive && role == 'SuperAdmin') {
+        final activeSuperAdmins = await txn.rawQuery(
+          "SELECT COUNT(*) AS count FROM users WHERE role = 'SuperAdmin' AND is_active = 1",
+        );
+        if ((activeSuperAdmins.first['count'] as num).toInt() <= 1) {
+          throw StateError('لا يمكن إيقاف آخر مدير نظام أعلى نشط');
+        }
+      }
+      final updated = await txn.update(
+        'users',
+        {'is_active': isActive ? 1 : 0},
+        where: 'id = ?',
+        whereArgs: [userId],
+      );
+      if (updated > 0) {
+        await txn.insert('audit_logs', {
+          'user_id': PermissionRuntime.userId,
+          'action': isActive ? 'USER_ACTIVATE' : 'USER_DEACTIVATE',
+          'details': 'تم ${isActive ? 'تفعيل' : 'إيقاف'} المستخدم رقم $userId',
+          'timestamp': DateTime.now().toIso8601String(),
+        });
+      }
+      return updated;
+    });
   }
+
+  Future<int> deleteUser(int id) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.delete);
+    if (id == PermissionRuntime.userId) {
+      throw StateError('لا يمكن حذف حساب المستخدم المسجل دخوله');
+    }
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'users',
+        columns: ['role'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return 0;
+      if (rows.first['role'] == 'SuperAdmin') {
+        if (PermissionRuntime.role != 'SuperAdmin') {
+          throw StateError('حذف مدير النظام الأعلى يتطلب صلاحية خاصة');
+        }
+        final countRows = await txn.rawQuery(
+          "SELECT COUNT(*) AS count FROM users WHERE role = 'SuperAdmin'",
+        );
+        if ((countRows.first['count'] as num).toInt() <= 1) {
+          throw StateError('لا يمكن حذف آخر مدير نظام أعلى');
+        }
+      }
+      return txn.delete('users', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getUserPermissions(int userId) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.view);
+    return _readUserPermissions(userId);
+  }
+
+  /// Used only after successful credential verification to establish the
+  /// authenticated user's session before protected routes are shown.
+  Future<List<Map<String, dynamic>>> getUserPermissionsForAuthentication(
+    int userId,
+  ) async {
+    if (PermissionRuntime.userId != userId) {
+      throw StateError('يمكن تحميل صلاحيات جلسة المستخدم الحالي فقط');
+    }
+    return _readUserPermissions(userId);
+  }
+
+  Future<List<Map<String, dynamic>>> _readUserPermissions(int userId) async {
+    final db = await instance.database;
+    return db.query(
+      'user_permissions',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'screen_name',
+    );
+  }
+
+  Future<void> replaceUserPermissions(
+    int userId,
+    List<Map<String, dynamic>> permissions,
+  ) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.edit);
+    if (userId == PermissionRuntime.userId) {
+      throw StateError('لا يمكن للمستخدم تعديل صلاحيات حسابه بنفسه');
+    }
+    final normalized = <Map<String, Object?>>[];
+    final seen = <String>{};
+    for (final permission in permissions) {
+      final code = permission['screen_name']?.toString() ?? '';
+      if (AppPermissionCatalog.module(code) == null || !seen.add(code)) {
+        throw ArgumentError('مجموعة الصلاحيات تحتوي قسمًا غير معروف أو مكررًا');
+      }
+      final normalizedRow = <String, Object?>{
+        'screen_name': code,
+        for (final action in AppPermissionAction.values)
+          action.databaseColumn: _permissionValue(
+            permission[action.databaseColumn],
+          ),
+      };
+      if (normalizedRow['can_view'] == 0 &&
+          AppPermissionAction.values
+              .where((action) => action != AppPermissionAction.view)
+              .any((action) => normalizedRow[action.databaseColumn] == 1)) {
+        throw ArgumentError('لا يمكن منح إجراء دون منح صلاحية عرض القسم');
+      }
+      normalized.add(normalizedRow);
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final users = await txn.query(
+        'users',
+        columns: ['role'],
+        where: 'id = ?',
+        whereArgs: [userId],
+        limit: 1,
+      );
+      if (users.isEmpty) throw StateError('المستخدم غير موجود');
+      if (users.first['role'] == 'SuperAdmin' && normalized.isNotEmpty) {
+        throw StateError('مدير النظام الأعلى يمتلك جميع الصلاحيات دائمًا');
+      }
+      await txn.delete(
+        'user_permissions',
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+      for (final permission in normalized) {
+        await txn.insert('user_permissions', {
+          'user_id': userId,
+          ...permission,
+        });
+      }
+      await txn.insert('audit_logs', {
+        'user_id': PermissionRuntime.userId,
+        'action': 'USER_PERMISSIONS_UPDATE',
+        'details': 'تم تحديث صلاحيات المستخدم رقم $userId',
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+    });
+  }
+
+  int _permissionValue(Object? value) =>
+      value == true || (value is num && value.toInt() == 1) ? 1 : 0;
 
   // --- CRUD Operations for Audit Logs ---
 
-  Future<int> insertAuditLog(Map<String, dynamic> log) async {
+  Future<int> recordAuthenticationAudit({
+    required int expectedUserId,
+    required bool isLogin,
+  }) async {
+    final userId = PermissionRuntime.userId;
+    if (userId == null || userId != expectedUserId) {
+      throw StateError('لا توجد جلسة مطابقة لتسجيل حدث التدقيق');
+    }
     final db = await instance.database;
-    return await db.insert('audit_logs', log);
+    return db.insert('audit_logs', {
+      'user_id': userId,
+      'action': isLogin ? 'LOGIN' : 'LOGOUT',
+      'details': isLogin ? 'تم تسجيل الدخول بنجاح' : 'تم تسجيل الخروج',
+      'timestamp': DateTime.now().toIso8601String(),
+    });
   }
 
   // --- CRUD Operations for Company Info ---
@@ -1167,6 +1574,7 @@ class DatabaseHelper {
   }
 
   Future<int> updateCompanyInfo(Map<String, dynamic> info) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.edit);
     final db = await instance.database;
     final rows = await db.query('company_info', columns: ['id'], limit: 1);
     final values = Map<String, dynamic>.from(info)..remove('id');
@@ -1178,6 +1586,8 @@ class DatabaseHelper {
   // --- Generic CRUD Operations for Lookups ---
 
   Future<List<Map<String, dynamic>>> getLookupData(String tableName) async {
+    _validateLookupTable(tableName);
+    _requireLookupReadPermission(tableName);
     final db = await instance.database;
     return await db.query(tableName);
   }
@@ -1186,6 +1596,8 @@ class DatabaseHelper {
     String tableName,
     Map<String, dynamic> data,
   ) async {
+    _validateLookupTable(tableName);
+    PermissionRuntime.require('lookups', AppPermissionAction.add);
     final db = await instance.database;
 
     // Auto-generate code for cost_centers
@@ -1216,6 +1628,8 @@ class DatabaseHelper {
     String tableName,
     Map<String, dynamic> data,
   ) async {
+    _validateLookupTable(tableName);
+    PermissionRuntime.require('lookups', AppPermissionAction.edit);
     final db = await instance.database;
     return await db.update(
       tableName,
@@ -1226,6 +1640,8 @@ class DatabaseHelper {
   }
 
   Future<int> deleteLookupData(String tableName, int id) async {
+    _validateLookupTable(tableName);
+    PermissionRuntime.require('lookups', AppPermissionAction.delete);
     final db = await instance.database;
     return await db.delete(tableName, where: 'id = ?', whereArgs: [id]);
   }
@@ -1233,18 +1649,60 @@ class DatabaseHelper {
   // --- Accounting Operations ---
 
   Future<List<Map<String, dynamic>>> getAllAccounts() async {
+    final canViewAccounting = PermissionRuntime.allows(
+      'accounting',
+      AppPermissionAction.view,
+    );
+    final canViewFinancial = PermissionRuntime.allows(
+      'tenant_financial',
+      AppPermissionAction.view,
+    );
+    final canViewReports = PermissionRuntime.allows(
+      'reports',
+      AppPermissionAction.view,
+    );
+    if (!canViewAccounting && !canViewFinancial && !canViewReports) {
+      PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    }
     final db = await instance.database;
-    return await db.query('accounts');
+    if (canViewAccounting) return db.query('accounts');
+    return db.query(
+      'accounts',
+      columns: ['id', 'code', 'name', 'parent_id', 'account_type'],
+    );
   }
 
   Future<Map<String, dynamic>?> getAccountById(int id) async {
+    final canViewAccounting = PermissionRuntime.allows(
+      'accounting',
+      AppPermissionAction.view,
+    );
+    final canViewFinancial = PermissionRuntime.allows(
+      'tenant_financial',
+      AppPermissionAction.view,
+    );
+    final canViewReports = PermissionRuntime.allows(
+      'reports',
+      AppPermissionAction.view,
+    );
+    if (!canViewAccounting && !canViewFinancial && !canViewReports) {
+      PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    }
     final db = await instance.database;
-    final result = await db.query('accounts', where: 'id = ?', whereArgs: [id]);
+    final result = await db.query(
+      'accounts',
+      columns: canViewAccounting
+          ? null
+          : ['id', 'code', 'name', 'parent_id', 'account_type'],
+      where: 'id = ?',
+      whereArgs: [id],
+    );
     if (result.isNotEmpty) return result.first;
     return null;
   }
 
   Future<String> generateAccountCode(int parentId) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.add);
     final db = await instance.database;
     final parentResult = await db.query(
       'accounts',
@@ -1275,6 +1733,7 @@ class DatabaseHelper {
   }
 
   Future<int> insertAccount(Map<String, dynamic> account) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.add);
     final db = await instance.database;
     return await db.insert('accounts', account);
   }
@@ -1284,6 +1743,7 @@ class DatabaseHelper {
     Map<String, dynamic> header,
     List<Map<String, dynamic>> lines,
   ) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.post);
     if (DateTime.tryParse(header['entry_date']?.toString() ?? '') == null) {
       throw ArgumentError('تاريخ القيد غير صحيح');
     }
@@ -1349,6 +1809,7 @@ class DatabaseHelper {
     int? costCenterId,
     String voucherType,
   ) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.post);
     if (voucherType != 'قبض عام' && voucherType != 'صرف عام') {
       throw ArgumentError('نوع السند غير معروف');
     }
@@ -1531,6 +1992,7 @@ class DatabaseHelper {
   }
 
   Future<void> insertOwnerWithAccount(Map<String, dynamic> owner) async {
+    PermissionRuntime.require('properties', AppPermissionAction.add);
     final name = (owner['name'] as String?)?.trim() ?? '';
     final commission = (owner['commission_rate'] as num?)?.toDouble() ?? 0;
     if (name.isEmpty) throw ArgumentError('اسم المالك مطلوب');
@@ -1594,11 +2056,13 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> getAllOwners() async {
+    PermissionRuntime.require('properties', AppPermissionAction.view);
     final db = await instance.database;
     return await db.query('owners');
   }
 
   Future<void> updateOwner(Map<String, dynamic> owner) async {
+    PermissionRuntime.require('properties', AppPermissionAction.edit);
     final ownerId = owner['id'];
     final name = (owner['name'] as String?)?.trim() ?? '';
     final commission = (owner['commission_rate'] as num?)?.toDouble() ?? 0;
@@ -1653,6 +2117,7 @@ class DatabaseHelper {
   }
 
   Future<int> insertProperty(Map<String, dynamic> property) async {
+    PermissionRuntime.require('properties', AppPermissionAction.add);
     final name = (property['name'] as String?)?.trim() ?? '';
     final ownerId = property['owner_id'];
     if (name.isEmpty || ownerId is! int || ownerId <= 0) {
@@ -1688,6 +2153,7 @@ class DatabaseHelper {
   }
 
   Future<void> updateProperty(Map<String, dynamic> property) async {
+    PermissionRuntime.require('properties', AppPermissionAction.edit);
     final propertyId = property['id'];
     final name = (property['name'] as String?)?.trim() ?? '';
     final ownerId = property['owner_id'];
@@ -1758,12 +2224,24 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> getProperties() async {
+    PermissionRuntime.require('properties', AppPermissionAction.view);
     final db = await instance.database;
     // Basic join could be done here, but let's fetch plain properties for now
     return await db.query('properties');
   }
 
+  Future<List<Map<String, dynamic>>> getPropertiesForLeasing() async {
+    PermissionRuntime.require('leasing', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.query(
+      'properties',
+      columns: ['id', 'name'],
+      orderBy: 'name COLLATE NOCASE, id',
+    );
+  }
+
   Future<int> insertUnit(Map<String, dynamic> unit) async {
+    PermissionRuntime.require('properties', AppPermissionAction.add);
     final db = await instance.database;
     final propertyId = unit['property_id'];
     final number = (unit['unit_number'] as String?)?.trim() ?? '';
@@ -1819,6 +2297,7 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> getUnitsForProperty(int propertyId) async {
+    PermissionRuntime.require('properties', AppPermissionAction.view);
     final db = await instance.database;
     return await db.rawQuery(
       '''
@@ -1839,6 +2318,7 @@ class DatabaseHelper {
   }
 
   Future<void> updateUnit(Map<String, dynamic> unit) async {
+    PermissionRuntime.require('properties', AppPermissionAction.edit);
     final db = await instance.database;
     final unitId = unit['id'];
     final number = (unit['unit_number'] as String?)?.trim() ?? '';
@@ -1908,6 +2388,7 @@ class DatabaseHelper {
   }
 
   Future<void> deleteUnit(int id) async {
+    PermissionRuntime.require('properties', AppPermissionAction.delete);
     final db = await instance.database;
     if (id <= 0) throw ArgumentError('معرف الوحدة غير صالح');
     await db.transaction((txn) async {
@@ -1943,6 +2424,7 @@ class DatabaseHelper {
   // --- Leasing & Tenants Operations ---
 
   Future<void> insertTenantWithAccount(Map<String, dynamic> tenant) async {
+    PermissionRuntime.require('leasing', AppPermissionAction.add);
     final name = (tenant['name'] as String?)?.trim() ?? '';
     final mobile = (tenant['mobile'] as String?)?.trim() ?? '';
     if (name.isEmpty || mobile.isEmpty) {
@@ -2012,10 +2494,19 @@ class DatabaseHelper {
 
   Future<List<Map<String, dynamic>>> getAllTenants() async {
     final db = await instance.database;
-    return await db.query('tenants');
+    if (PermissionRuntime.allows('leasing', AppPermissionAction.view)) {
+      return db.query('tenants');
+    }
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    return db.query(
+      'tenants',
+      columns: ['id', 'name', 'mobile', 'account_id'],
+      orderBy: 'name COLLATE NOCASE',
+    );
   }
 
   Future<void> updateTenant(Map<String, dynamic> tenant) async {
+    PermissionRuntime.require('leasing', AppPermissionAction.edit);
     final tenantId = tenant['id'];
     final name = (tenant['name'] as String?)?.trim() ?? '';
     final mobile = (tenant['mobile'] as String?)?.trim() ?? '';
@@ -2149,6 +2640,7 @@ class DatabaseHelper {
     Map<String, dynamic> contract,
     List<Map<String, dynamic>> installments,
   ) async {
+    PermissionRuntime.require('leasing', AppPermissionAction.add);
     final rent = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
     final startDate = DateTime.tryParse(
       contract['start_date']?.toString() ?? '',
@@ -2265,18 +2757,38 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> getVacantUnits() async {
+    PermissionRuntime.require('leasing', AppPermissionAction.view);
     final db = await instance.database;
     return await db.query('units', where: 'status = ?', whereArgs: ['شاغرة']);
   }
 
   Future<List<Map<String, dynamic>>> getAllContracts() async {
+    PermissionRuntime.require('leasing', AppPermissionAction.view);
     final db = await instance.database;
     return await db.query('contracts');
+  }
+
+  Future<List<Map<String, dynamic>>>
+  getActiveTenantContractsForFinancial() async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.query(
+      'contracts',
+      columns: ['id', 'tenant_id', 'status'],
+      where: "status = 'Active'",
+    );
   }
 
   Future<List<Map<String, dynamic>>> getInstallmentsForContract(
     int contractId,
   ) async {
+    if (!PermissionRuntime.allows('leasing', AppPermissionAction.view) &&
+        !PermissionRuntime.allows(
+          'tenant_financial',
+          AppPermissionAction.view,
+        )) {
+      throw StateError('لا تملك صلاحية عرض بيانات أقساط التأجير');
+    }
     final db = await instance.database;
     return await db.query(
       'contract_installments',
@@ -2294,6 +2806,7 @@ class DatabaseHelper {
     required int cashAccountId,
     required List<Map<String, dynamic>> installmentsToUpdate,
   }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
     if (amount <= 0 ||
         !_hasCentPrecision(amount) ||
         DateTime.tryParse(voucherDate) == null ||
@@ -2430,6 +2943,7 @@ class DatabaseHelper {
     required int offsetAccountId,
     required String description,
   }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
     if (amount <= 0 ||
         !_hasCentPrecision(amount) ||
         DateTime.tryParse(voucherDate) == null ||
@@ -2508,6 +3022,7 @@ class DatabaseHelper {
   Future<List<Map<String, dynamic>>> getVoucherHistory({
     String? voucherType,
   }) async {
+    PermissionRuntime.require('voucher_history', AppPermissionAction.view);
     final db = await instance.database;
     final where = voucherType == null ? '' : 'WHERE v.voucher_type = ?';
     final args = voucherType == null ? <Object?>[] : <Object?>[voucherType];
@@ -2529,6 +3044,7 @@ class DatabaseHelper {
   }
 
   Future<Map<String, dynamic>?> getVoucherDetails(int voucherId) async {
+    PermissionRuntime.require('voucher_history', AppPermissionAction.view);
     final db = await instance.database;
     final headers = await db.rawQuery(
       '''
@@ -2612,6 +3128,7 @@ class DatabaseHelper {
     required int revenueAccountId,
     required int taxAccountId,
   }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
     if (totalAmount <= 0 ||
         !_hasCentPrecision(totalAmount) ||
         !_hasCentPrecision(taxAmount) ||
@@ -2719,6 +3236,7 @@ class DatabaseHelper {
   }
 
   Future<void> cancelContract(int contractId) async {
+    PermissionRuntime.require('leasing', AppPermissionAction.edit);
     final db = await instance.database;
     await db.transaction((txn) async {
       final contractResult = await txn.query(
@@ -2792,6 +3310,7 @@ class DatabaseHelper {
   // --- Reports & Alerts Queries ---
 
   Future<Map<String, dynamic>> getDashboardSummary() async {
+    PermissionRuntime.require('dashboard', AppPermissionAction.view);
     final db = await instance.database;
     final rows = await db.rawQuery('''
       SELECT
@@ -2812,6 +3331,7 @@ class DatabaseHelper {
     int accountId,
     String startDate,
   ) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
     final db = await instance.database;
     final accounts = await db.query(
       'accounts',
@@ -2843,6 +3363,7 @@ class DatabaseHelper {
     String startDate,
     String endDate,
   ) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
     final db = await instance.database;
     return await db.rawQuery(
       '''
@@ -2862,6 +3383,7 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> getUnitOccupancyStats() async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
     final db = await instance.database;
     return await db.rawQuery('''
       SELECT
@@ -2878,6 +3400,7 @@ class DatabaseHelper {
   Future<List<Map<String, dynamic>>> searchTenantsAndContracts(
     String query,
   ) async {
+    _requireAnyView(['leasing', 'reports']);
     final db = await instance.database;
     final searchTerm = '%$query%';
     return await db.rawQuery(
@@ -2902,6 +3425,7 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> getDueInstallments(int days) async {
+    _requireAnyView(['reports', 'system_services']);
     final db = await instance.database;
     final targetDate = DateTime.now().add(Duration(days: days));
     final targetDateStr = targetDate.toIso8601String().substring(0, 10);
@@ -2930,6 +3454,7 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> getExpiringContracts(int days) async {
+    _requireAnyView(['reports', 'system_services']);
     final db = await instance.database;
     final targetDate = DateTime.now().add(Duration(days: days));
     final targetDateStr = targetDate.toIso8601String().substring(0, 10);
@@ -2956,7 +3481,33 @@ class DatabaseHelper {
 
   // --- SMS Operations ---
 
-  Future<Map<String, dynamic>?> getSmsSettings() async {
+  Future<Map<String, dynamic>?> getSmsSettingsForEditing() async {
+    PermissionRuntime.require('sms', AppPermissionAction.edit);
+    final db = await instance.database;
+    final result = await db.query('sms_settings');
+    if (result.isNotEmpty) return result.first;
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> getSmsSettingsForDashboard() async {
+    PermissionRuntime.require('sms', AppPermissionAction.view);
+    final db = await instance.database;
+    final result = await db.query(
+      'sms_settings',
+      columns: [
+        'id',
+        'api_url',
+        'sender_name',
+        'reminder_template',
+        'receipt_template',
+      ],
+    );
+    if (result.isNotEmpty) return result.first;
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> getSmsSettingsForSending() async {
+    PermissionRuntime.require('sms', AppPermissionAction.add);
     final db = await instance.database;
     final result = await db.query('sms_settings');
     if (result.isNotEmpty) return result.first;
@@ -2964,6 +3515,7 @@ class DatabaseHelper {
   }
 
   Future<void> saveSmsSettings(Map<String, dynamic> settings) async {
+    PermissionRuntime.require('sms', AppPermissionAction.edit);
     final db = await instance.database;
     final existing = await db.query('sms_settings');
     if (existing.isEmpty) {
@@ -2979,11 +3531,13 @@ class DatabaseHelper {
   }
 
   Future<void> insertSmsLog(Map<String, dynamic> log) async {
+    PermissionRuntime.require('sms', AppPermissionAction.add);
     final db = await instance.database;
     await db.insert('sms_logs', log);
   }
 
   Future<List<Map<String, dynamic>>> getAllSmsLogs() async {
+    PermissionRuntime.require('sms', AppPermissionAction.view);
     final db = await instance.database;
     return await db.query('sms_logs', orderBy: 'sent_at DESC');
   }

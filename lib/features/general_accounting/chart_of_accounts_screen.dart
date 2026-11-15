@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
@@ -96,28 +97,34 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
               child: const Text('إلغاء'),
             ),
             ElevatedButton(
-              onPressed: () async {
-                if (formKey.currentState!.validate()) {
-                  final newAccount = {
-                    'code': parentAccount == null
-                        ? DateTime.now().millisecondsSinceEpoch
-                              .toString()
-                              .substring(8)
-                        : newCode, // Simplistic root code fallback
-                    'name': nameController.text,
-                    'parent_id': parentAccount?['id'],
-                    'account_type': accountType,
-                    'balance': 0.0,
-                  };
-                  await Provider.of<AccountingProvider>(
-                    context,
-                    listen: false,
-                  ).addAccount(newAccount);
-                  if (context.mounted) {
-                    Navigator.pop(context);
-                  }
-                }
-              },
+              onPressed:
+                  PermissionRuntime.allows(
+                    'accounting',
+                    AppPermissionAction.add,
+                  )
+                  ? () async {
+                      if (formKey.currentState!.validate()) {
+                        final newAccount = {
+                          'code': parentAccount == null
+                              ? DateTime.now().millisecondsSinceEpoch
+                                    .toString()
+                                    .substring(8)
+                              : newCode, // Simplistic root code fallback
+                          'name': nameController.text,
+                          'parent_id': parentAccount?['id'],
+                          'account_type': accountType,
+                          'balance': 0.0,
+                        };
+                        await Provider.of<AccountingProvider>(
+                          context,
+                          listen: false,
+                        ).addAccount(newAccount);
+                        if (context.mounted) {
+                          Navigator.pop(context);
+                        }
+                      }
+                    }
+                  : null,
               child: const Text('حفظ'),
             ),
           ],
@@ -159,7 +166,13 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
               trailing: IconButton(
                 icon: const Icon(Icons.add, color: Colors.green),
                 tooltip: 'إضافة حساب فرعي',
-                onPressed: () => _showAddAccountDialog(acc),
+                onPressed:
+                    PermissionRuntime.allows(
+                      'accounting',
+                      AppPermissionAction.add,
+                    )
+                    ? () => _showAddAccountDialog(acc)
+                    : null,
               ),
             ),
           ),
@@ -192,7 +205,13 @@ class _ChartOfAccountsScreenState extends State<ChartOfAccountsScreen> {
                     style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                   ),
                   ElevatedButton.icon(
-                    onPressed: () => _showAddAccountDialog(null),
+                    onPressed:
+                        PermissionRuntime.allows(
+                          'accounting',
+                          AppPermissionAction.add,
+                        )
+                        ? () => _showAddAccountDialog(null)
+                        : null,
                     icon: const Icon(Icons.add),
                     label: const Text('إضافة حساب رئيسي'),
                   ),

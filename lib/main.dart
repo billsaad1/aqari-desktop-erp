@@ -24,10 +24,31 @@ void main() async {
         ChangeNotifierProvider(create: (_) => AuthProvider()),
         ChangeNotifierProvider(create: (_) => NavigationProvider()),
         ChangeNotifierProvider(create: (_) => AccountingProvider()),
-        ChangeNotifierProvider(create: (_) => PropertyProvider()),
+        ChangeNotifierProxyProvider<AuthProvider, PropertyProvider>(
+          create: (_) => PropertyProvider(),
+          update: (context, auth, provider) {
+            final next = provider ?? PropertyProvider();
+            next.syncAuthorization(
+              userId: auth.currentUser?.id,
+              canViewProperties: auth.canAccessScreen('properties'),
+              canViewLeasing: auth.canAccessScreen('leasing'),
+            );
+            return next;
+          },
+        ),
         ChangeNotifierProvider(create: (_) => LeasingProvider()),
         ChangeNotifierProvider(create: (_) => ReportsProvider()),
-        ChangeNotifierProvider(create: (_) => SmsProvider()),
+        ChangeNotifierProxyProvider<AuthProvider, SmsProvider>(
+          create: (_) => SmsProvider(),
+          update: (context, auth, provider) {
+            final next = provider ?? SmsProvider();
+            next.syncAuthorization(
+              userId: auth.currentUser?.id,
+              canViewSms: auth.canAccessScreen('sms'),
+            );
+            return next;
+          },
+        ),
       ],
       child: const ERPApp(),
     ),

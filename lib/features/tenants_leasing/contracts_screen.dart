@@ -2,6 +2,7 @@ import '../../core/pdf_preview_dialog.dart';
 import '../../core/lease_contract_pdf.dart';
 import '../../core/contract_party_snapshot.dart';
 import '../../core/rent_period.dart';
+import '../../core/permission_policy.dart';
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import 'package:provider/provider.dart';
@@ -373,6 +374,9 @@ class _ContractsScreenState extends State<ContractsScreen> {
         if (leasingProv.isLoading || propProv.isLoading) {
           return const Center(child: CircularProgressIndicator());
         }
+        if (propProv.errorMessage != null) {
+          return Center(child: Text(propProv.errorMessage!));
+        }
 
         Map<String, dynamic>? selectedUnit;
         for (final unit in leasingProv.vacantUnits) {
@@ -602,7 +606,13 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         ),
                         const SizedBox(height: 24),
                         ElevatedButton(
-                          onPressed: _generateInstallments,
+                          onPressed:
+                              PermissionRuntime.allows(
+                                'leasing',
+                                AppPermissionAction.add,
+                              )
+                              ? _generateInstallments
+                              : null,
                           child: const Text('توليد جدول الأقساط'),
                         ),
                       ],
@@ -634,7 +644,13 @@ class _ContractsScreenState extends State<ContractsScreen> {
                               color: AppPalette.navy,
                             ),
                             tooltip: 'إضافة دفعة جديدة يدوياً',
-                            onPressed: _addManualInstallment,
+                            onPressed:
+                                PermissionRuntime.allows(
+                                  'leasing',
+                                  AppPermissionAction.add,
+                                )
+                                ? _addManualInstallment
+                                : null,
                           ),
                       ],
                     ),
@@ -700,8 +716,16 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                               color: Colors.red,
                                             ),
                                             tooltip: 'حذف',
-                                            onPressed: () =>
-                                                _removeManualInstallment(index),
+                                            onPressed:
+                                                PermissionRuntime.allows(
+                                                  'leasing',
+                                                  AppPermissionAction.add,
+                                                )
+                                                ? () =>
+                                                      _removeManualInstallment(
+                                                        index,
+                                                      )
+                                                : null,
                                           ),
                                         ],
                                       ),
@@ -715,7 +739,11 @@ class _ContractsScreenState extends State<ContractsScreen> {
                     ElevatedButton(
                       onPressed:
                           _generatedInstallments.isNotEmpty &&
-                              !_isSavingContract
+                              !_isSavingContract &&
+                              PermissionRuntime.allows(
+                                'leasing',
+                                AppPermissionAction.add,
+                              )
                           ? _saveContract
                           : null,
                       style: ElevatedButton.styleFrom(
@@ -770,10 +798,16 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                         color: AppPalette.navy,
                                       ),
                                       tooltip: 'طباعة العقد (PDF)',
-                                      onPressed: () => _printContract(
-                                        contract,
-                                        saveAsPdf: false,
-                                      ),
+                                      onPressed:
+                                          PermissionRuntime.allows(
+                                            'leasing',
+                                            AppPermissionAction.print,
+                                          )
+                                          ? () => _printContract(
+                                              contract,
+                                              saveAsPdf: false,
+                                            )
+                                          : null,
                                     ),
                                     IconButton(
                                       icon: const Icon(
@@ -781,10 +815,16 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                         color: Colors.deepOrange,
                                       ),
                                       tooltip: 'حفظ العقد PDF',
-                                      onPressed: () => _printContract(
-                                        contract,
-                                        saveAsPdf: true,
-                                      ),
+                                      onPressed:
+                                          PermissionRuntime.allows(
+                                            'leasing',
+                                            AppPermissionAction.print,
+                                          )
+                                          ? () => _printContract(
+                                              contract,
+                                              saveAsPdf: true,
+                                            )
+                                          : null,
                                     ),
                                     if (contract['status'] == 'Active')
                                       IconButton(
@@ -793,8 +833,15 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                           color: Colors.red,
                                         ),
                                         tooltip: 'إلغاء العقد',
-                                        onPressed: () =>
-                                            _cancelContract(contract['id']),
+                                        onPressed:
+                                            PermissionRuntime.allows(
+                                              'leasing',
+                                              AppPermissionAction.edit,
+                                            )
+                                            ? () => _cancelContract(
+                                                contract['id'],
+                                              )
+                                            : null,
                                       ),
                                   ],
                                 ),
@@ -880,18 +927,24 @@ class _ContractsScreenState extends State<ContractsScreen> {
               child: const Text('إغلاق'),
             ),
             ElevatedButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                _printContract(contract, saveAsPdf: false);
-              },
+              onPressed:
+                  PermissionRuntime.allows('leasing', AppPermissionAction.print)
+                  ? () {
+                      Navigator.pop(context);
+                      _printContract(contract, saveAsPdf: false);
+                    }
+                  : null,
               icon: const Icon(Icons.print),
               label: const Text('طباعة العقد PDF'),
             ),
             OutlinedButton.icon(
-              onPressed: () {
-                Navigator.pop(context);
-                _printContract(contract, saveAsPdf: true);
-              },
+              onPressed:
+                  PermissionRuntime.allows('leasing', AppPermissionAction.print)
+                  ? () {
+                      Navigator.pop(context);
+                      _printContract(contract, saveAsPdf: true);
+                    }
+                  : null,
               icon: const Icon(Icons.save_alt),
               label: const Text('حفظ PDF'),
             ),
@@ -946,6 +999,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
             preferredIntent: saveAsPdf
                 ? PdfPreviewIntent.save
                 : PdfPreviewIntent.printDocument,
+            permissionModule: 'leasing',
           );
         }
         return;
@@ -1078,6 +1132,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
+          permissionModule: 'leasing',
         );
       }
     } catch (e) {

@@ -6,6 +6,7 @@ class AccountingProvider with ChangeNotifier {
   List<Map<String, dynamic>> _costCenters = [];
   bool _isLoading = false;
   String? _errorMessage;
+  int _loadGeneration = 0;
 
   List<Map<String, dynamic>> get accounts => _accounts;
   List<Map<String, dynamic>> get costCenters => _costCenters;
@@ -13,18 +14,35 @@ class AccountingProvider with ChangeNotifier {
   String? get errorMessage => _errorMessage;
 
   Future<void> loadAccounts() async {
+    final generation = ++_loadGeneration;
+    _accounts = [];
     _isLoading = true;
     notifyListeners();
 
     try {
-      _accounts = await DatabaseHelper.instance.getAllAccounts();
-      _errorMessage = null;
+      final accounts = await DatabaseHelper.instance.getAllAccounts();
+      if (generation == _loadGeneration) {
+        _accounts = accounts;
+        _errorMessage = null;
+      }
     } catch (e) {
-      _errorMessage = 'تعذر تحميل الحسابات: $e';
+      if (generation == _loadGeneration) {
+        _accounts = [];
+        _errorMessage = 'تعذر تحميل الحسابات: $e';
+      }
     } finally {
-      _isLoading = false;
-      notifyListeners();
+      if (generation == _loadGeneration) {
+        _isLoading = false;
+        notifyListeners();
+      }
     }
+  }
+
+  void clearSensitiveData({bool notify = true}) {
+    _loadGeneration++;
+    _accounts = [];
+    _isLoading = false;
+    if (notify) notifyListeners();
   }
 
   Future<void> loadCostCenters() async {

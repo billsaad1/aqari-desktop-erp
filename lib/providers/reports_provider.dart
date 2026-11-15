@@ -9,6 +9,9 @@ class ReportsProvider with ChangeNotifier {
   List<Map<String, dynamic>> _expiringContracts = [];
   double _accountOpeningBalance = 0;
   int _searchGeneration = 0;
+  int _occupancyGeneration = 0;
+  int _statementGeneration = 0;
+  int _alertsGeneration = 0;
   String? _errorMessage;
 
   bool _isLoading = false;
@@ -21,6 +24,27 @@ class ReportsProvider with ChangeNotifier {
   bool get isLoading => _isLoading;
   double get accountOpeningBalance => _accountOpeningBalance;
   String? get errorMessage => _errorMessage;
+
+  void clearSensitiveAlerts({bool notify = true}) {
+    _alertsGeneration++;
+    _dueInstallments = [];
+    _expiringContracts = [];
+    _isLoading = false;
+    if (notify) notifyListeners();
+  }
+
+  void clearReportResults({bool notify = true}) {
+    _searchGeneration++;
+    _occupancyGeneration++;
+    _statementGeneration++;
+    _searchResults = [];
+    _occupancyStats = [];
+    _accountStatement = [];
+    _accountOpeningBalance = 0;
+    _isLoading = false;
+    _errorMessage = null;
+    if (notify) notifyListeners();
+  }
 
   Future<void> search(String query) async {
     final generation = ++_searchGeneration;
@@ -44,17 +68,25 @@ class ReportsProvider with ChangeNotifier {
   }
 
   Future<void> loadOccupancyStats() async {
+    final generation = ++_occupancyGeneration;
     _isLoading = true;
     notifyListeners();
 
     try {
-      _occupancyStats = await DatabaseHelper.instance.getUnitOccupancyStats();
-      _errorMessage = null;
+      final stats = await DatabaseHelper.instance.getUnitOccupancyStats();
+      if (generation == _occupancyGeneration) {
+        _occupancyStats = stats;
+        _errorMessage = null;
+      }
     } catch (e) {
-      _errorMessage = 'تعذر تحميل تقرير الإشغال: $e';
+      if (generation == _occupancyGeneration) {
+        _errorMessage = 'تعذر تحميل تقرير الإشغال: $e';
+      }
     } finally {
-      _isLoading = false;
-      notifyListeners();
+      if (generation == _occupancyGeneration) {
+        _isLoading = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -63,42 +95,65 @@ class ReportsProvider with ChangeNotifier {
     String startDate,
     String endDate,
   ) async {
+    final generation = ++_statementGeneration;
     _isLoading = true;
     notifyListeners();
 
     try {
-      _accountOpeningBalance = await DatabaseHelper.instance
+      final openingBalance = await DatabaseHelper.instance
           .getAccountOpeningBalance(accountId, startDate);
-      _accountStatement = await DatabaseHelper.instance.getAccountStatement(
+      if (generation != _statementGeneration) return;
+      final statement = await DatabaseHelper.instance.getAccountStatement(
         accountId,
         startDate,
         endDate,
       );
-      _errorMessage = null;
+      if (generation == _statementGeneration) {
+        _accountOpeningBalance = openingBalance;
+        _accountStatement = statement;
+        _errorMessage = null;
+      }
     } catch (e) {
-      _accountStatement = [];
-      _errorMessage = 'تعذر تحميل كشف الحساب: $e';
+      if (generation == _statementGeneration) {
+        _accountOpeningBalance = 0;
+        _accountStatement = [];
+        _errorMessage = 'تعذر تحميل كشف الحساب: $e';
+      }
     } finally {
-      _isLoading = false;
-      notifyListeners();
+      if (generation == _statementGeneration) {
+        _isLoading = false;
+        notifyListeners();
+      }
     }
   }
 
   Future<void> loadAlertsDashboard() async {
+    final generation = ++_alertsGeneration;
+    _dueInstallments = [];
+    _expiringContracts = [];
     _isLoading = true;
     notifyListeners();
 
     try {
-      _dueInstallments = await DatabaseHelper.instance.getDueInstallments(3);
-      _expiringContracts = await DatabaseHelper.instance.getExpiringContracts(
-        30,
+      final dueInstallments = await DatabaseHelper.instance.getDueInstallments(
+        3,
       );
-      _errorMessage = null;
+      final expiringContracts = await DatabaseHelper.instance
+          .getExpiringContracts(30);
+      if (generation == _alertsGeneration) {
+        _dueInstallments = dueInstallments;
+        _expiringContracts = expiringContracts;
+        _errorMessage = null;
+      }
     } catch (e) {
-      _errorMessage = 'تعذر تحميل التنبيهات: $e';
+      if (generation == _alertsGeneration) {
+        _errorMessage = 'تعذر تحميل التنبيهات: $e';
+      }
     } finally {
-      _isLoading = false;
-      notifyListeners();
+      if (generation == _alertsGeneration) {
+        _isLoading = false;
+        notifyListeners();
+      }
     }
   }
 }

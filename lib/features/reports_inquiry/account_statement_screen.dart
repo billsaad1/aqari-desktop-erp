@@ -2,6 +2,7 @@ import "../../core/print_utils.dart";
 import '../../core/pdf_preview_dialog.dart';
 import 'package:flutter/material.dart';
 import '../../core/erp_data_table.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
@@ -286,6 +287,7 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
+          permissionModule: 'reports',
         );
       }
     } catch (e) {
@@ -383,7 +385,12 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton.icon(
-                    onPressed: reportsProv.accountStatement.isNotEmpty
+                    onPressed:
+                        reportsProv.accountStatement.isNotEmpty &&
+                            PermissionRuntime.allows(
+                              'reports',
+                              AppPermissionAction.print,
+                            )
                         ? () => _printStatement(
                             reportsProv.accountStatement,
                             accountName,
@@ -401,7 +408,12 @@ class _AccountStatementScreenState extends State<AccountStatementScreen> {
                   ),
                   const SizedBox(width: 8),
                   OutlinedButton.icon(
-                    onPressed: reportsProv.accountStatement.isNotEmpty
+                    onPressed:
+                        reportsProv.accountStatement.isNotEmpty &&
+                            PermissionRuntime.allows(
+                              'reports',
+                              AppPermissionAction.print,
+                            )
                         ? () => _printStatement(
                             reportsProv.accountStatement,
                             accountName,

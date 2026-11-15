@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
 import '../../providers/sms_provider.dart';
 import '../../providers/leasing_provider.dart';
 import '../../providers/reports_provider.dart';
+import '../../providers/auth_provider.dart';
 import 'package:intl/intl.dart';
 
 class SmsDashboardScreen extends StatefulWidget {
@@ -17,21 +19,78 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
   final _messageController = TextEditingController();
   int? _selectedTenantId;
   String _messagePreview = '';
+  late AuthProvider _authProvider;
+  String _permissionFingerprint = '';
 
   @override
   void initState() {
     super.initState();
+    _authProvider = Provider.of<AuthProvider>(context, listen: false);
+    _permissionFingerprint = _currentPermissionFingerprint();
+    _authProvider.addListener(_onAuthPermissionsChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<LeasingProvider>(context, listen: false).loadInitialData();
-      Provider.of<ReportsProvider>(
-        context,
-        listen: false,
-      ).loadAlertsDashboard();
+      if (!mounted) return;
+      _reloadDataForCurrentPermissions();
+    });
+  }
+
+  String _currentPermissionFingerprint() {
+    final user = _authProvider.currentUser;
+    final permissions = [
+      for (final module in AppPermissionCatalog.modules)
+        for (final action in AppPermissionAction.values)
+          '${module.code}:${action.name}:${PermissionRuntime.allows(module.code, action)}',
+    ];
+    return '${user?.id}:${user?.role}:${permissions.join('|')}';
+  }
+
+  void _reloadDataForCurrentPermissions() {
+    final leasingProvider = Provider.of<LeasingProvider>(
+      context,
+      listen: false,
+    );
+    final canViewTenantData =
+        PermissionRuntime.allows('leasing', AppPermissionAction.view) ||
+        PermissionRuntime.allows('tenant_financial', AppPermissionAction.view);
+    if (canViewTenantData) {
+      leasingProvider.loadInitialData();
+    } else {
+      leasingProvider.clearSensitiveData();
+    }
+
+    final reportsProvider = Provider.of<ReportsProvider>(
+      context,
+      listen: false,
+    );
+    final canViewAlerts =
+        PermissionRuntime.allows('reports', AppPermissionAction.view) ||
+        PermissionRuntime.allows('system_services', AppPermissionAction.view);
+    if (!PermissionRuntime.allows('reports', AppPermissionAction.view)) {
+      reportsProvider.clearReportResults();
+    }
+    if (canViewAlerts) {
+      reportsProvider.loadAlertsDashboard();
+    } else {
+      reportsProvider.clearSensitiveAlerts();
+    }
+  }
+
+  void _onAuthPermissionsChanged() {
+    if (!mounted) return;
+    final nextFingerprint = _currentPermissionFingerprint();
+    if (nextFingerprint == _permissionFingerprint) return;
+    _permissionFingerprint = nextFingerprint;
+    _reloadDataForCurrentPermissions();
+    setState(() {
+      _selectedTenantId = null;
+      _messagePreview = '';
+      _messageController.clear();
     });
   }
 
   @override
   void dispose() {
+    _authProvider.removeListener(_onAuthPermissionsChanged);
     _messageController.dispose();
     super.dispose();
   }
@@ -51,6 +110,13 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
   }
 
   void _generatePreviewForTenant(int tenantId) {
+    if (!PermissionRuntime.allows('leasing', AppPermissionAction.view) &&
+        !PermissionRuntime.allows(
+          'tenant_financial',
+          AppPermissionAction.view,
+        )) {
+      return;
+    }
     final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
     final smsProv = Provider.of<SmsProvider>(context, listen: false);
     final tenant = leasingProv.tenants.firstWhere((t) => t['id'] == tenantId);
@@ -89,6 +155,15 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
   }
 
   void _sendIndividualMessage() async {
+    final canViewTenantData =
+        PermissionRuntime.allows('leasing', AppPermissionAction.view) ||
+        PermissionRuntime.allows('tenant_financial', AppPermissionAction.view);
+    if (!canViewTenantData) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا تملك صلاحية عرض بيانات المستأجرين.')),
+      );
+      return;
+    }
     if (_selectedTenantId == null || _messagePreview.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -134,7 +209,28 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
     }
   }
 
+  bool get _canSendBulkReminders =>
+      PermissionRuntime.allows('sms', AppPermissionAction.add) &&
+      (PermissionRuntime.allows('leasing', AppPermissionAction.view) ||
+          PermissionRuntime.allows(
+            'tenant_financial',
+            AppPermissionAction.view,
+          )) &&
+      (PermissionRuntime.allows('reports', AppPermissionAction.view) ||
+          PermissionRuntime.allows(
+            'system_services',
+            AppPermissionAction.view,
+          ));
+
   void _sendBulkReminders() async {
+    if (!_canSendBulkReminders) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('لا تملك صلاحية بيانات التنبيهات والإرسال.'),
+        ),
+      );
+      return;
+    }
     final smsProv = Provider.of<SmsProvider>(context, listen: false);
     final repProv = Provider.of<ReportsProvider>(context, listen: false);
 
@@ -149,8 +245,18 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
 
     int successCount = 0;
     int failedCount = 0;
+    var stoppedForPermissionChange = false;
     final leasingProv = Provider.of<LeasingProvider>(context, listen: false);
-    for (var inst in repProv.dueInstallments) {
+    final installments = List<Map<String, dynamic>>.from(
+      repProv.dueInstallments,
+    );
+    for (var index = 0; index < installments.length; index++) {
+      if (!mounted || !_canSendBulkReminders) {
+        stoppedForPermissionChange = true;
+        failedCount += installments.length - index;
+        break;
+      }
+      final inst = installments[index];
       // Find tenant mobile
       final tenantId = inst['tenant_id'];
       final tenant = leasingProv.tenants.firstWhere(
@@ -186,13 +292,21 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
       } else {
         failedCount++;
       }
+
+      if (!mounted || !_canSendBulkReminders) {
+        stoppedForPermissionChange = true;
+        failedCount += installments.length - index - 1;
+        break;
+      }
     }
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'قبل المزود $successCount طلباً، وفشل/تعذر $failedCount. تحقق من سجل الرسائل.',
+            stoppedForPermissionChange
+                ? 'توقف الإرسال بعد تغير الصلاحيات. قبل المزود $successCount طلباً، وفشل/تعذر $failedCount.'
+                : 'قبل المزود $successCount طلباً، وفشل/تعذر $failedCount. تحقق من سجل الرسائل.',
           ),
         ),
       );
@@ -201,6 +315,14 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final canSend = PermissionRuntime.allows('sms', AppPermissionAction.add);
+    final canViewTenantData =
+        PermissionRuntime.allows('leasing', AppPermissionAction.view) ||
+        PermissionRuntime.allows('tenant_financial', AppPermissionAction.view);
+    final canViewReports =
+        PermissionRuntime.allows('reports', AppPermissionAction.view) ||
+        PermissionRuntime.allows('system_services', AppPermissionAction.view);
+    final canSendBulk = canSend && canViewTenantData && canViewReports;
     return Consumer2<LeasingProvider, SmsProvider>(
       builder: (context, leasingProv, smsProv, child) {
         if (leasingProv.isLoading || smsProv.isLoading)
@@ -216,31 +338,45 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: DropdownButtonFormField<int>(
-                      value: _selectedTenantId,
-                      items: leasingProv.tenants
-                          .map(
-                            (t) => DropdownMenuItem<int>(
-                              value: t['id'],
-                              child: Text('${t['name']} - ${t['mobile']}'),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (val) {
-                        setState(() => _selectedTenantId = val);
-                        if (val != null) _generatePreviewForTenant(val);
-                      },
-                      decoration: const InputDecoration(
-                        labelText: 'اختر المستأجر',
-                        border: OutlineInputBorder(),
+              if (!canSend)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 12),
+                  child: Text(
+                    'حسابك يستطيع عرض الرسائل فقط؛ لا يملك صلاحية الإرسال.',
+                    style: TextStyle(color: Colors.orange),
+                  ),
+                ),
+              if (canViewTenantData)
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<int>(
+                        value: _selectedTenantId,
+                        items: leasingProv.tenants
+                            .map(
+                              (t) => DropdownMenuItem<int>(
+                                value: t['id'],
+                                child: Text('${t['name']} - ${t['mobile']}'),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (val) {
+                          setState(() => _selectedTenantId = val);
+                          if (val != null) _generatePreviewForTenant(val);
+                        },
+                        decoration: const InputDecoration(
+                          labelText: 'اختر المستأجر',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
+                  ],
+                )
+              else
+                const Text(
+                  'اختر مستأجرًا أو أرسل تذكيرًا فقط بعد منح صلاحية عرض التأجير أو المالية.',
+                  style: TextStyle(color: Colors.orange),
+                ),
               const SizedBox(height: 16),
               Container(
                 padding: const EdgeInsets.all(16),
@@ -277,7 +413,9 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
               ),
               const SizedBox(height: 16),
               ElevatedButton.icon(
-                onPressed: _sendIndividualMessage,
+                onPressed: canSend && canViewTenantData
+                    ? _sendIndividualMessage
+                    : null,
                 icon: const Icon(Icons.send),
                 label: const Text('إرسال الآن'),
                 style: ElevatedButton.styleFrom(
@@ -322,7 +460,9 @@ class _SmsDashboardScreenState extends State<SmsDashboardScreen> {
                       ),
                     ),
                     ElevatedButton.icon(
-                      onPressed: smsProv.isLoading ? null : _sendBulkReminders,
+                      onPressed: !canSendBulk || smsProv.isLoading
+                          ? null
+                          : _sendBulkReminders,
                       icon: const Icon(Icons.group),
                       label: const Text('إرسال للجميع بضغطة زر'),
                       style: ElevatedButton.styleFrom(

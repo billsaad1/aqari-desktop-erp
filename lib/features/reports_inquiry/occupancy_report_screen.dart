@@ -2,6 +2,7 @@ import "../../core/print_utils.dart";
 import '../../core/pdf_preview_dialog.dart';
 import 'package:flutter/material.dart';
 import '../../core/erp_data_table.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -169,6 +170,7 @@ class _OccupancyReportScreenState extends State<OccupancyReportScreen> {
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
+          permissionModule: 'reports',
         );
       }
     } catch (e) {
@@ -234,7 +236,12 @@ class _OccupancyReportScreenState extends State<OccupancyReportScreen> {
                     style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                   ),
                   ElevatedButton.icon(
-                    onPressed: provider.occupancyStats.isNotEmpty
+                    onPressed:
+                        provider.occupancyStats.isNotEmpty &&
+                            PermissionRuntime.allows(
+                              'reports',
+                              AppPermissionAction.print,
+                            )
                         ? () => _printReport(
                             provider.occupancyStats,
                             saveAsPdf: false,
@@ -245,7 +252,12 @@ class _OccupancyReportScreenState extends State<OccupancyReportScreen> {
                   ),
                   const SizedBox(width: 8),
                   OutlinedButton.icon(
-                    onPressed: provider.occupancyStats.isNotEmpty
+                    onPressed:
+                        provider.occupancyStats.isNotEmpty &&
+                            PermissionRuntime.allows(
+                              'reports',
+                              AppPermissionAction.print,
+                            )
                         ? () => _printReport(
                             provider.occupancyStats,
                             saveAsPdf: true,

@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
+import '../../database/database_helper.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/sms_provider.dart';
 
@@ -24,19 +28,56 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
   );
   bool _obscureApiKey = true;
   bool _isSaving = false;
+  late final AuthProvider _authProvider;
+  bool _hadEditPermission = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final provider = Provider.of<SmsProvider>(context, listen: false);
-      await provider.loadSmsData();
-      if (mounted) _loadSettings(provider);
+    _authProvider = Provider.of<AuthProvider>(context, listen: false);
+    _hadEditPermission = _authProvider.canPerform(
+      'sms',
+      AppPermissionAction.edit,
+    );
+    _authProvider.addListener(_handleAuthorizationChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_loadEditorSettings());
     });
   }
 
-  void _loadSettings(SmsProvider provider) {
-    final settings = provider.settings;
+  void _handleAuthorizationChanged() {
+    final canEdit = _authProvider.canPerform('sms', AppPermissionAction.edit);
+    if (_hadEditPermission && !canEdit) {
+      _apiKeyController.clear();
+    } else if (!_hadEditPermission && canEdit) {
+      unawaited(_loadEditorSettings());
+    }
+    _hadEditPermission = canEdit;
+  }
+
+  Future<void> _loadEditorSettings() async {
+    final userId = _authProvider.currentUser?.id;
+    if (!_authProvider.canPerform('sms', AppPermissionAction.edit)) return;
+    try {
+      final settings = await DatabaseHelper.instance.getSmsSettingsForEditing();
+      if (!mounted ||
+          !_authProvider.canPerform('sms', AppPermissionAction.edit) ||
+          _authProvider.currentUser?.id != userId) {
+        return;
+      }
+      _loadSettings(settings);
+    } catch (error) {
+      if (mounted &&
+          _authProvider.canPerform('sms', AppPermissionAction.edit) &&
+          _authProvider.currentUser?.id == userId) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تعذر تحميل إعدادات الرسائل: $error')),
+        );
+      }
+    }
+  }
+
+  void _loadSettings(Map<String, dynamic>? settings) {
     if (settings == null) return;
     _apiUrlController.text = settings['api_url']?.toString() ?? '';
     _apiKeyController.text = settings['api_key']?.toString() ?? '';
@@ -77,6 +118,8 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
 
   @override
   void dispose() {
+    _authProvider.removeListener(_handleAuthorizationChanged);
+    _apiKeyController.clear();
     _apiUrlController.dispose();
     _apiKeyController.dispose();
     _senderNameController.dispose();
@@ -87,10 +130,10 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final role = Provider.of<AuthProvider>(context).currentUser?.role;
-    if (role != 'SuperAdmin' && role != 'Admin') {
+    final auth = Provider.of<AuthProvider>(context);
+    if (!auth.canPerform('sms', AppPermissionAction.edit)) {
       return const Center(
-        child: Text('إعدادات بوابة الرسائل متاحة للمسؤول فقط'),
+        child: Text('لا تملك صلاحية تعديل إعدادات بوابة الرسائل'),
       );
     }
 

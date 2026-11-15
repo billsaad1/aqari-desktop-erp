@@ -5,20 +5,20 @@ import 'package:file_selector/file_selector.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
-import '../../core/erp_data_table.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/company_logo_storage.dart';
 import '../../core/lease_contract_terms.dart';
+import '../../core/permission_policy.dart';
 import '../../core/print_utils.dart';
 import '../../database/database_helper.dart';
-import '../../core/crypto_utils.dart';
 import '../../models/company_info_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/navigation_provider.dart';
 import '../auth/login_screen.dart';
+import 'users_tab.dart';
 
 class SystemSettingsScreen extends StatefulWidget {
   const SystemSettingsScreen({super.key});
@@ -355,6 +355,10 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) return const Center(child: CircularProgressIndicator());
+    final canEditCompanyInfo = PermissionRuntime.allows(
+      'system_settings',
+      AppPermissionAction.edit,
+    );
     final selectedLogoPath = _removeLogoRequested
         ? ''
         : (_pendingLogoPath ?? _savedLogoPath ?? '').trim();
@@ -369,8 +373,21 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
         key: _formKey,
         child: ListView(
           children: [
+            if (!canEditCompanyInfo)
+              Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blueGrey.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  'وضع قراءة فقط: لا تملك صلاحية تعديل بيانات المنشأة.',
+                ),
+              ),
             TextFormField(
               controller: _nameArController,
+              enabled: canEditCompanyInfo,
               decoration: const InputDecoration(
                 labelText: 'اسم المنشأة (عربي)',
                 border: OutlineInputBorder(),
@@ -381,6 +398,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             const SizedBox(height: 16),
             TextFormField(
               controller: _nameEnController,
+              enabled: canEditCompanyInfo,
               decoration: const InputDecoration(
                 labelText: 'اسم المنشأة (إنجليزي)',
                 border: OutlineInputBorder(),
@@ -392,6 +410,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _activityArController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'النشاط (عربي)',
                       border: OutlineInputBorder(),
@@ -402,6 +421,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _activityEnController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'النشاط (إنجليزي)',
                       border: OutlineInputBorder(),
@@ -416,6 +436,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _commercialRegisterController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'السجل التجاري (C.R)',
                       border: OutlineInputBorder(),
@@ -426,6 +447,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _taxNumberController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'الرقم الضريبي (VAT)',
                       border: OutlineInputBorder(),
@@ -440,6 +462,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _addressArController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'العنوان (عربي)',
                       border: OutlineInputBorder(),
@@ -450,6 +473,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _addressEnController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'العنوان (إنجليزي)',
                       border: OutlineInputBorder(),
@@ -464,6 +488,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _poBoxController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'ص.ب (P.O Box)',
                       border: OutlineInputBorder(),
@@ -474,6 +499,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _telephoneController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'هاتف (Telephone)',
                       border: OutlineInputBorder(),
@@ -484,6 +510,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _faxController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'فاكس (Fax)',
                       border: OutlineInputBorder(),
@@ -494,6 +521,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                 Expanded(
                   child: TextFormField(
                     controller: _mobileController,
+                    enabled: canEditCompanyInfo,
                     decoration: const InputDecoration(
                       labelText: 'جوال (Mobile)',
                       border: OutlineInputBorder(),
@@ -514,11 +542,13 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                     (curr) => DropdownMenuItem(value: curr, child: Text(curr)),
                   )
                   .toList(),
-              onChanged: (val) {
-                setState(() {
-                  _selectedCurrency = val;
-                });
-              },
+              onChanged: canEditCompanyInfo
+                  ? (val) {
+                      setState(() {
+                        _selectedCurrency = val;
+                      });
+                    }
+                  : null,
             ),
             const SizedBox(height: 16),
             Container(
@@ -602,7 +632,13 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                           runSpacing: 8,
                           children: [
                             ElevatedButton.icon(
-                              onPressed: _selectLogo,
+                              onPressed:
+                                  PermissionRuntime.allows(
+                                    'system_settings',
+                                    AppPermissionAction.edit,
+                                  )
+                                  ? _selectLogo
+                                  : null,
                               icon: const Icon(Icons.upload_file),
                               label: Text(
                                 hasPreviewLogo
@@ -612,7 +648,13 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
                             ),
                             if (selectedLogoPath.isNotEmpty)
                               OutlinedButton.icon(
-                                onPressed: _removeLogo,
+                                onPressed:
+                                    PermissionRuntime.allows(
+                                      'system_settings',
+                                      AppPermissionAction.edit,
+                                    )
+                                    ? _removeLogo
+                                    : null,
                                 icon: const Icon(Icons.delete_outline),
                                 label: const Text('إزالة الشعار'),
                               ),
@@ -627,6 +669,7 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             const SizedBox(height: 16),
             TextFormField(
               controller: _termsController,
+              enabled: canEditCompanyInfo,
               minLines: 7,
               maxLines: 12,
               textDirection: TextDirection.rtl,
@@ -640,7 +683,14 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             ),
             const SizedBox(height: 32),
             ElevatedButton(
-              onPressed: _isSavingCompany ? null : _saveCompanyInfo,
+              onPressed:
+                  _isSavingCompany ||
+                      !PermissionRuntime.allows(
+                        'system_settings',
+                        AppPermissionAction.edit,
+                      )
+                  ? null
+                  : _saveCompanyInfo,
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.all(16),
               ),
@@ -654,206 +704,6 @@ class _CompanyInfoTabState extends State<CompanyInfoTab> {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class UsersTab extends StatefulWidget {
-  const UsersTab({super.key});
-
-  @override
-  State<UsersTab> createState() => _UsersTabState();
-}
-
-class _UsersTabState extends State<UsersTab> {
-  List<Map<String, dynamic>> _users = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadUsers();
-  }
-
-  Future<void> _loadUsers() async {
-    final users = await DatabaseHelper.instance.getAllUsers();
-    setState(() {
-      _users = users;
-      _isLoading = false;
-    });
-  }
-
-  void _showAddUserDialog() {
-    final formKey = GlobalKey<FormState>();
-    final fullNameController = TextEditingController();
-    final usernameController = TextEditingController();
-    final passwordController = TextEditingController();
-    final currentRole = Provider.of<AuthProvider>(
-      context,
-      listen: false,
-    ).currentUser?.role;
-    String selectedRole = 'DataEntry';
-
-    final List<String> roles = [
-      if (currentRole == 'SuperAdmin') 'SuperAdmin',
-      'Admin',
-      'Accountant',
-      'DataEntry',
-    ];
-    final Map<String, String> roleLabels = {
-      'SuperAdmin': 'SuperAdmin (مدير نظام)',
-      'Admin': 'Admin (مدير)',
-      'Accountant': 'Accountant (محاسب)',
-      'DataEntry': 'DataEntry (مدخل بيانات)',
-    };
-
-    showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('إضافة مستخدم جديد'),
-              content: Form(
-                key: formKey,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextFormField(
-                      controller: fullNameController,
-                      decoration: const InputDecoration(
-                        labelText: 'الاسم الكامل',
-                      ),
-                      validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                    ),
-                    TextFormField(
-                      controller: usernameController,
-                      decoration: const InputDecoration(
-                        labelText: 'اسم المستخدم',
-                      ),
-                      validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                    ),
-                    TextFormField(
-                      controller: passwordController,
-                      decoration: const InputDecoration(
-                        labelText: 'كلمة المرور',
-                      ),
-                      obscureText: true,
-                      validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                    ),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      initialValue: selectedRole,
-                      decoration: const InputDecoration(labelText: 'الدور'),
-                      items: roles.map((role) {
-                        return DropdownMenuItem<String>(
-                          value: role,
-                          child: Text(roleLabels[role]!),
-                        );
-                      }).toList(),
-                      onChanged: (String? newValue) {
-                        if (newValue != null) {
-                          setDialogState(() {
-                            selectedRole = newValue;
-                          });
-                        }
-                      },
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('إلغاء'),
-                ),
-                ElevatedButton(
-                  onPressed: () async {
-                    if (formKey.currentState!.validate()) {
-                      if (selectedRole == 'SuperAdmin' &&
-                          currentRole != 'SuperAdmin') {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'لا تملك صلاحية إنشاء مدير نظام أعلى.',
-                            ),
-                          ),
-                        );
-                        return;
-                      }
-                      final hashedPassword = CryptoUtils.hashPassword(
-                        passwordController.text,
-                      );
-                      await DatabaseHelper.instance.insertUser({
-                        'full_name': fullNameController.text,
-                        'username': usernameController.text,
-                        'password_hash': hashedPassword,
-                        'role': selectedRole,
-                      });
-                      if (context.mounted) {
-                        Navigator.pop(context);
-                        _loadUsers();
-                      }
-                    }
-                  },
-                  child: const Text('حفظ'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_isLoading) return const Center(child: CircularProgressIndicator());
-
-    return Padding(
-      padding: const EdgeInsets.all(24.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'إدارة المستخدمين',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-              ElevatedButton.icon(
-                onPressed: _showAddUserDialog,
-                icon: const Icon(Icons.add),
-                label: const Text('إضافة مستخدم'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Expanded(
-            child: SingleChildScrollView(
-              child: ErpDataTable(
-                columns: const [
-                  DataColumn(label: Text('المعرف')),
-                  DataColumn(label: Text('الاسم الكامل')),
-                  DataColumn(label: Text('اسم المستخدم')),
-                  DataColumn(label: Text('الدور')),
-                ],
-                rows: _users.map((user) {
-                  return DataRow(
-                    cells: [
-                      DataCell(Text(user['id'].toString())),
-                      DataCell(Text(user['full_name'])),
-                      DataCell(Text(user['username'])),
-                      DataCell(Text(user['role'])),
-                    ],
-                  );
-                }).toList(),
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1231,7 +1081,13 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
         ),
         const SizedBox(width: 12),
         OutlinedButton.icon(
-          onPressed: _isBackingUp || _isRestoring
+          onPressed:
+              _isBackingUp ||
+                  _isRestoring ||
+                  !PermissionRuntime.allows(
+                    'system_settings',
+                    AppPermissionAction.edit,
+                  )
               ? null
               : () => _selectBackupFolder(external: external),
           icon: const Icon(Icons.folder),
@@ -1256,7 +1112,7 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'اختر وجهة محلية، خارجية (مثل USB)، أو كلتيهما. كل نسخة تُفحص بسلامة SQLite والعلاقات قبل اعتمادها. لا يُستبدل ملف نسخة موجود.',
+              'اختر وجهة محلية، خارجية (مثل USB)، أو كلتيهما. يلزم إذن تعديل إعدادات النظام. النسخة لا تحتوي مفتاح SMS السري؛ أعد إدخاله بعد الاستعادة. كل نسخة تُفحص ولا يُستبدل ملف موجود.',
             ),
             const SizedBox(height: 16),
             _backupLocationRow(
@@ -1276,7 +1132,13 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
               runSpacing: 8,
               children: [
                 ElevatedButton.icon(
-                  onPressed: _isBackingUp || _isRestoring
+                  onPressed:
+                      _isBackingUp ||
+                          _isRestoring ||
+                          !PermissionRuntime.allows(
+                            'system_settings',
+                            AppPermissionAction.edit,
+                          )
                       ? null
                       : _performBackup,
                   icon: _isBackingUp
@@ -1295,7 +1157,13 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
                   ),
                 ),
                 OutlinedButton.icon(
-                  onPressed: _isBackingUp || _isRestoring
+                  onPressed:
+                      _isBackingUp ||
+                          _isRestoring ||
+                          !PermissionRuntime.allows(
+                            'system_settings',
+                            AppPermissionAction.delete,
+                          )
                       ? null
                       : _selectAndRestoreBackup,
                   icon: _isRestoring
@@ -1333,7 +1201,13 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
-              onPressed: _isBackingUp || _isRestoring
+              onPressed:
+                  _isBackingUp ||
+                      _isRestoring ||
+                      !PermissionRuntime.allows(
+                        'system_settings',
+                        AppPermissionAction.delete,
+                      )
                   ? null
                   : _showFactoryResetDialog,
               icon: const Icon(Icons.warning, color: Colors.white),

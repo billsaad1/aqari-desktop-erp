@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/permission_policy.dart';
 import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/sms_provider.dart';
@@ -21,11 +22,10 @@ class _SmsMainScreenState extends State<SmsMainScreen>
   @override
   void initState() {
     super.initState();
-    final role = Provider.of<AuthProvider>(
+    _canConfigure = Provider.of<AuthProvider>(
       context,
       listen: false,
-    ).currentUser?.role;
-    _canConfigure = role == 'SuperAdmin' || role == 'Admin';
+    ).canPerform('sms', AppPermissionAction.edit);
     _tabController = TabController(length: _canConfigure ? 3 : 2, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Provider.of<SmsProvider>(context, listen: false).loadSmsData();

@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 
 import '../../core/print_utils.dart';
 import '../../core/pdf_preview_dialog.dart';
+import '../../core/permission_policy.dart';
 import '../../database/database_helper.dart';
 
 class VoucherHistoryScreen extends StatefulWidget {
@@ -334,6 +335,7 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
           preferredIntent: saveAsPdf
               ? PdfPreviewIntent.save
               : PdfPreviewIntent.printDocument,
+          permissionModule: 'voucher_history',
         );
       }
     } catch (e) {
@@ -415,7 +417,12 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   OutlinedButton.icon(
-                    onPressed: _isWorking
+                    onPressed:
+                        _isWorking ||
+                            !PermissionRuntime.allows(
+                              'voucher_history',
+                              AppPermissionAction.print,
+                            )
                         ? null
                         : () => _export(saveAsPdf: false),
                     icon: const Icon(Icons.print),
@@ -423,7 +430,12 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton.icon(
-                    onPressed: _isWorking
+                    onPressed:
+                        _isWorking ||
+                            !PermissionRuntime.allows(
+                              'voucher_history',
+                              AppPermissionAction.print,
+                            )
                         ? null
                         : () => _export(saveAsPdf: true),
                     icon: const Icon(Icons.picture_as_pdf),
