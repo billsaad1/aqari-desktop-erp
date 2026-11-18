@@ -16,6 +16,7 @@ import 'package:app/database/database_integrity_migrations.dart';
 import 'package:app/models/company_info_model.dart';
 import 'package:app/features/general_accounting/chart_of_accounts_screen.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
+import 'package:app/features/tenant_financial/tenant_payment_screen.dart';
 import 'package:app/features/tenants_leasing/tenants_screen.dart';
 import 'package:app/providers/auth_provider.dart';
 import 'package:app/providers/accounting_provider.dart';
@@ -157,6 +158,52 @@ void main() {
           role: 'SuperAdmin',
           permissionRows: const [],
         );
+      },
+    );
+
+    test(
+      'tenant receipt detail reads require tenant finance view, not voucher history view',
+      () async {
+        PermissionRuntime.activate(
+          userId: 42,
+          role: 'Accountant',
+          permissionRows: [
+            {
+              'screen_name': 'tenant_financial',
+              'can_view': 1,
+              'can_add': 0,
+              'can_edit': 0,
+              'can_delete': 0,
+              'can_print': 0,
+              'can_post': 0,
+            },
+            {
+              'screen_name': 'voucher_history',
+              'can_view': 0,
+              'can_add': 0,
+              'can_edit': 0,
+              'can_delete': 0,
+              'can_print': 0,
+              'can_post': 0,
+            },
+          ],
+        );
+        try {
+          expect(
+            await DatabaseHelper.instance.getTenantReceiptVoucherDetails(-1),
+            isNull,
+          );
+          await expectLater(
+            DatabaseHelper.instance.getVoucherDetails(-1),
+            throwsStateError,
+          );
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+        }
       },
     );
 
@@ -1736,7 +1783,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        15,
+        17,
       );
       expect(
         (await restored.rawQuery(
@@ -1779,7 +1826,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        15,
+        17,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -2284,18 +2331,12 @@ void main() {
         throwsArgumentError,
       );
       await expectLater(
-        DatabaseHelper.instance.insertTenantPaymentVoucher(
+        DatabaseHelper.instance.insertTenantRefundVoucher(
           tenantId: tenantId,
           amount: 10.0,
           voucherDate: '2026-11-10',
           cashAccountId: cashGroupId,
-          offsetAccountId:
-              (await db.query(
-                    'accounts',
-                    where: "account_type = 'Expense' AND parent_id IS NOT NULL",
-                    limit: 1,
-                  )).single['id']
-                  as int,
+          collectionAllocationId: -1,
           description: 'حساب نقدية تجميعي',
         ),
         throwsArgumentError,
@@ -2409,20 +2450,22 @@ void main() {
       expect((generalDetails!['voucher'] as Map)['party_name'], 'اختبار');
       expect((generalDetails['journal_lines'] as List).length, 2);
 
-      final expenseAccount = (await db.query(
-        'accounts',
-        where: "account_type = 'Expense' AND parent_id IS NOT NULL",
+      final refundSource = (await db.query(
+        'collection_allocations',
+        where: 'voucher_id = ?',
+        whereArgs: [receiptId],
+        orderBy: 'id',
         limit: 1,
       )).single;
-      final paymentId = await DatabaseHelper.instance
-          .insertTenantPaymentVoucher(
-            tenantId: tenantId,
-            amount: 25.0,
-            voucherDate: '2026-11-10',
-            cashAccountId: cashAccountId,
-            offsetAccountId: expenseAccount['id'] as int,
-            description: 'رد تأمين اختبار',
-          );
+      final refundSourceId = refundSource['id'] as int;
+      final paymentId = await DatabaseHelper.instance.insertTenantRefundVoucher(
+        tenantId: tenantId,
+        amount: 25.0,
+        voucherDate: '2026-11-10',
+        cashAccountId: cashAccountId,
+        collectionAllocationId: refundSourceId,
+        description: 'رد جزء من سند القبض الاختباري',
+      );
       final paymentDetails = await DatabaseHelper.instance.getVoucherDetails(
         paymentId,
       );
@@ -2432,6 +2475,74 @@ void main() {
         'مستأجر الاختبار',
       );
       expect((paymentDetails['journal_lines'] as List).length, 2);
+      final refundLinks = paymentDetails['refunds'] as List;
+      expect(refundLinks, hasLength(1));
+      expect(refundLinks.single['source_receipt_voucher_id'], receiptId);
+      expect(refundLinks.single['allocated_amount'], 25.0);
+      expect(refundLinks.single['rent_refund_amount'], 25.0);
+      expect(refundLinks.single['tax_refund_amount'], 0.0);
+      final refundPdf = await PrintUtils.buildVoucherPdf(
+        voucherType: 'سند رد مستأجر',
+        voucherNo: paymentId,
+        date: '2026-11-10',
+        targetName: 'مستأجر الاختبار',
+        amount: 25.0,
+        accountName: 'الصندوق الرئيسي',
+        description: 'رد مرتبط بالمصدر',
+        refundAllocations: refundLinks
+            .map((row) => Map<String, dynamic>.from(row as Map))
+            .toList(),
+      );
+      expect(refundPdf, isNotEmpty);
+      final remainingAfterPartialRefund = await DatabaseHelper.instance
+          .getRefundableCollectionAllocations(tenantId);
+      expect(
+        remainingAfterPartialRefund.singleWhere(
+          (row) => row['collection_allocation_id'] == refundSourceId,
+        )['remaining_amount'],
+        75.0,
+      );
+      final vouchersBeforeExcessRefund = (await db.query('vouchers')).length;
+      final journalsBeforeExcessRefund = (await db.query(
+        'journal_entries',
+      )).length;
+      await expectLater(
+        DatabaseHelper.instance.insertTenantRefundVoucher(
+          tenantId: tenantId,
+          amount: 75.01,
+          voucherDate: '2026-11-10',
+          cashAccountId: cashAccountId,
+          collectionAllocationId: refundSourceId,
+          description: 'اختبار تجاوز سقف الرد',
+        ),
+        throwsStateError,
+      );
+      expect((await db.query('vouchers')).length, vouchersBeforeExcessRefund);
+      expect(
+        (await db.query('journal_entries')).length,
+        journalsBeforeExcessRefund,
+      );
+      await DatabaseHelper.instance.insertTenantRefundVoucher(
+        tenantId: tenantId,
+        amount: 75.0,
+        voucherDate: '2026-11-10',
+        cashAccountId: cashAccountId,
+        collectionAllocationId: refundSourceId,
+        description: 'إكمال رد مصدر القبض',
+      );
+      final fullyRefundedSource = (await db.query(
+        'collection_allocation_balances',
+        where: 'id = ?',
+        whereArgs: [refundSourceId],
+      )).single;
+      expect(fullyRefundedSource['remaining_minor'], 0);
+      final refundedInstallment = (await db.query(
+        'contract_installments',
+        where: 'id = ?',
+        whereArgs: [storedInstallments[0]['id']],
+      )).single;
+      expect(refundedInstallment['paid_amount'], 0.0);
+      expect(refundedInstallment['status'], 'Unpaid');
 
       final taxAccountId =
           (await db.query(
@@ -2778,14 +2889,14 @@ void main() {
       expect(protectedInstallments, hasLength(12));
 
       final summary = await DatabaseHelper.instance.getDashboardSummary();
-      expect((summary['outstanding_amount'] as num).toDouble(), 965.0);
+      expect((summary['outstanding_amount'] as num).toDouble(), 1065.0);
       final tenantFinancialSearch = await DatabaseHelper.instance
           .searchTenantsAndContracts('مستأجر الاختبار');
       final searchedContract = tenantFinancialSearch.singleWhere(
         (row) => row['contract_id'] == contractId,
       );
       expect(searchedContract['total_amount'], 1230.0);
-      expect(searchedContract['paid_amount'], 265.0);
+      expect(searchedContract['paid_amount'], 165.0);
       final dueInstallments = await DatabaseHelper.instance.getDueInstallments(
         500,
       );
@@ -3055,6 +3166,32 @@ void main() {
     );
   });
 
+  testWidgets('tenant refund screen requires an original receipt source', (
+    tester,
+  ) async {
+    final leasingProvider = _TestLeasingProvider();
+    final accountingProvider = _TestAccountingProvider();
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<LeasingProvider>.value(value: leasingProvider),
+          ChangeNotifierProvider<AccountingProvider>.value(
+            value: accountingProvider,
+          ),
+        ],
+        child: const MaterialApp(home: Scaffold(body: TenantPaymentScreen())),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('استرداد مستأجر مرتبط بمصدر قبض'), findsOneWidget);
+    expect(find.text('مصدر القبض الأصلي'), findsOneWidget);
+    expect(find.text('يُصرف من حساب (الصندوق/البنك)'), findsOneWidget);
+    expect(find.text('الحساب المقابل'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    leasingProvider.dispose();
+    accountingProvider.dispose();
+  });
+
   testWidgets('voucher history lists persisted tenant and general vouchers', (
     tester,
   ) async {
@@ -3066,7 +3203,7 @@ void main() {
     );
     await tester.pump();
     expect(find.text('سجل السندات'), findsOneWidget);
-    expect(find.textContaining('سند صرف مستأجر رقم'), findsOneWidget);
+    expect(find.textContaining('سند صرف مستأجر رقم'), findsWidgets);
     await tester.drag(find.byType(ListView), const Offset(0, -500));
     await tester.pump();
     expect(find.textContaining('سند قبض مستأجر رقم'), findsWidgets);
@@ -3202,7 +3339,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        15,
+        17,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -3651,7 +3788,162 @@ void main() {
     () async {
       final helper = DatabaseHelper.instance;
       final db = await helper.database;
+      final tenantAccountId =
+          (await db.query(
+                'accounts',
+                where:
+                    "account_type = 'Asset' AND code NOT LIKE '11%' AND parent_id IS NOT NULL",
+                limit: 1,
+              )).single['id']
+              as int;
+      final cashAccountId =
+          (await db.query(
+                'accounts',
+                where:
+                    "account_type = 'Asset' AND code LIKE '11%' AND parent_id IS NOT NULL",
+                limit: 1,
+              )).single['id']
+              as int;
+      final expenseAccountId =
+          (await db.query(
+                'accounts',
+                where: "account_type = 'Expense' AND parent_id IS NOT NULL",
+                limit: 1,
+              )).single['id']
+              as int;
+      final legacyTenantId = await db.insert('tenants', {
+        'name': 'مستأجر صرف قديم للمراجعة',
+        'account_id': tenantAccountId,
+      });
+      final legacyOwnerId = await db.insert('owners', {
+        'name': 'مالك ترحيل الاسترداد',
+      });
+      final legacyPropertyId = await db.insert('properties', {
+        'name': 'عقار ترحيل الاسترداد',
+        'owner_id': legacyOwnerId,
+      });
+      final legacyUnitId = await db.insert('units', {
+        'property_id': legacyPropertyId,
+        'unit_number': 'MIG-1',
+      });
+      final legacyContractId = await db.insert('contracts', {
+        'tenant_id': legacyTenantId,
+        'unit_id': legacyUnitId,
+        'start_date': '2025-01-01',
+        'end_date': '2025-12-31',
+        'rent_amount': 10.0,
+      });
+      final legacyInstallmentId = await db.insert('contract_installments', {
+        'contract_id': legacyContractId,
+        'amount': 10.0,
+        'paid_amount': 10.0,
+        'due_date': '2025-01-01',
+        'status': 'Paid',
+      });
+      final excessInstallmentId = await db.insert('contract_installments', {
+        'contract_id': legacyContractId,
+        'amount': 2.0,
+        'paid_amount': 2.0,
+        'due_date': '2025-02-01',
+        'status': 'Paid',
+      });
+      final legacyReceiptJournalId = await db.insert('journal_entries', {
+        'entry_date': '2025-05-10',
+        'description': 'قيد قبض تاريخي للاختبار',
+        'is_posted': 1,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': legacyReceiptJournalId,
+        'account_id': cashAccountId,
+        'debit': 11.5,
+        'credit': 0.0,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': legacyReceiptJournalId,
+        'account_id': tenantAccountId,
+        'debit': 0.0,
+        'credit': 11.5,
+      });
+      final legacyReceiptId = await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2025-05-10',
+        'amount': 11.5,
+        'tenant_id': legacyTenantId,
+        'journal_entry_id': legacyReceiptJournalId,
+        'description': 'قبض قديم للقسط',
+      });
+      await db.insert('voucher_installment_allocations', {
+        'voucher_id': legacyReceiptId,
+        'installment_id': legacyInstallmentId,
+        'amount': 10.0,
+      });
+      final unverifiedReceiptJournalId = await db.insert('journal_entries', {
+        'entry_date': '2025-05-09',
+        'description': 'قيد قبض غير مطابق للمبلغ لاختبار الترحيل',
+        'is_posted': 1,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': unverifiedReceiptJournalId,
+        'account_id': cashAccountId,
+        'debit': 1.0,
+        'credit': 0.0,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': unverifiedReceiptJournalId,
+        'account_id': tenantAccountId,
+        'debit': 0.0,
+        'credit': 1.0,
+      });
+      final unverifiedReceiptId = await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2025-05-09',
+        'amount': 3.0,
+        'tenant_id': legacyTenantId,
+        'journal_entry_id': unverifiedReceiptJournalId,
+        'description': 'سند استلام أقدم من قيده المثبت',
+      });
+      await db.insert('voucher_installment_allocations', {
+        'voucher_id': unverifiedReceiptId,
+        'installment_id': excessInstallmentId,
+        'amount': 3.0,
+      });
+      final legacyRefundJournalId = await db.insert('journal_entries', {
+        'entry_date': '2025-05-11',
+        'description': 'رد تاريخي مصروف على حساب مصروف',
+        'is_posted': 1,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': legacyRefundJournalId,
+        'account_id': expenseAccountId,
+        'debit': 5.0,
+        'credit': 0.0,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': legacyRefundJournalId,
+        'account_id': cashAccountId,
+        'debit': 0.0,
+        'credit': 5.0,
+      });
+      final legacyRefundVoucherId = await db.insert('vouchers', {
+        'voucher_type': 'صرف مستأجر',
+        'voucher_date': '2025-05-11',
+        'amount': 5.0,
+        'tenant_id': legacyTenantId,
+        'journal_entry_id': legacyRefundJournalId,
+        'description': 'رد قديم يحتاج إعادة تصنيف',
+      });
+      final legacyPaymentVoucherId = await db.insert('vouchers', {
+        'voucher_type': 'صرف مستأجر',
+        'voucher_date': '2025-05-12',
+        'amount': 42.25,
+        'tenant_id': legacyTenantId,
+        'description': 'صرف قديم غير مربوط بالمصدر',
+      });
       await db.execute('PRAGMA foreign_keys = OFF');
+      await db.execute('DROP VIEW collection_allocation_balances');
+      await db.execute('DROP TABLE refund_allocations');
+      await db.execute('DROP TABLE collection_allocations');
+      await db.execute('DROP TABLE legacy_tenant_payment_reviews');
       await db.execute('DROP TABLE voucher_invoice_allocations');
       await db.execute('DROP INDEX tax_invoices_installment_unique');
       await db.execute('DROP TABLE tax_invoices');
@@ -3671,9 +3963,25 @@ void main() {
         'name_ar': 'منشأة قديمة بلا نسبة محفوظة',
       });
       final invoiceId = await db.insert('tax_invoices', {
+        'contract_id': legacyContractId,
         'invoice_date': '2025-05-10',
-        'total_amount': 115.0,
-        'tax_amount': 15.0,
+        'total_amount': 11.5,
+        'tax_amount': 1.5,
+      });
+      await db.execute('''
+        CREATE TABLE voucher_invoice_allocations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          voucher_id INTEGER NOT NULL,
+          invoice_id INTEGER NOT NULL,
+          amount REAL NOT NULL CHECK (amount > 0),
+          FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
+          FOREIGN KEY (invoice_id) REFERENCES tax_invoices (id)
+        )
+      ''');
+      await db.insert('voucher_invoice_allocations', {
+        'voucher_id': legacyReceiptId,
+        'invoice_id': invoiceId,
+        'amount': 11.5,
       });
       await db.execute('PRAGMA user_version = 13');
       await helper.close();
@@ -3681,7 +3989,7 @@ void main() {
       final upgraded = await helper.database;
       expect(
         (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
-        15,
+        17,
       );
       final company = (await upgraded.query(
         'company_info',
@@ -3694,12 +4002,237 @@ void main() {
         where: 'id = ?',
         whereArgs: [invoiceId],
       )).single;
-      expect(invoice['net_amount'], 100.0);
-      expect(invoice['tax_amount'], 15.0);
-      expect(invoice['total_amount'], 115.0);
+      expect(invoice['net_amount'], 10.0);
+      expect(invoice['tax_amount'], 1.5);
+      expect(invoice['total_amount'], 11.5);
       expect(invoice['tax_rate'], isNull);
       expect(invoice['installment_id'], isNull);
       expect(invoice['journal_entry_id'], isNull);
+      final legacyInvoiceReview = (await upgraded.query(
+        'legacy_invoice_reviews',
+        where: 'invoice_id = ?',
+        whereArgs: [invoiceId],
+      )).single;
+      expect(legacyInvoiceReview['contract_id'], legacyContractId);
+      expect(legacyInvoiceReview['status'], 'pending');
+      final legacyReview = (await upgraded.query(
+        'legacy_tenant_payment_reviews',
+        where: 'voucher_id = ?',
+        whereArgs: [legacyPaymentVoucherId],
+      )).single;
+      expect(legacyReview['tenant_id'], legacyTenantId);
+      expect(legacyReview['amount_minor'], 4225);
+      expect(legacyReview['status'], 'pending');
+      final legacyRefundReview = (await upgraded.query(
+        'legacy_tenant_payment_reviews',
+        where: 'voucher_id = ?',
+        whereArgs: [legacyRefundVoucherId],
+      )).single;
+      expect(legacyRefundReview['amount_minor'], 500);
+      expect(legacyRefundReview['status'], 'pending');
+      final vouchersBeforeLegacyGuard = (await upgraded.query(
+        'vouchers',
+      )).length;
+      await expectLater(
+        DatabaseHelper.instance.insertTenantReceiptVoucher(
+          tenantId: legacyTenantId,
+          amount: 1.0,
+          voucherDate: '2025-05-13',
+          cashAccountId: cashAccountId,
+          installmentsToUpdate: [
+            {'id': legacyInstallmentId, 'paid_amount': 10.0, 'status': 'Paid'},
+          ],
+        ),
+        throwsStateError,
+      );
+      expect(
+        (await upgraded.query('vouchers')).length,
+        vouchersBeforeLegacyGuard,
+      );
+      expect(await upgraded.query('collection_allocations'), isNotEmpty);
+      expect(
+        await upgraded.query(
+          'collection_allocations',
+          where: 'voucher_id = ?',
+          whereArgs: [unverifiedReceiptId],
+        ),
+        isEmpty,
+      );
+      expect(
+        (await upgraded.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type = 'view' AND name = ?",
+          ['collection_allocation_balances'],
+        )),
+        hasLength(1),
+      );
+      final migratedSource = (await upgraded.query(
+        'collection_allocations',
+        where: 'voucher_id = ?',
+        whereArgs: [legacyReceiptId],
+      )).single;
+      await upgraded.insert('voucher_installment_allocations', {
+        'voucher_id': legacyReceiptId,
+        'installment_id': excessInstallmentId,
+        'amount': 2.0,
+      });
+      await expectLater(
+        upgraded.insert('collection_allocations', {
+          'voucher_id': legacyReceiptId,
+          'installment_id': excessInstallmentId,
+          'amount_minor': 200,
+          'rent_amount_minor': 200,
+          'tax_amount_minor': 0,
+        }),
+        throwsA(isA<Exception>()),
+      );
+      final migratedSourceId = migratedSource['id'] as int;
+      await DatabaseHelper.instance.resolveLegacyTenantPaymentAsRefund(
+        voucherId: legacyRefundVoucherId,
+        allocations: [
+          {'collection_allocation_id': migratedSourceId, 'amount_minor': 500},
+        ],
+        reason: 'مراجعة المستند أثبتت أنه رد من سند القبض التاريخي',
+      );
+      final resolvedRefund = (await upgraded.query(
+        'legacy_tenant_payment_reviews',
+        where: 'voucher_id = ?',
+        whereArgs: [legacyRefundVoucherId],
+      )).single;
+      expect(resolvedRefund['status'], 'refund');
+      expect(resolvedRefund['reclassification_journal_entry_id'], isNotNull);
+      final adjustedInstallment = (await upgraded.query(
+        'contract_installments',
+        where: 'id = ?',
+        whereArgs: [legacyInstallmentId],
+      )).single;
+      expect(adjustedInstallment['paid_amount'], 5.0);
+      expect(
+        (await upgraded.query(
+          'refund_allocations',
+          where: 'refund_voucher_id = ?',
+          whereArgs: [legacyRefundVoucherId],
+        )),
+        hasLength(1),
+      );
+      await DatabaseHelper.instance.resolveLegacyTenantPaymentAsUnrelated(
+        voucherId: legacyPaymentVoucherId,
+        reason: 'تمت مراجعة المستند وتبين أنه صرف غير مرتبط بتحصيل إيجار',
+      );
+      final resolvedReview = (await upgraded.query(
+        'legacy_tenant_payment_reviews',
+        where: 'voucher_id = ?',
+        whereArgs: [legacyPaymentVoucherId],
+      )).single;
+      expect(resolvedReview['status'], 'unrelated');
+      expect(resolvedReview['reviewed_at'], isNotNull);
+      expect(
+        await upgraded.query(
+          'audit_logs',
+          where: "action = 'LEGACY_TENANT_PAYMENT_MARKED_UNRELATED'",
+        ),
+        isNotEmpty,
+      );
+      final vouchersBeforePendingInvoiceGuard = (await upgraded.query(
+        'vouchers',
+      )).length;
+      await expectLater(
+        DatabaseHelper.instance.insertTenantReceiptVoucher(
+          tenantId: legacyTenantId,
+          amount: 1.0,
+          voucherDate: '2025-05-14',
+          cashAccountId: cashAccountId,
+          installmentsToUpdate: [
+            {
+              'id': legacyInstallmentId,
+              'paid_amount': 6.0,
+              'status': 'Partially Paid',
+            },
+          ],
+        ),
+        throwsStateError,
+      );
+      expect(
+        (await upgraded.query('vouchers')).length,
+        vouchersBeforePendingInvoiceGuard,
+      );
+      final legacySourceBeforeGuard = (await upgraded.query(
+        'collection_allocations',
+        where: 'voucher_id = ?',
+        whereArgs: [legacyReceiptId],
+      )).single;
+      await expectLater(
+        upgraded.transaction((txn) async {
+          await txn.update(
+            'tax_invoices',
+            {'installment_id': legacyInstallmentId},
+            where: 'id = ?',
+            whereArgs: [invoiceId],
+          );
+          await txn.update(
+            'collection_allocations',
+            {'invoice_id': invoiceId},
+            where: 'id = ?',
+            whereArgs: [legacySourceBeforeGuard['id']],
+          );
+        }),
+        throwsException,
+      );
+      expect(
+        (await upgraded.query(
+          'tax_invoices',
+          where: 'id = ?',
+          whereArgs: [invoiceId],
+        )).single['installment_id'],
+        isNull,
+      );
+      expect(
+        (await upgraded.query(
+          'collection_allocations',
+          where: 'id = ?',
+          whereArgs: [legacySourceBeforeGuard['id']],
+        )).single['invoice_id'],
+        isNull,
+      );
+      await DatabaseHelper.instance.resolveLegacyInvoiceAsInstallment(
+        invoiceId: invoiceId,
+        installmentId: legacyInstallmentId,
+        reason:
+            'تمت مطابقة أصل الفاتورة مع القسط وإيصال القبض بعد مراجعة السندات',
+      );
+      final linkedLegacyInvoice = (await upgraded.query(
+        'tax_invoices',
+        where: 'id = ?',
+        whereArgs: [invoiceId],
+      )).single;
+      expect(linkedLegacyInvoice['installment_id'], legacyInstallmentId);
+      final resolvedInvoiceReview = (await upgraded.query(
+        'legacy_invoice_reviews',
+        where: 'invoice_id = ?',
+        whereArgs: [invoiceId],
+      )).single;
+      expect(resolvedInvoiceReview['status'], 'linked');
+      final linkedLegacySource = (await upgraded.query(
+        'collection_allocations',
+        where: 'voucher_id = ? AND invoice_id = ?',
+        whereArgs: [legacyReceiptId, invoiceId],
+      )).single;
+      expect(linkedLegacySource['amount_minor'], 1150);
+      expect(linkedLegacySource['rent_amount_minor'], 1000);
+      expect(linkedLegacySource['tax_amount_minor'], 150);
+      final openLegacyInvoice =
+          (await DatabaseHelper.instance.getOpenTaxInvoicesForTenant(
+            legacyTenantId,
+          )).singleWhere((row) => row['id'] == invoiceId);
+      expect(openLegacyInvoice['paid_amount'], 6.5);
+      expect(openLegacyInvoice['remaining_amount'], 5.0);
+
+      expect(
+        await upgraded.query(
+          'audit_logs',
+          where: "action = 'LEGACY_TENANT_PAYMENT_RECONCILED_AS_REFUND'",
+        ),
+        isNotEmpty,
+      );
     },
   );
 }
@@ -3798,6 +4331,9 @@ class _TestLeasingProvider extends LeasingProvider {
 
   @override
   bool get isLoading => false;
+
+  @override
+  Future<void> loadInitialData() async {}
 
   @override
   Future<void> updateTenant(Map<String, dynamic> tenant) async {

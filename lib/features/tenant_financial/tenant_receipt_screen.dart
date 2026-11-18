@@ -31,6 +31,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   List<Map<String, dynamic>> _openTaxInvoices = [];
   bool _isLoadingReceivables = false;
   bool _isProcessing = false;
+  List<Map<String, dynamic>> _legacyPayments = [];
+  List<Map<String, dynamic>> _legacyInvoices = [];
+  String? _legacyPaymentsError;
   int _receivablesRequestId = 0;
 
   Map<String, dynamic>? get _selectedInvoice {
@@ -71,39 +74,47 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _openTaxInvoices = [];
       _selectedInvoiceId = null;
       _amountController.clear();
+      if (tenantId == null) {
+        _legacyPayments = [];
+        _legacyInvoices = [];
+        _legacyPaymentsError = null;
+      }
     });
     if (tenantId == null) return;
 
     try {
-      if (invoiceMode) {
-        final invoices = await DatabaseHelper.instance
-            .getOpenTaxInvoicesForTenant(tenantId);
-        if (!mounted ||
-            requestId != _receivablesRequestId ||
-            tenantId != _selectedTenantId ||
-            invoiceMode != _isInvoicePaymentMode) {
-          return;
-        }
-        setState(() {
-          _openTaxInvoices = invoices;
-          _isLoadingReceivables = false;
-        });
-      } else {
-        final installments = await DatabaseHelper.instance
-            .getUnbilledInstallmentsForTenant(tenantId);
-        installments.sort(
+      final results = await Future.wait([
+        invoiceMode
+            ? DatabaseHelper.instance.getOpenTaxInvoicesForTenant(tenantId)
+            : DatabaseHelper.instance.getUnbilledInstallmentsForTenant(
+                tenantId,
+              ),
+        DatabaseHelper.instance.getPendingLegacyTenantPayments(tenantId),
+        DatabaseHelper.instance.getPendingLegacyInvoiceReviewsForTenant(
+          tenantId,
+        ),
+      ]);
+      final receivables = results[0];
+      if (!invoiceMode) {
+        receivables.sort(
           (a, b) =>
               a['due_date'].toString().compareTo(b['due_date'].toString()),
         );
-        if (!mounted ||
-            requestId != _receivablesRequestId ||
-            tenantId != _selectedTenantId ||
-            invoiceMode != _isInvoicePaymentMode) {
-          return;
-        }
-        setState(() {
-          _unpaidInstallments = installments;
-          _isLoadingReceivables = false;
+      }
+      if (!mounted ||
+          requestId != _receivablesRequestId ||
+          tenantId != _selectedTenantId ||
+          invoiceMode != _isInvoicePaymentMode) {
+        return;
+      }
+      setState(() {
+        _legacyPayments = results[1];
+        _legacyInvoices = results[2];
+        _legacyPaymentsError = null;
+        if (invoiceMode) {
+          _openTaxInvoices = receivables;
+        } else {
+          _unpaidInstallments = receivables;
           if (_unpaidInstallments.isNotEmpty) {
             final first = _unpaidInstallments.first;
             final totalCents = ((first['amount'] as num).toDouble() * 100)
@@ -115,20 +126,27 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
               ((totalCents - paidCents).clamp(0, totalCents)) / 100,
             );
           }
-        });
-      }
-    } catch (e) {
+        }
+        _isLoadingReceivables = false;
+      });
+    } catch (error) {
       if (!mounted ||
           requestId != _receivablesRequestId ||
           tenantId != _selectedTenantId ||
           invoiceMode != _isInvoicePaymentMode) {
         return;
       }
-      setState(() => _isLoadingReceivables = false);
+      setState(() {
+        _isLoadingReceivables = false;
+        _legacyPaymentsError =
+            'تعذر التحقق من المراجعات أو تحميل المستحقات: $error';
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            invoiceMode ? 'تعذر تحميل الفواتير: $e' : 'تعذر تحميل الأقساط: $e',
+            invoiceMode
+                ? 'تعذر تحميل الفواتير: $error'
+                : 'تعذر تحميل الأقساط: $error',
           ),
         ),
       );
@@ -142,6 +160,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _amountController.clear();
+      _legacyPayments = [];
+      _legacyInvoices = [];
+      _legacyPaymentsError = null;
     });
     _loadTenantReceivables(tenantId);
   }
@@ -170,6 +191,21 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
 
   Future<void> _processReceipt({required bool saveAsPdf}) async {
     if (_isProcessing) return;
+    if (_legacyPaymentsError != null ||
+        _legacyPayments.isNotEmpty ||
+        _legacyInvoices.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _legacyPaymentsError ??
+                (_legacyInvoices.isNotEmpty
+                    ? 'راجع الفواتير التاريخية غير المرتبطة بقسط قبل تسجيل أي حركة جديدة'
+                    : 'راجع سندات الصرف التاريخية للمستأجر قبل تسجيل قبض جديد'),
+          ),
+        ),
+      );
+      return;
+    }
     if (!_formKey.currentState!.validate() ||
         _selectedTenantId == null ||
         _selectedCashAccountId == null) {
@@ -316,7 +352,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           .firstWhere((a) => a['id'] == cashAccountId)['name']
           .toString();
       final voucherDetails = invoiceMode
-          ? await DatabaseHelper.instance.getVoucherDetails(voucherId)
+          ? await DatabaseHelper.instance.getTenantReceiptVoucherDetails(
+              voucherId,
+            )
           : null;
       if (invoiceMode && voucherDetails == null) {
         throw StateError('تعذر تحميل تخصيصات سند الفاتورة');
@@ -433,6 +471,21 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                           color: Colors.green,
                         ),
                       ),
+                      if (_legacyPaymentsError != null ||
+                          _legacyPayments.isNotEmpty ||
+                          _legacyInvoices.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Card(
+                          color: Colors.amber.shade50,
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Text(
+                              _legacyPaymentsError ??
+                                  'مراجعة مطلوبة: ${_legacyPayments.length} سند صرف قديم و${_legacyInvoices.length} فاتورة تاريخية غير مرتبطة بقسط. استخدم شاشة الاسترداد أو مراجعة الفواتير قبل أي حركة.',
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 24),
                       DropdownButtonFormField<int>(
                         initialValue: _selectedTenantId,
@@ -565,6 +618,10 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                             child: ElevatedButton.icon(
                               onPressed:
                                   _isProcessing ||
+                                      _isLoadingReceivables ||
+                                      _legacyPaymentsError != null ||
+                                      _legacyPayments.isNotEmpty ||
+                                      _legacyInvoices.isNotEmpty ||
                                       !PermissionRuntime.allows(
                                         'tenant_financial',
                                         AppPermissionAction.post,
@@ -595,6 +652,10 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                               child: OutlinedButton.icon(
                                 onPressed:
                                     _isProcessing ||
+                                        _isLoadingReceivables ||
+                                        _legacyPaymentsError != null ||
+                                        _legacyPayments.isNotEmpty ||
+                                        _legacyInvoices.isNotEmpty ||
                                         !PermissionRuntime.allows(
                                           'tenant_financial',
                                           AppPermissionAction.post,
