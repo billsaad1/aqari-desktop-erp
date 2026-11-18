@@ -633,6 +633,7 @@ class PrintUtils {
     List<Map<String, dynamic>> journalLines = const [],
     List<Map<String, dynamic>> installmentAllocations = const [],
     List<Map<String, dynamic>> invoiceAllocations = const [],
+    List<Map<String, dynamic>> refundAllocations = const [],
     bool isFinancialDocument = true,
   }) async {
     final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
@@ -805,7 +806,8 @@ class PrintUtils {
           ),
           if (journalLines.isNotEmpty ||
               standaloneInstallmentAllocations.isNotEmpty ||
-              invoiceAllocations.isNotEmpty) ...[
+              invoiceAllocations.isNotEmpty ||
+              refundAllocations.isNotEmpty) ...[
             pw.NewPage(),
             _documentTitle('ملحق تفاصيل السند'),
             buildLabelValue(
@@ -994,6 +996,55 @@ class PrintUtils {
                 style: const pw.TextStyle(fontSize: 7.5),
               );
             }),
+          ],
+          if (refundAllocations.isNotEmpty) ...[
+            pw.SizedBox(height: 10),
+            _documentTitle('مرجع الاسترداد'),
+            pw.SizedBox(height: 5),
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'سند القبض الأصلي',
+                'تاريخ القبض',
+                'الفاتورة / القسط',
+                'المبلغ المرتد',
+              ],
+              data: refundAllocations.map((refund) {
+                final invoiceId = refund['invoice_id'];
+                final installmentId = refund['installment_id'];
+                final reference = [
+                  if (invoiceId != null) 'فاتورة $invoiceId',
+                  if (installmentId != null) 'قسط $installmentId',
+                ].join(' / ');
+                return [
+                  'سند قبض رقم ${refund['source_receipt_voucher_id'] ?? '—'}',
+                  refund['source_receipt_date']?.toString() ?? '—',
+                  reference.isEmpty ? '—' : reference,
+                  formatPdfAmount(
+                    (refund['allocated_amount'] as num?)?.toDouble() ?? 0,
+                  ),
+                ];
+              }).toList(),
+              headerStyle: pw.TextStyle(
+                fontSize: 7.5,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration: pw.BoxDecoration(color: brandNavy),
+              cellStyle: const pw.TextStyle(fontSize: 7.5),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 4,
+                vertical: 4,
+              ),
+              tableDirection: pw.TextDirection.rtl,
+              headerDirection: pw.TextDirection.rtl,
+              columnWidths: const {
+                0: pw.FlexColumnWidth(1.4),
+                1: pw.FlexColumnWidth(1),
+                2: pw.FlexColumnWidth(1.6),
+                3: pw.FlexColumnWidth(1),
+              },
+              border: pw.TableBorder.all(color: softBorder, width: 0.5),
+            ),
           ],
         ],
       ),

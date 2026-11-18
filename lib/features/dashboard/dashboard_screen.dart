@@ -89,6 +89,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final moneyFormat = NumberFormat('#,##0.00', 'ar_SA');
     final outstanding =
         (_summary['outstanding_amount'] as num?)?.toDouble() ?? 0;
+    final pendingLegacyPaymentCount = _count(
+      'pending_legacy_tenant_payment_count',
+    );
+    final pendingLegacyPaymentAmount =
+        (_summary['pending_legacy_tenant_payment_amount'] as num?)
+            ?.toDouble() ??
+        0;
+    final pendingLegacyInvoiceCount = _count('pending_legacy_invoice_count');
+    final pendingLegacyInvoiceAmount =
+        (_summary['pending_legacy_invoice_amount'] as num?)?.toDouble() ?? 0;
+    final hasPendingLegacyReviews =
+        pendingLegacyPaymentCount > 0 || pendingLegacyInvoiceCount > 0;
     final items =
         <
           ({
@@ -197,6 +209,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
           const SizedBox(height: 24),
+          if (hasPendingLegacyReviews) ...[
+            Card(
+              color: const Color(0xFFFFF7E6),
+              child: Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(16, 12, 12, 12),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFF9A6700),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'الذمم المعروضة غير نهائية حتى مراجعة السجلات القديمة. '
+                        'صرف معلق: $pendingLegacyPaymentCount (${moneyFormat.format(pendingLegacyPaymentAmount)}). '
+                        'فواتير غير مرتبطة بقسط: $pendingLegacyInvoiceCount '
+                        '(${moneyFormat.format(pendingLegacyInvoiceAmount)} إجماليًا).',
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () =>
+                          context.read<NavigationProvider>().setIndex(5),
+                      child: const Text('مراجعة السجلات'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {

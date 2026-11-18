@@ -317,6 +317,11 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
           (invoice) => Map<String, dynamic>.from(invoice as Map),
         ),
       );
+      final refunds = List<Map<String, dynamic>>.from(
+        (_data!['refunds'] as List).map(
+          (refund) => Map<String, dynamic>.from(refund as Map),
+        ),
+      );
       final voucherType = voucher['voucher_type']?.toString() ?? '';
       final isGeneralVoucher = voucherType.contains('عام');
       final partyName = voucher['party_name']?.toString().trim() ?? '';
@@ -332,6 +337,7 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         journalLines: lines,
         installmentAllocations: installments,
         invoiceAllocations: invoices,
+        refundAllocations: refunds,
       );
       if (mounted) {
         await PdfDocumentPreviewDialog.show(
@@ -482,6 +488,13 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         ? rawInvoices
               .whereType<Map>()
               .map((invoice) => Map<String, dynamic>.from(invoice))
+              .toList()
+        : <Map<String, dynamic>>[];
+    final rawRefunds = _data!['refunds'];
+    final refunds = rawRefunds is List
+        ? rawRefunds
+              .whereType<Map>()
+              .map((refund) => Map<String, dynamic>.from(refund))
               .toList()
         : <Map<String, dynamic>>[];
     final invoicedInstallmentIds = invoices
@@ -644,6 +657,41 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ],
+                  ),
+                ),
+              );
+            }),
+          ],
+          if (voucher['voucher_type']?.toString().contains('صرف') == true &&
+              refunds.isNotEmpty) ...[
+            const SizedBox(height: 22),
+            const Text(
+              'مصدر الاسترداد',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            ...refunds.map((refund) {
+              final invoice = refund['invoice_id'];
+              final installment = refund['installment_id'];
+              return Card(
+                child: ListTile(
+                  leading: const Icon(
+                    Icons.assignment_return,
+                    color: Colors.deepOrange,
+                  ),
+                  title: Text(
+                    'رد من سند القبض رقم ${refund['source_receipt_voucher_id'] ?? '—'}',
+                  ),
+                  subtitle: Text(
+                    'تاريخ الأصل: ${refund['source_receipt_date'] ?? '—'}'
+                    '${invoice == null ? '' : ' • الفاتورة: $invoice'}'
+                    '${installment == null ? '' : ' • القسط: $installment'}'
+                    ' • للإيجار: ${_formatInvoiceAmount(refund['rent_refund_amount'])}'
+                    ' • للضريبة: ${_formatInvoiceAmount(refund['tax_refund_amount'])}',
+                  ),
+                  trailing: Text(
+                    _formatInvoiceAmount(refund['allocated_amount']),
+                    style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ),
               );

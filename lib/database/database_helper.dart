@@ -13,7 +13,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 15;
+  static const int _schemaVersion = 17;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -446,6 +446,45 @@ class DatabaseHelper {
         'invoice_id',
         'amount',
       ],
+      'collection_allocations': [
+        'id',
+        'voucher_id',
+        'installment_id',
+        'invoice_id',
+        'amount_minor',
+        'rent_amount_minor',
+        'tax_amount_minor',
+        'created_at',
+        'created_by',
+      ],
+      'refund_allocations': [
+        'id',
+        'refund_voucher_id',
+        'collection_allocation_id',
+        'amount_minor',
+        'rent_amount_minor',
+        'tax_amount_minor',
+        'created_at',
+        'created_by',
+      ],
+      'legacy_tenant_payment_reviews': [
+        'voucher_id',
+        'tenant_id',
+        'amount_minor',
+        'status',
+        'reason',
+        'reviewed_by',
+        'reviewed_at',
+        'reclassification_journal_entry_id',
+      ],
+      'legacy_invoice_reviews': [
+        'invoice_id',
+        'contract_id',
+        'status',
+        'reason',
+        'reviewed_by',
+        'reviewed_at',
+      ],
       'journal_entries': ['id', 'entry_date', 'description', 'is_posted'],
       'journal_lines': [
         'id',
@@ -491,14 +530,27 @@ class DatabaseHelper {
     const requiredTriggers = [
       'units_unique_number_insert',
       'units_unique_number_update',
+      'collection_allocations_voucher_valid',
+      'collection_allocations_immutable_update',
+      'collection_allocations_no_delete',
+      'refund_allocations_voucher_match',
+      'refund_allocations_source_cap',
+      'refund_allocations_no_update',
+      'refund_allocations_no_delete',
     ];
     final missingTriggers = requiredTriggers
         .where((trigger) => !triggers.contains(trigger))
         .toList();
     if (missingTriggers.isNotEmpty) {
       throw StateError(
-        'مخطط النسخة يفتقد حواجز سلامة الوحدات: ${missingTriggers.join('، ')}',
+        'مخطط النسخة يفتقد حواجز سلامة الوحدات والاستردادات: ${missingTriggers.join('، ')}',
       );
+    }
+    final views = (await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'view'",
+    )).map((row) => row['name']?.toString()).toSet();
+    if (!views.contains('collection_allocation_balances')) {
+      throw StateError('مخطط النسخة يفتقد عرض رصيد التحصيلات بعد الاسترداد');
     }
     final indexes = (await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'index'",
@@ -506,6 +558,13 @@ class DatabaseHelper {
     const requiredIndexes = [
       'tax_invoices_installment_unique',
       'voucher_invoice_unique',
+      'collection_allocation_invoice_unique',
+      'collection_allocation_installment_unique',
+      'collection_allocation_installment_idx',
+      'collection_allocation_voucher_idx',
+      'refund_allocations_source_idx',
+      'legacy_tenant_payment_review_status_idx',
+      'legacy_invoice_review_status_idx',
     ];
     final missingIndexes = requiredIndexes
         .where((index) => !indexes.contains(index))
@@ -777,6 +836,158 @@ class DatabaseHelper {
         ON voucher_invoice_allocations(invoice_id)
       ''');
     }
+    if (oldVersion < 16) {
+      await _createRefundSchema(db);
+      await db.execute('''
+        INSERT OR IGNORE INTO legacy_invoice_reviews (
+          invoice_id, contract_id, status
+        )
+        SELECT id, contract_id, 'pending'
+        FROM tax_invoices
+        WHERE contract_id IS NOT NULL AND installment_id IS NULL
+      ''');
+      await db.execute('''
+        INSERT OR IGNORE INTO collection_allocations (
+          voucher_id, installment_id, invoice_id, amount_minor,
+          rent_amount_minor, tax_amount_minor
+        )
+        SELECT
+          via.voucher_id,
+          ti.installment_id,
+          ti.id,
+          CAST(ROUND(via.amount * 100) AS INTEGER),
+          MIN(
+            CAST(ROUND(via.amount * 100) AS INTEGER),
+            COALESCE((
+              SELECT SUM(CAST(ROUND(via2.amount * 100) AS INTEGER))
+              FROM voucher_installment_allocations via2
+              WHERE via2.voucher_id = via.voucher_id
+                AND via2.installment_id = ti.installment_id
+            ), 0)
+          ),
+          CAST(ROUND(via.amount * 100) AS INTEGER) - MIN(
+            CAST(ROUND(via.amount * 100) AS INTEGER),
+            COALESCE((
+              SELECT SUM(CAST(ROUND(via2.amount * 100) AS INTEGER))
+              FROM voucher_installment_allocations via2
+              WHERE via2.voucher_id = via.voucher_id
+                AND via2.installment_id = ti.installment_id
+            ), 0)
+          )
+        FROM voucher_invoice_allocations via
+        JOIN vouchers v ON v.id = via.voucher_id
+        JOIN tax_invoices ti ON ti.id = via.invoice_id
+        JOIN contracts c ON c.id = ti.contract_id AND c.tenant_id = v.tenant_id
+        JOIN contract_installments ci
+          ON ci.id = ti.installment_id AND ci.contract_id = c.id
+        JOIN journal_entries je ON je.id = v.journal_entry_id AND je.is_posted = 1
+        WHERE v.voucher_type = 'قبض مستأجر'
+          AND v.tenant_id IS NOT NULL
+          AND ti.installment_id IS NOT NULL
+          AND ROUND(via.amount * 100) > 0
+          AND CAST(ROUND(v.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.debit) FROM journal_lines line
+            WHERE line.journal_entry_id = je.id
+          ), 0) * 100) AS INTEGER)
+          AND CAST(ROUND(v.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.credit) FROM journal_lines line
+            WHERE line.journal_entry_id = je.id
+          ), 0) * 100) AS INTEGER)
+          AND CAST(ROUND(v.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.debit)
+            FROM journal_lines line
+            JOIN accounts cash ON cash.id = line.account_id
+            WHERE line.journal_entry_id = je.id
+              AND cash.code LIKE '11%'
+              AND line.credit = 0
+          ), 0) * 100) AS INTEGER)
+          AND NOT EXISTS (
+            SELECT 1 FROM journal_lines line
+            JOIN accounts cash ON cash.id = line.account_id
+            WHERE line.journal_entry_id = je.id
+              AND cash.code LIKE '11%' AND line.credit > 0
+          )
+          AND CAST(ROUND(COALESCE((
+            SELECT SUM(via2.amount)
+            FROM voucher_invoice_allocations via2
+            WHERE via2.voucher_id = via.voucher_id
+          ), 0) * 100) AS INTEGER) <= CAST(ROUND(v.amount * 100) AS INTEGER)
+      ''');
+      await db.execute('''
+        INSERT OR IGNORE INTO collection_allocations (
+          voucher_id, installment_id, invoice_id, amount_minor,
+          rent_amount_minor, tax_amount_minor
+        )
+        SELECT
+          via.voucher_id,
+          via.installment_id,
+          NULL,
+          CAST(ROUND(via.amount * 100) AS INTEGER),
+          CAST(ROUND(via.amount * 100) AS INTEGER),
+          0
+        FROM voucher_installment_allocations via
+        JOIN vouchers v ON v.id = via.voucher_id
+        JOIN contract_installments ci ON ci.id = via.installment_id
+        JOIN contracts c ON c.id = ci.contract_id AND c.tenant_id = v.tenant_id
+        JOIN journal_entries je ON je.id = v.journal_entry_id AND je.is_posted = 1
+        WHERE v.voucher_type = 'قبض مستأجر'
+          AND v.tenant_id IS NOT NULL
+          AND ROUND(via.amount * 100) > 0
+          AND CAST(ROUND(v.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.debit) FROM journal_lines line
+            WHERE line.journal_entry_id = je.id
+          ), 0) * 100) AS INTEGER)
+          AND CAST(ROUND(v.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.credit) FROM journal_lines line
+            WHERE line.journal_entry_id = je.id
+          ), 0) * 100) AS INTEGER)
+          AND CAST(ROUND(v.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.debit)
+            FROM journal_lines line
+            JOIN accounts cash ON cash.id = line.account_id
+            WHERE line.journal_entry_id = je.id
+              AND cash.code LIKE '11%'
+              AND line.credit = 0
+          ), 0) * 100) AS INTEGER)
+          AND NOT EXISTS (
+            SELECT 1 FROM journal_lines line
+            JOIN accounts cash ON cash.id = line.account_id
+            WHERE line.journal_entry_id = je.id
+              AND cash.code LIKE '11%' AND line.credit > 0
+          )
+          AND CAST(ROUND(COALESCE((
+            SELECT SUM(via2.amount)
+            FROM voucher_installment_allocations via2
+            WHERE via2.voucher_id = via.voucher_id
+          ), 0) * 100) AS INTEGER) <= CAST(ROUND(v.amount * 100) AS INTEGER)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM voucher_invoice_allocations via2
+            JOIN tax_invoices ti2 ON ti2.id = via2.invoice_id
+            WHERE via2.voucher_id = via.voucher_id
+              AND ti2.installment_id = via.installment_id
+          )
+      ''');
+      await db.execute('''
+        INSERT OR IGNORE INTO legacy_tenant_payment_reviews (
+          voucher_id, tenant_id, amount_minor, status
+        )
+        SELECT
+          v.id,
+          v.tenant_id,
+          CAST(ROUND(v.amount * 100) AS INTEGER),
+          'pending'
+        FROM vouchers v
+        WHERE v.voucher_type = 'صرف مستأجر'
+          AND v.tenant_id IS NOT NULL
+          AND ROUND(v.amount * 100) > 0
+      ''');
+    }
+    if (oldVersion < 17) {
+      // Reinstall stricter source-validation triggers for databases upgraded
+      // to v16 before the ledger checks were introduced.
+      await _createRefundSchema(db);
+    }
   }
 
   Future<void> _ensureColumn(
@@ -788,6 +999,432 @@ class DatabaseHelper {
     final columns = await db.rawQuery('PRAGMA table_info("$table")');
     if (columns.any((row) => row['name'] == column)) return;
     await db.execute('ALTER TABLE "$table" ADD COLUMN "$column" $declaration');
+  }
+
+  Future<void> _createRefundSchema(DatabaseExecutor db) async {
+    await db.execute(
+      'DROP TRIGGER IF EXISTS collection_allocations_voucher_valid',
+    );
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS collection_allocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_id INTEGER NOT NULL,
+        installment_id INTEGER NOT NULL,
+        invoice_id INTEGER,
+        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+        rent_amount_minor INTEGER NOT NULL CHECK (rent_amount_minor >= 0),
+        tax_amount_minor INTEGER NOT NULL CHECK (tax_amount_minor >= 0),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_by INTEGER,
+        CHECK (rent_amount_minor + tax_amount_minor = amount_minor),
+        CHECK (invoice_id IS NOT NULL OR tax_amount_minor = 0),
+        FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
+        FOREIGN KEY (installment_id) REFERENCES contract_installments (id),
+        FOREIGN KEY (invoice_id) REFERENCES tax_invoices (id),
+        FOREIGN KEY (created_by) REFERENCES users (id)
+      )
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS collection_allocations_voucher_valid
+      BEFORE INSERT ON collection_allocations
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM vouchers receipt
+        JOIN journal_entries journal ON journal.id = receipt.journal_entry_id
+        JOIN contract_installments ci ON ci.id = NEW.installment_id
+        JOIN contracts c ON c.id = ci.contract_id
+        WHERE receipt.id = NEW.voucher_id
+          AND receipt.voucher_type = 'قبض مستأجر'
+          AND receipt.tenant_id IS NOT NULL
+          AND receipt.tenant_id = c.tenant_id
+          AND journal.is_posted = 1
+          AND CAST(ROUND(receipt.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.debit) FROM journal_lines line
+            WHERE line.journal_entry_id = journal.id
+          ), 0) * 100) AS INTEGER)
+          AND CAST(ROUND(receipt.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.credit) FROM journal_lines line
+            WHERE line.journal_entry_id = journal.id
+          ), 0) * 100) AS INTEGER)
+          AND CAST(ROUND(receipt.amount * 100) AS INTEGER) = CAST(ROUND(COALESCE((
+            SELECT SUM(line.debit)
+            FROM journal_lines line
+            JOIN accounts cash ON cash.id = line.account_id
+            WHERE line.journal_entry_id = journal.id
+              AND cash.code LIKE '11%'
+              AND line.credit = 0
+          ), 0) * 100) AS INTEGER)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM journal_lines line
+            JOIN accounts cash ON cash.id = line.account_id
+            WHERE line.journal_entry_id = journal.id
+              AND cash.code LIKE '11%'
+              AND line.credit > 0
+          )
+          AND COALESCE((
+            SELECT SUM(existing.amount_minor)
+            FROM collection_allocations existing
+            WHERE existing.voucher_id = receipt.id
+          ), 0) + NEW.amount_minor <= CAST(ROUND(receipt.amount * 100) AS INTEGER)
+          AND (
+            (
+              NEW.invoice_id IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM voucher_installment_allocations installment_allocation
+                WHERE installment_allocation.voucher_id = receipt.id
+                  AND installment_allocation.installment_id = NEW.installment_id
+                  AND CAST(ROUND(installment_allocation.amount * 100) AS INTEGER)
+                    = NEW.amount_minor
+              )
+            ) OR (
+              NEW.invoice_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM tax_invoices ti
+                JOIN contracts invoice_contract ON invoice_contract.id = ti.contract_id
+                JOIN contract_installments invoice_installment
+                  ON invoice_installment.id = ti.installment_id
+                  AND invoice_installment.contract_id = invoice_contract.id
+                JOIN voucher_invoice_allocations invoice_allocation
+                  ON invoice_allocation.invoice_id = ti.id
+                  AND invoice_allocation.voucher_id = receipt.id
+                JOIN voucher_installment_allocations installment_allocation
+                  ON installment_allocation.voucher_id = receipt.id
+                  AND installment_allocation.installment_id = NEW.installment_id
+                WHERE ti.id = NEW.invoice_id
+                  AND ti.installment_id = NEW.installment_id
+                  AND invoice_contract.tenant_id = receipt.tenant_id
+                  AND invoice_installment.id = NEW.installment_id
+                  AND CAST(ROUND(invoice_allocation.amount * 100) AS INTEGER)
+                    = NEW.amount_minor
+                  AND CAST(ROUND(installment_allocation.amount * 100) AS INTEGER)
+                    = NEW.rent_amount_minor
+              )
+            )
+          )
+          AND (
+            NEW.invoice_id IS NULL OR EXISTS (
+              SELECT 1
+              FROM tax_invoices ti
+              JOIN contracts invoice_contract ON invoice_contract.id = ti.contract_id
+              JOIN contract_installments invoice_installment
+                ON invoice_installment.id = ti.installment_id
+                AND invoice_installment.contract_id = invoice_contract.id
+              WHERE ti.id = NEW.invoice_id
+                AND ti.installment_id = NEW.installment_id
+                AND invoice_installment.id = NEW.installment_id
+                AND invoice_contract.tenant_id = receipt.tenant_id
+            )
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'collection must reference a posted receipt for the same tenant');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS collection_allocations_immutable_update
+      BEFORE UPDATE ON collection_allocations
+      WHEN NEW.voucher_id IS NOT OLD.voucher_id
+        OR NEW.installment_id IS NOT OLD.installment_id
+        OR NEW.created_at IS NOT OLD.created_at
+        OR NEW.created_by IS NOT OLD.created_by
+        OR (OLD.invoice_id IS NOT NULL AND NEW.invoice_id IS NOT OLD.invoice_id)
+        OR (
+          NEW.invoice_id IS NOT NULL AND NOT (
+            EXISTS (
+              SELECT 1
+              FROM legacy_invoice_reviews review
+              JOIN tax_invoices ti ON ti.id = review.invoice_id
+              JOIN contracts invoice_contract ON invoice_contract.id = ti.contract_id
+              JOIN contract_installments ci
+                ON ci.id = NEW.installment_id
+                AND ci.contract_id = invoice_contract.id
+              JOIN vouchers receipt ON receipt.id = OLD.voucher_id
+              JOIN voucher_installment_allocations installment_allocation
+                ON installment_allocation.voucher_id = OLD.voucher_id
+                AND installment_allocation.installment_id = NEW.installment_id
+              WHERE review.invoice_id = NEW.invoice_id
+                AND review.status = 'pending'
+                AND review.contract_id = ti.contract_id
+                AND OLD.invoice_id IS NULL
+                AND ti.installment_id = NEW.installment_id
+                AND invoice_contract.tenant_id = receipt.tenant_id
+                AND (
+                  (
+                    NOT EXISTS (
+                      SELECT 1
+                      FROM voucher_invoice_allocations invoice_allocation
+                      WHERE invoice_allocation.invoice_id = ti.id
+                        AND invoice_allocation.voucher_id = OLD.voucher_id
+                    )
+                    AND NEW.amount_minor = CAST(ROUND(installment_allocation.amount * 100) AS INTEGER)
+                    AND NEW.rent_amount_minor = NEW.amount_minor
+                    AND NEW.tax_amount_minor = 0
+                  )
+                  OR EXISTS (
+                    SELECT 1
+                    FROM voucher_invoice_allocations invoice_allocation
+                    WHERE invoice_allocation.invoice_id = ti.id
+                      AND invoice_allocation.voucher_id = OLD.voucher_id
+                      AND NEW.amount_minor = CAST(ROUND(invoice_allocation.amount * 100) AS INTEGER)
+                      AND NEW.rent_amount_minor = CAST(ROUND(installment_allocation.amount * 100) AS INTEGER)
+                      AND NEW.tax_amount_minor = NEW.amount_minor - NEW.rent_amount_minor
+                  )
+                )
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM tax_invoices ti
+              JOIN journal_entries je ON je.id = ti.journal_entry_id
+              JOIN contracts invoice_contract ON invoice_contract.id = ti.contract_id
+              JOIN contract_installments ci
+                ON ci.id = NEW.installment_id
+                AND ci.contract_id = invoice_contract.id
+              JOIN vouchers receipt ON receipt.id = OLD.voucher_id
+              JOIN voucher_installment_allocations installment_allocation
+                ON installment_allocation.voucher_id = OLD.voucher_id
+                AND installment_allocation.installment_id = NEW.installment_id
+              WHERE ti.id = NEW.invoice_id
+                AND ti.installment_id = NEW.installment_id
+                AND ti.journal_entry_id IS NOT NULL
+                AND je.is_posted = 1
+                AND OLD.invoice_id IS NULL
+                AND invoice_contract.tenant_id = receipt.tenant_id
+                AND NEW.amount_minor = CAST(ROUND(installment_allocation.amount * 100) AS INTEGER)
+                AND NEW.rent_amount_minor = NEW.amount_minor
+                AND NEW.tax_amount_minor = 0
+                AND NOT EXISTS (
+                  SELECT 1 FROM legacy_invoice_reviews review
+                  WHERE review.invoice_id = ti.id
+                )
+            )
+          )
+        )
+        OR (
+          (
+            NEW.amount_minor IS NOT OLD.amount_minor
+            OR NEW.rent_amount_minor IS NOT OLD.rent_amount_minor
+            OR NEW.tax_amount_minor IS NOT OLD.tax_amount_minor
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM legacy_invoice_reviews review
+            JOIN tax_invoices ti ON ti.id = review.invoice_id
+            JOIN voucher_invoice_allocations invoice_allocation
+              ON invoice_allocation.invoice_id = ti.id
+              AND invoice_allocation.voucher_id = OLD.voucher_id
+            JOIN voucher_installment_allocations installment_allocation
+              ON installment_allocation.voucher_id = OLD.voucher_id
+              AND installment_allocation.installment_id = NEW.installment_id
+            WHERE review.invoice_id = NEW.invoice_id
+              AND review.status = 'pending'
+              AND OLD.invoice_id IS NULL
+              AND ti.contract_id = review.contract_id
+              AND ti.installment_id = NEW.installment_id
+              AND NEW.amount_minor = CAST(ROUND(invoice_allocation.amount * 100) AS INTEGER)
+              AND NEW.rent_amount_minor = CAST(ROUND(installment_allocation.amount * 100) AS INTEGER)
+              AND NEW.tax_amount_minor = NEW.amount_minor - NEW.rent_amount_minor
+              AND OLD.amount_minor = CAST(ROUND(installment_allocation.amount * 100) AS INTEGER)
+              AND OLD.rent_amount_minor = OLD.amount_minor
+              AND OLD.tax_amount_minor = 0
+              AND COALESCE((
+                SELECT SUM(amount_minor) FROM refund_allocations
+                WHERE collection_allocation_id = OLD.id
+              ), 0) <= NEW.amount_minor
+              AND COALESCE((
+                SELECT SUM(rent_amount_minor) FROM refund_allocations
+                WHERE collection_allocation_id = OLD.id
+              ), 0) <= NEW.rent_amount_minor
+              AND COALESCE((
+                SELECT SUM(tax_amount_minor) FROM refund_allocations
+                WHERE collection_allocation_id = OLD.id
+              ), 0) <= NEW.tax_amount_minor
+          )
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'collection allocations are immutable except for a validated legacy invoice reconciliation');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS collection_allocations_no_delete
+      BEFORE DELETE ON collection_allocations
+      BEGIN
+        SELECT RAISE(ABORT, 'posted collection allocations are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS collection_allocation_invoice_unique
+      ON collection_allocations(voucher_id, invoice_id)
+      WHERE invoice_id IS NOT NULL
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS collection_allocation_installment_unique
+      ON collection_allocations(voucher_id, installment_id)
+      WHERE invoice_id IS NULL
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS collection_allocation_installment_idx
+      ON collection_allocations(installment_id, invoice_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS collection_allocation_voucher_idx
+      ON collection_allocations(voucher_id, id)
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS refund_allocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        refund_voucher_id INTEGER NOT NULL,
+        collection_allocation_id INTEGER NOT NULL,
+        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+        rent_amount_minor INTEGER NOT NULL CHECK (rent_amount_minor >= 0),
+        tax_amount_minor INTEGER NOT NULL CHECK (tax_amount_minor >= 0),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_by INTEGER,
+        CHECK (rent_amount_minor + tax_amount_minor = amount_minor),
+        UNIQUE (refund_voucher_id, collection_allocation_id),
+        FOREIGN KEY (refund_voucher_id) REFERENCES vouchers (id),
+        FOREIGN KEY (collection_allocation_id)
+          REFERENCES collection_allocations (id),
+        FOREIGN KEY (created_by) REFERENCES users (id)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS refund_allocations_source_idx
+      ON refund_allocations(collection_allocation_id)
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS refund_allocations_voucher_match
+      BEFORE INSERT ON refund_allocations
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM vouchers refund
+        JOIN journal_entries refund_journal
+          ON refund_journal.id = refund.journal_entry_id
+        JOIN collection_allocations ca
+          ON ca.id = NEW.collection_allocation_id
+        JOIN vouchers receipt ON receipt.id = ca.voucher_id
+        JOIN journal_entries receipt_journal
+          ON receipt_journal.id = receipt.journal_entry_id
+        WHERE refund.id = NEW.refund_voucher_id
+          AND refund.voucher_type = 'صرف مستأجر'
+          AND refund.tenant_id = receipt.tenant_id
+          AND refund_journal.is_posted = 1
+          AND receipt.voucher_type = 'قبض مستأجر'
+          AND receipt_journal.is_posted = 1
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'refund must reference posted vouchers for the same tenant');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS refund_allocations_source_cap
+      BEFORE INSERT ON refund_allocations
+      WHEN NEW.amount_minor > COALESCE((
+        SELECT ca.amount_minor - COALESCE((
+          SELECT SUM(ra.amount_minor)
+          FROM refund_allocations ra
+          WHERE ra.collection_allocation_id = ca.id
+        ), 0)
+        FROM collection_allocations ca
+        WHERE ca.id = NEW.collection_allocation_id
+      ), 0)
+      OR NEW.rent_amount_minor > COALESCE((
+        SELECT ca.rent_amount_minor - COALESCE((
+          SELECT SUM(ra.rent_amount_minor)
+          FROM refund_allocations ra
+          WHERE ra.collection_allocation_id = ca.id
+        ), 0)
+        FROM collection_allocations ca
+        WHERE ca.id = NEW.collection_allocation_id
+      ), 0)
+      OR NEW.tax_amount_minor > COALESCE((
+        SELECT ca.tax_amount_minor - COALESCE((
+          SELECT SUM(ra.tax_amount_minor)
+          FROM refund_allocations ra
+          WHERE ra.collection_allocation_id = ca.id
+        ), 0)
+        FROM collection_allocations ca
+        WHERE ca.id = NEW.collection_allocation_id
+      ), 0)
+      BEGIN
+        SELECT RAISE(ABORT, 'refund exceeds unrefunded collection allocation');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS refund_allocations_no_update
+      BEFORE UPDATE ON refund_allocations
+      BEGIN
+        SELECT RAISE(ABORT, 'posted refund allocations are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS refund_allocations_no_delete
+      BEFORE DELETE ON refund_allocations
+      BEGIN
+        SELECT RAISE(ABORT, 'posted refund allocations are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS legacy_tenant_payment_reviews (
+        voucher_id INTEGER PRIMARY KEY,
+        tenant_id INTEGER NOT NULL,
+        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'refund', 'unrelated')),
+        reason TEXT,
+        reviewed_by INTEGER,
+        reviewed_at TEXT,
+        reclassification_journal_entry_id INTEGER,
+        FOREIGN KEY (voucher_id) REFERENCES vouchers (id),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (id),
+        FOREIGN KEY (reviewed_by) REFERENCES users (id),
+        FOREIGN KEY (reclassification_journal_entry_id)
+          REFERENCES journal_entries (id)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS legacy_tenant_payment_review_status_idx
+      ON legacy_tenant_payment_reviews(tenant_id, status, voucher_id)
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS legacy_invoice_reviews (
+        invoice_id INTEGER PRIMARY KEY,
+        contract_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'linked', 'non_billable')),
+        reason TEXT,
+        reviewed_by INTEGER,
+        reviewed_at TEXT,
+        FOREIGN KEY (invoice_id) REFERENCES tax_invoices (id),
+        FOREIGN KEY (contract_id) REFERENCES contracts (id),
+        FOREIGN KEY (reviewed_by) REFERENCES users (id)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS legacy_invoice_review_status_idx
+      ON legacy_invoice_reviews(contract_id, status, invoice_id)
+    ''');
+    await db.execute('''
+      CREATE VIEW IF NOT EXISTS collection_allocation_balances AS
+      SELECT
+        ca.id,
+        ca.voucher_id,
+        ca.installment_id,
+        ca.invoice_id,
+        ca.amount_minor,
+        ca.rent_amount_minor,
+        ca.tax_amount_minor,
+        ca.amount_minor - COALESCE(SUM(ra.amount_minor), 0) AS remaining_minor,
+        ca.rent_amount_minor - COALESCE(SUM(ra.rent_amount_minor), 0)
+          AS remaining_rent_minor,
+        ca.tax_amount_minor - COALESCE(SUM(ra.tax_amount_minor), 0)
+          AS remaining_tax_minor
+      FROM collection_allocations ca
+      LEFT JOIN refund_allocations ra ON ra.collection_allocation_id = ca.id
+      GROUP BY ca.id
+    ''');
   }
 
   Future _createDB(Database db, int version) async {
@@ -1142,6 +1779,7 @@ class DatabaseHelper {
       )
     ''');
 
+    await _createRefundSchema(db);
     await _insertSeedData(db);
   }
 
@@ -3227,6 +3865,542 @@ class DatabaseHelper {
     );
   }
 
+  Future<List<Map<String, dynamic>>> getAllPendingLegacyInvoiceReviews() async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT
+        r.invoice_id,
+        r.contract_id,
+        c.status AS contract_status,
+        ti.invoice_date,
+        ti.net_amount,
+        ti.tax_amount,
+        ti.total_amount,
+        ti.tax_rate,
+        t.name AS tenant_name
+      FROM legacy_invoice_reviews r
+      JOIN tax_invoices ti ON ti.id = r.invoice_id
+      JOIN contracts c ON c.id = r.contract_id
+      LEFT JOIN tenants t ON t.id = c.tenant_id
+      WHERE r.status = 'pending'
+      ORDER BY ti.invoice_date, ti.id
+      ''');
+  }
+
+  Future<List<Map<String, dynamic>>> getPendingLegacyInvoiceReviews(
+    int contractId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT
+        r.invoice_id,
+        r.contract_id,
+        ti.invoice_date,
+        ti.net_amount,
+        ti.tax_amount,
+        ti.total_amount,
+        ti.tax_rate,
+        t.name AS tenant_name
+      FROM legacy_invoice_reviews r
+      JOIN tax_invoices ti ON ti.id = r.invoice_id
+      JOIN contracts c ON c.id = r.contract_id
+      LEFT JOIN tenants t ON t.id = c.tenant_id
+      WHERE r.contract_id = ? AND r.status = 'pending'
+      ORDER BY ti.invoice_date, ti.id
+      ''',
+      [contractId],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getPendingLegacyInvoiceReviewsForTenant(
+    int tenantId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT
+        r.invoice_id,
+        r.contract_id,
+        ti.invoice_date,
+        ti.net_amount,
+        ti.tax_amount,
+        ti.total_amount
+      FROM legacy_invoice_reviews r
+      JOIN tax_invoices ti ON ti.id = r.invoice_id
+      JOIN contracts c ON c.id = r.contract_id
+      WHERE c.tenant_id = ? AND r.status = 'pending'
+      ORDER BY ti.invoice_date, ti.id
+      ''',
+      [tenantId],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getLegacyInvoiceInstallmentCandidates(
+    int invoiceId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT ci.id, ci.contract_id, ci.amount, ci.paid_amount, ci.due_date, ci.status
+      FROM legacy_invoice_reviews r
+      JOIN tax_invoices ti ON ti.id = r.invoice_id
+      JOIN contract_installments ci ON ci.contract_id = r.contract_id
+      WHERE r.invoice_id = ?
+        AND r.status = 'pending'
+        AND ti.installment_id IS NULL
+        AND ROUND(ci.amount * 100) = ROUND(ti.net_amount * 100)
+        AND NOT EXISTS (
+          SELECT 1 FROM tax_invoices linked
+          WHERE linked.installment_id = ci.id
+        )
+      ORDER BY ci.due_date, ci.id
+      ''',
+      [invoiceId],
+    );
+  }
+
+  Future<void> resolveLegacyInvoiceAsInstallment({
+    required int invoiceId,
+    required int installmentId,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+    final normalizedReason = reason.trim();
+    if (normalizedReason.isEmpty || normalizedReason.length > 1000) {
+      throw ArgumentError('سبب المطابقة مطلوب وبحد أقصى 1000 حرف');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final invoiceRows = await txn.rawQuery(
+        '''
+        SELECT r.status, r.contract_id, ti.net_amount, ti.tax_amount,
+               ti.total_amount, ti.installment_id
+        FROM legacy_invoice_reviews r
+        JOIN tax_invoices ti ON ti.id = r.invoice_id
+        WHERE r.invoice_id = ?
+        LIMIT 1
+        ''',
+        [invoiceId],
+      );
+      if (invoiceRows.isEmpty || invoiceRows.first['status'] != 'pending') {
+        throw StateError('الفاتورة التاريخية غير موجودة أو سبق تسويتها');
+      }
+      final invoice = invoiceRows.first;
+      if (invoice['installment_id'] != null) {
+        throw StateError('الفاتورة التاريخية مرتبطة بقسط بالفعل');
+      }
+      final contractId = (invoice['contract_id'] as num).toInt();
+      final installmentRows = await txn.rawQuery(
+        '''
+        SELECT ci.id, ci.contract_id, ci.amount, c.tenant_id
+        FROM contract_installments ci
+        JOIN contracts c ON c.id = ci.contract_id
+        WHERE ci.id = ? AND ci.contract_id = ?
+        LIMIT 1
+        ''',
+        [installmentId, contractId],
+      );
+      if (installmentRows.isEmpty) {
+        throw StateError('القسط المختار لا يتبع عقد الفاتورة التاريخية');
+      }
+      final netAmount = (invoice['net_amount'] as num).toDouble();
+      final taxAmount = (invoice['tax_amount'] as num).toDouble();
+      final grossAmount = (invoice['total_amount'] as num).toDouble();
+      final installmentAmount = (installmentRows.first['amount'] as num)
+          .toDouble();
+      if (!_hasCentPrecision(netAmount) ||
+          !_hasCentPrecision(taxAmount) ||
+          !_hasCentPrecision(grossAmount) ||
+          !_hasCentPrecision(installmentAmount)) {
+        throw StateError('تتضمن الفاتورة أو القسط مبلغًا لا يمكن مطابقته بدقة');
+      }
+      final netMinor = InternalTax.toMinorUnits(netAmount);
+      final taxMinor = InternalTax.toMinorUnits(taxAmount);
+      final grossMinor = InternalTax.toMinorUnits(grossAmount);
+      if (netMinor != InternalTax.toMinorUnits(installmentAmount) ||
+          netMinor + taxMinor != grossMinor) {
+        throw StateError(
+          'صافي الفاتورة لا يطابق قيمة القسط أو إجماليها غير متسق',
+        );
+      }
+      final duplicateRows = await txn.query(
+        'tax_invoices',
+        columns: ['id'],
+        where: 'installment_id = ? AND id != ?',
+        whereArgs: [installmentId, invoiceId],
+        limit: 1,
+      );
+      if (duplicateRows.isNotEmpty) {
+        throw StateError('القسط مرتبط بفاتورة أخرى بالفعل');
+      }
+      final contractTenantId = (installmentRows.first['tenant_id'] as num)
+          .toInt();
+
+      await _ensureNoPendingLegacyTenantPayments(txn, contractTenantId);
+      final invoicePaymentRows = await txn.rawQuery(
+        '''
+        SELECT via.voucher_id, via.amount AS allocated_amount,
+               v.amount AS voucher_amount, v.voucher_type, v.tenant_id,
+               v.journal_entry_id, v.voucher_date, je.is_posted
+        FROM voucher_invoice_allocations via
+        JOIN vouchers v ON v.id = via.voucher_id
+        LEFT JOIN journal_entries je ON je.id = v.journal_entry_id
+        WHERE via.invoice_id = ?
+        ORDER BY v.voucher_date, v.id
+        ''',
+        [invoiceId],
+      );
+      final installmentPaymentRows = await txn.rawQuery(
+        '''
+        SELECT via.voucher_id, via.amount AS allocated_amount,
+               v.amount AS voucher_amount, v.voucher_type, v.tenant_id,
+               v.journal_entry_id, v.voucher_date, je.is_posted
+        FROM voucher_installment_allocations via
+        JOIN vouchers v ON v.id = via.voucher_id
+        LEFT JOIN journal_entries je ON je.id = v.journal_entry_id
+        WHERE via.installment_id = ?
+        ORDER BY v.voucher_date, v.id
+        ''',
+        [installmentId],
+      );
+      final receiptsById = <int, Map<String, dynamic>>{};
+      void addReceiptAllocation(
+        Map<String, dynamic> row, {
+        required bool invoiceSpecific,
+      }) {
+        final amount = (row['allocated_amount'] as num).toDouble();
+        final voucherAmount = (row['voucher_amount'] as num).toDouble();
+        if (row['voucher_type'] != 'قبض مستأجر' ||
+            (row['tenant_id'] as num?)?.toInt() != contractTenantId ||
+            (row['is_posted'] as num?)?.toInt() != 1 ||
+            !_hasCentPrecision(amount) ||
+            !_hasCentPrecision(voucherAmount) ||
+            amount <= 0 ||
+            voucherAmount <= 0) {
+          throw StateError(
+            'تخصيص قبض تاريخي غير مرحّل أو غير متوافق؛ لا يمكن ربط الفاتورة بأمان',
+          );
+        }
+        final voucherId = (row['voucher_id'] as num).toInt();
+        final amountMinor = InternalTax.toMinorUnits(amount);
+        final voucherAmountMinor = InternalTax.toMinorUnits(voucherAmount);
+        final receipt = receiptsById.putIfAbsent(
+          voucherId,
+          () => {
+            'voucher_id': voucherId,
+            'voucher_amount_minor': voucherAmountMinor,
+            'voucher_date': row['voucher_date'],
+          },
+        );
+        if (receipt['voucher_amount_minor'] != voucherAmountMinor) {
+          throw StateError('قيمة سند القبض التاريخي غير متسقة بين تخصيصاته');
+        }
+        final allocationKey = invoiceSpecific
+            ? 'invoice_amount_minor'
+            : 'installment_amount_minor';
+        final previousAmount = receipt[allocationKey] as int?;
+        if (previousAmount != null && previousAmount != amountMinor) {
+          throw StateError('يوجد تخصيص قبض تاريخي مكرر وغير متطابق');
+        }
+        receipt[allocationKey] = amountMinor;
+      }
+
+      for (final row in invoicePaymentRows) {
+        addReceiptAllocation(row, invoiceSpecific: true);
+      }
+      for (final row in installmentPaymentRows) {
+        addReceiptAllocation(row, invoiceSpecific: false);
+      }
+      for (final receipt in receiptsById.values) {
+        final invoiceAmount = receipt['invoice_amount_minor'] as int?;
+        final installmentAmount = receipt['installment_amount_minor'] as int?;
+        if (invoiceAmount != null && installmentAmount != null) {
+          if (invoiceAmount < installmentAmount ||
+              invoiceAmount - installmentAmount > taxMinor) {
+            throw StateError(
+              'إجمالي تخصيص الفاتورة وصافي القسط لا يفسران بعضهما ضمن ضريبة الفاتورة؛ يلزم فحص يدوي',
+            );
+          }
+          receipt['amount_minor'] = invoiceAmount;
+          receipt['rent_amount_minor'] = installmentAmount;
+          receipt['tax_amount_minor'] = invoiceAmount - installmentAmount;
+        } else if (invoiceAmount != null) {
+          receipt['amount_minor'] = invoiceAmount;
+        } else {
+          receipt['amount_minor'] = installmentAmount!;
+          receipt['rent_amount_minor'] = installmentAmount;
+          receipt['tax_amount_minor'] = 0;
+        }
+      }
+      final receipts = receiptsById.values.toList()
+        ..sort(
+          (a, b) => (a['voucher_date'] as String).compareTo(
+            b['voucher_date'] as String,
+          ),
+        );
+      final sourceByVoucher = <int, Map<String, dynamic>>{};
+      for (final receipt in receipts) {
+        final voucherId = receipt['voucher_id'] as int;
+        final amountMinor = receipt['amount_minor'] as int;
+        final existingSources = await txn.query(
+          'collection_allocations',
+          where: 'voucher_id = ? AND installment_id = ?',
+          whereArgs: [voucherId, installmentId],
+          limit: 2,
+        );
+        if (existingSources.length > 1) {
+          throw StateError('يوجد أكثر من مصدر قبض لنفس السند والقسط');
+        }
+        Map<String, dynamic>? source;
+        if (existingSources.isNotEmpty) {
+          source = existingSources.single;
+          final linkedInvoiceId = (source['invoice_id'] as num?)?.toInt();
+          final sourceAmount = (source['amount_minor'] as num).toInt();
+          final expectedRentMinor = receipt['rent_amount_minor'] as int?;
+          final expectedTaxMinor = receipt['tax_amount_minor'] as int?;
+          final reconcilesGrossAndRent =
+              linkedInvoiceId == null &&
+              expectedRentMinor != null &&
+              expectedTaxMinor != null &&
+              sourceAmount == expectedRentMinor &&
+              (source['rent_amount_minor'] as num).toInt() == sourceAmount &&
+              (source['tax_amount_minor'] as num).toInt() == 0 &&
+              expectedRentMinor + expectedTaxMinor == amountMinor;
+          if ((linkedInvoiceId != null && linkedInvoiceId != invoiceId) ||
+              (sourceAmount != amountMinor && !reconcilesGrossAndRent)) {
+            throw StateError(
+              'مصدر القبض التاريخي لا يطابق تخصيص الفاتورة والقسط؛ يلزم فحص يدوي',
+            );
+          }
+        }
+        final totalSources = await txn.rawQuery(
+          '''
+          SELECT COALESCE(SUM(amount_minor), 0) AS allocated_minor
+          FROM collection_allocations
+          WHERE voucher_id = ?
+          ''',
+          [voucherId],
+        );
+        var allocatedByVoucher = (totalSources.first['allocated_minor'] as num)
+            .toInt();
+        if (source == null) {
+          allocatedByVoucher += amountMinor;
+        } else {
+          allocatedByVoucher +=
+              amountMinor - (source['amount_minor'] as num).toInt();
+        }
+        if (allocatedByVoucher > (receipt['voucher_amount_minor'] as int)) {
+          throw StateError(
+            'مصادر سند القبض التاريخي تتجاوز قيمة السند؛ أوقف الربط للمراجعة',
+          );
+        }
+        sourceByVoucher[voucherId] = {
+          'source': source,
+          'amount_minor': amountMinor,
+          'rent_amount_minor': receipt['rent_amount_minor'],
+          'tax_amount_minor': receipt['tax_amount_minor'],
+        };
+      }
+
+      await txn.update(
+        'tax_invoices',
+        {'installment_id': installmentId},
+        where: 'id = ? AND installment_id IS NULL',
+        whereArgs: [invoiceId],
+      );
+      final createdBy = await _verifiedAuditUserId(txn);
+      for (final entry in sourceByVoucher.entries) {
+        final source = entry.value['source'] as Map<String, dynamic>?;
+        if (source != null) {
+          final linkedInvoiceId = (source['invoice_id'] as num?)?.toInt();
+          if (linkedInvoiceId == null) {
+            final amountMinor = entry.value['amount_minor'] as int;
+            final rentMinor = entry.value['rent_amount_minor'] as int?;
+            final taxMinorForSource = entry.value['tax_amount_minor'] as int?;
+            if (rentMinor != null &&
+                taxMinorForSource != null &&
+                (source['amount_minor'] as num).toInt() != amountMinor) {
+              await txn.update(
+                'collection_allocations',
+                {
+                  'invoice_id': invoiceId,
+                  'amount_minor': amountMinor,
+                  'rent_amount_minor': rentMinor,
+                  'tax_amount_minor': taxMinorForSource,
+                },
+                where: 'id = ? AND invoice_id IS NULL',
+                whereArgs: [source['id']],
+              );
+            } else {
+              await txn.update(
+                'collection_allocations',
+                {'invoice_id': invoiceId},
+                where: 'id = ? AND invoice_id IS NULL',
+                whereArgs: [source['id']],
+              );
+            }
+          }
+        } else {
+          final amountMinor = entry.value['amount_minor'] as int;
+          final usedRentRows = await txn.rawQuery(
+            '''
+            SELECT COALESCE(SUM(remaining_rent_minor), 0) AS used_rent,
+                   COALESCE(SUM(remaining_tax_minor), 0) AS used_tax
+            FROM collection_allocation_balances
+            WHERE invoice_id = ?
+            ''',
+            [invoiceId],
+          );
+          final usedRent = (usedRentRows.first['used_rent'] as num).toInt();
+          final usedTax = (usedRentRows.first['used_tax'] as num).toInt();
+          final remainingRent = netMinor - usedRent;
+          final remainingTax = taxMinor - usedTax;
+          if (remainingRent < 0 || remainingTax < 0) {
+            throw StateError(
+              'المقبوضات المرتبطة تتجاوز صافي أو ضريبة الفاتورة',
+            );
+          }
+          final specifiedRentMinor = (entry.value['rent_amount_minor'] as int?);
+          final specifiedTaxMinor = (entry.value['tax_amount_minor'] as int?);
+          final rentMinor =
+              specifiedRentMinor ??
+              (amountMinor < remainingRent ? amountMinor : remainingRent);
+          final taxPartMinor = specifiedTaxMinor ?? (amountMinor - rentMinor);
+          if (rentMinor + taxPartMinor != amountMinor ||
+              rentMinor > remainingRent ||
+              taxPartMinor > remainingTax) {
+            throw StateError(
+              'المقبوضات التاريخية تتجاوز صافي أو ضريبة الفاتورة؛ يلزم فحص يدوي',
+            );
+          }
+          await txn.insert('collection_allocations', {
+            'voucher_id': entry.key,
+            'installment_id': installmentId,
+            'invoice_id': invoiceId,
+            'amount_minor': amountMinor,
+            'rent_amount_minor': rentMinor,
+            'tax_amount_minor': taxPartMinor,
+            'created_by': createdBy,
+          });
+        }
+      }
+      final invoiceBalanceRows = await txn.rawQuery(
+        '''
+        SELECT COALESCE(SUM(remaining_minor), 0) AS remaining_minor,
+               COALESCE(SUM(remaining_rent_minor), 0) AS remaining_rent_minor,
+               COALESCE(SUM(remaining_tax_minor), 0) AS remaining_tax_minor
+        FROM collection_allocation_balances
+        WHERE invoice_id = ?
+        ''',
+        [invoiceId],
+      );
+      final linkedRemaining =
+          (invoiceBalanceRows.first['remaining_minor'] as num).toInt();
+      final linkedRentRemaining =
+          (invoiceBalanceRows.first['remaining_rent_minor'] as num).toInt();
+      final linkedTaxRemaining =
+          (invoiceBalanceRows.first['remaining_tax_minor'] as num).toInt();
+      if (linkedRemaining > grossMinor ||
+          linkedRentRemaining > netMinor ||
+          linkedTaxRemaining > taxMinor ||
+          linkedRentRemaining + linkedTaxRemaining != linkedRemaining) {
+        throw StateError(
+          'القبوض أو الردود التاريخية لا تتطابق مع رصيد الفاتورة؛ يلزم مراجعة يدوية',
+        );
+      }
+      await txn.update(
+        'legacy_invoice_reviews',
+        {
+          'status': 'linked',
+          'reason': normalizedReason,
+          'reviewed_by': createdBy,
+          'reviewed_at': DateTime.now().toIso8601String(),
+        },
+        where: "invoice_id = ? AND status = 'pending'",
+        whereArgs: [invoiceId],
+      );
+      await txn.insert('audit_logs', {
+        'user_id': createdBy,
+        'action': 'LEGACY_INVOICE_LINKED_TO_INSTALLMENT',
+        'details': jsonEncode({
+          'invoice_id': invoiceId,
+          'installment_id': installmentId,
+          'contract_id': contractId,
+          'receipt_voucher_ids': receipts
+              .map((receipt) => receipt['voucher_id'])
+              .toList(),
+          'reason': normalizedReason,
+        }),
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+    });
+  }
+
+  Future<void> resolveLegacyInvoiceAsNonBillable({
+    required int invoiceId,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+    final normalizedReason = reason.trim();
+    if (normalizedReason.isEmpty || normalizedReason.length > 1000) {
+      throw ArgumentError('سبب المراجعة مطلوب وبحد أقصى 1000 حرف');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final invoices = await txn.rawQuery(
+        '''
+        SELECT r.status, ti.journal_entry_id
+        FROM legacy_invoice_reviews r
+        JOIN tax_invoices ti ON ti.id = r.invoice_id
+        WHERE r.invoice_id = ?
+        LIMIT 1
+        ''',
+        [invoiceId],
+      );
+      if (invoices.isEmpty || invoices.first['status'] != 'pending') {
+        throw StateError('الفاتورة التاريخية غير موجودة أو سبق تسويتها');
+      }
+      final payments = await txn.query(
+        'voucher_invoice_allocations',
+        columns: ['id'],
+        where: 'invoice_id = ?',
+        whereArgs: [invoiceId],
+        limit: 1,
+      );
+      if (payments.isNotEmpty || invoices.first['journal_entry_id'] != null) {
+        throw StateError(
+          'للفاتورة ترحيل أو تحصيلات؛ يجب ربطها بقسط ومراجعة تحصيلاتها، لا استبعادها',
+        );
+      }
+      final reviewedBy = await _verifiedAuditUserId(txn);
+      await txn.update(
+        'legacy_invoice_reviews',
+        {
+          'status': 'non_billable',
+          'reason': normalizedReason,
+          'reviewed_by': reviewedBy,
+          'reviewed_at': DateTime.now().toIso8601String(),
+        },
+        where: "invoice_id = ? AND status = 'pending'",
+        whereArgs: [invoiceId],
+      );
+      await txn.insert('audit_logs', {
+        'user_id': reviewedBy,
+        'action': 'LEGACY_INVOICE_MARKED_NON_BILLABLE',
+        'details': jsonEncode({
+          'invoice_id': invoiceId,
+          'reason': normalizedReason,
+        }),
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+    });
+  }
+
   Future<List<Map<String, dynamic>>> getUnbilledInstallmentsForContract(
     int contractId,
   ) async {
@@ -3285,20 +4459,64 @@ class DatabaseHelper {
         ci.due_date,
         ci.amount AS installment_amount,
         ci.paid_amount AS installment_paid_amount,
-        COALESCE(SUM(via.amount), 0) AS paid_amount,
-        ROUND(MAX(ti.total_amount - COALESCE(SUM(via.amount), 0), 0), 2)
+        COALESCE(vip.paid_amount, 0) AS paid_amount,
+        ROUND(MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0), 2)
           AS remaining_amount
       FROM tax_invoices ti
       JOIN contracts c ON c.id = ti.contract_id
       JOIN contract_installments ci ON ci.id = ti.installment_id
-      LEFT JOIN voucher_invoice_allocations via ON via.invoice_id = ti.id
+      LEFT JOIN (
+        SELECT invoice_id, SUM(remaining_minor) / 100.0 AS paid_amount
+        FROM collection_allocation_balances
+        WHERE invoice_id IS NOT NULL
+        GROUP BY invoice_id
+      ) vip ON vip.invoice_id = ti.id
       WHERE c.tenant_id = ? AND c.status = 'Active'
       GROUP BY ti.id
-      HAVING ROUND(MAX(ti.total_amount - COALESCE(SUM(via.amount), 0), 0), 2) > 0
+      HAVING ROUND(MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0), 2) > 0
       ORDER BY ci.due_date, ti.invoice_date, ti.id
       ''',
       [tenantId],
     );
+  }
+
+  Future<void> _ensureNoPendingLegacyInvoicesForTenant(
+    DatabaseExecutor txn,
+    int tenantId,
+  ) async {
+    final pending = await txn.rawQuery(
+      '''
+      SELECT r.invoice_id
+      FROM legacy_invoice_reviews r
+      JOIN contracts c ON c.id = r.contract_id
+      WHERE c.tenant_id = ? AND r.status = 'pending'
+      LIMIT 1
+      ''',
+      [tenantId],
+    );
+    if (pending.isNotEmpty) {
+      throw StateError(
+        'توجد فاتورة تاريخية غير مرتبطة بقسط؛ راجعها قبل الفوترة أو القبض أو الاسترداد',
+      );
+    }
+  }
+
+  Future<void> _ensureNoPendingLegacyTenantPayments(
+    DatabaseExecutor txn,
+    int tenantId,
+  ) async {
+    final pending = await txn.query(
+      'legacy_tenant_payment_reviews',
+      columns: ['voucher_id'],
+      where: "tenant_id = ? AND status = 'pending'",
+      whereArgs: [tenantId],
+      limit: 1,
+    );
+    if (pending.isNotEmpty) {
+      throw StateError(
+        'توجد سندات صرف مستأجر تاريخية غير مصنفة؛ طابقها يدويًا قبل الفوترة أو القبض أو الاسترداد',
+      );
+    }
   }
 
   // --- Tenant Financial Operations ---
@@ -3327,6 +4545,8 @@ class DatabaseHelper {
         whereArgs: [tenantId],
       );
       if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
+      await _ensureNoPendingLegacyTenantPayments(txn, tenantId);
+      await _ensureNoPendingLegacyInvoicesForTenant(txn, tenantId);
       final tenantAccountId = tenantRows.first['account_id'] as int;
       await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
       final cashAccount = await _requireLeafAccountTx(
@@ -3339,6 +4559,8 @@ class DatabaseHelper {
       }
 
       var allocatedCents = 0;
+      var invoiceInstallmentId = 0;
+      var invoiceRentCents = 0;
       final verifiedUpdates = <Map<String, dynamic>>[];
       if (invoiceId != null) {
         final invoices = await txn.rawQuery(
@@ -3366,6 +4588,7 @@ class DatabaseHelper {
           );
         }
         final invoice = invoices.first;
+        invoiceInstallmentId = (invoice['installment_id'] as num).toInt();
         final invoiceTotal = (invoice['total_amount'] as num).toDouble();
         final invoiceNet = (invoice['net_amount'] as num).toDouble();
         final invoiceTax = (invoice['tax_amount'] as num).toDouble();
@@ -3381,9 +4604,16 @@ class DatabaseHelper {
         }
         final paidRows = await txn.rawQuery(
           '''
-          SELECT COALESCE(SUM(amount), 0) AS paid_amount
-          FROM voucher_invoice_allocations
-          WHERE invoice_id = ?
+          SELECT COALESCE(SUM(
+            ca.amount_minor - COALESCE(refunds.amount_minor, 0)
+          ), 0) / 100.0 AS paid_amount
+          FROM collection_allocations ca
+          LEFT JOIN (
+            SELECT collection_allocation_id, SUM(amount_minor) AS amount_minor
+            FROM refund_allocations
+            GROUP BY collection_allocation_id
+          ) refunds ON refunds.collection_allocation_id = ca.id
+          WHERE ca.invoice_id = ?
           ''',
           [invoiceId],
         );
@@ -3417,6 +4647,7 @@ class DatabaseHelper {
         final principalCents = receiptCents < installmentRemainingCents
             ? receiptCents
             : installmentRemainingCents;
+        invoiceRentCents = principalCents;
         if (principalCents > 0) {
           final newPaidCents =
               InternalTax.toMinorUnits(oldPaid) + principalCents;
@@ -3544,6 +4775,33 @@ class DatabaseHelper {
           'amount': installment['allocated_amount'],
         });
       }
+      final collectionCreatedBy = await _verifiedAuditUserId(txn);
+      if (invoiceId != null) {
+        await txn.insert('collection_allocations', {
+          'voucher_id': voucherId,
+          'installment_id': invoiceInstallmentId,
+          'invoice_id': invoiceId,
+          'amount_minor': allocatedCents,
+          'rent_amount_minor': invoiceRentCents,
+          'tax_amount_minor': allocatedCents - invoiceRentCents,
+          'created_by': collectionCreatedBy,
+        });
+      } else {
+        for (final installment in verifiedUpdates) {
+          final installmentCents = InternalTax.toMinorUnits(
+            (installment['allocated_amount'] as num).toDouble(),
+          );
+          await txn.insert('collection_allocations', {
+            'voucher_id': voucherId,
+            'installment_id': (installment['id'] as num).toInt(),
+            'invoice_id': null,
+            'amount_minor': installmentCents,
+            'rent_amount_minor': installmentCents,
+            'tax_amount_minor': 0,
+            'created_by': collectionCreatedBy,
+          });
+        }
+      }
       for (final installment in verifiedUpdates) {
         final changed = await txn.update(
           'contract_installments',
@@ -3561,12 +4819,467 @@ class DatabaseHelper {
     });
   }
 
-  Future<int> insertTenantPaymentVoucher({
+  Map<String, int> _splitRefundMinorUnits({
+    required int amountMinor,
+    required int remainingRentMinor,
+    required int remainingTaxMinor,
+  }) {
+    final remainingTotal = remainingRentMinor + remainingTaxMinor;
+    if (amountMinor <= 0 ||
+        remainingRentMinor < 0 ||
+        remainingTaxMinor < 0 ||
+        amountMinor > remainingTotal) {
+      throw StateError('مبلغ الاسترداد يتجاوز الرصيد غير المسترد للمصدر');
+    }
+    if (amountMinor == remainingTotal) {
+      return {'rent': remainingRentMinor, 'tax': remainingTaxMinor};
+    }
+    var rentRefund = (amountMinor * remainingRentMinor / remainingTotal)
+        .round();
+    rentRefund = rentRefund.clamp(0, remainingRentMinor).toInt();
+    var taxRefund = amountMinor - rentRefund;
+    if (taxRefund > remainingTaxMinor) {
+      taxRefund = remainingTaxMinor;
+      rentRefund = amountMinor - taxRefund;
+    }
+    if (rentRefund > remainingRentMinor ||
+        taxRefund > remainingTaxMinor ||
+        rentRefund + taxRefund != amountMinor) {
+      throw StateError('تعذر توزيع مبلغ الاسترداد على الإيجار والضريبة بأمان');
+    }
+    return {'rent': rentRefund, 'tax': taxRefund};
+  }
+
+  Future<int?> _verifiedAuditUserId(DatabaseExecutor txn) async {
+    final userId = PermissionRuntime.userId;
+    if (userId == null) return null;
+    final rows = await txn.query(
+      'users',
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : userId;
+  }
+
+  Future<void> _recordTenantRefundAudit(
+    DatabaseExecutor txn, {
+    required String action,
+    required Map<String, Object?> details,
+  }) async {
+    await txn.insert('audit_logs', {
+      'user_id': await _verifiedAuditUserId(txn),
+      'action': action,
+      'details': jsonEncode(details),
+      'timestamp': DateTime.now().toIso8601String(),
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getRefundableCollectionAllocations(
+    int tenantId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT
+        ca.id AS collection_allocation_id,
+        ca.voucher_id AS receipt_voucher_id,
+        v.voucher_date AS receipt_date,
+        v.description AS receipt_description,
+        cab.amount_minor / 100.0 AS collected_amount,
+        (cab.amount_minor - cab.remaining_minor) / 100.0 AS refunded_amount,
+        cab.remaining_minor / 100.0 AS remaining_amount,
+        ca.installment_id,
+        ca.invoice_id,
+        ti.invoice_date,
+        ti.total_amount AS invoice_total_amount,
+        ci.due_date
+      FROM collection_allocation_balances cab
+      JOIN collection_allocations ca ON ca.id = cab.id
+      JOIN vouchers v ON v.id = ca.voucher_id
+      JOIN journal_entries je ON je.id = v.journal_entry_id AND je.is_posted = 1
+      LEFT JOIN tax_invoices ti ON ti.id = ca.invoice_id
+      LEFT JOIN contract_installments ci ON ci.id = ca.installment_id
+      WHERE v.tenant_id = ?
+        AND v.voucher_type = 'قبض مستأجر'
+        AND cab.remaining_minor > 0
+      ORDER BY v.voucher_date, v.id, ca.id
+      ''',
+      [tenantId],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getPendingLegacyTenantPayments(
+    int tenantId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT
+        r.voucher_id,
+        r.tenant_id,
+        r.amount_minor / 100.0 AS amount,
+        v.voucher_date,
+        v.description,
+        v.journal_entry_id,
+        (
+          SELECT a.name
+          FROM journal_lines jl
+          JOIN accounts a ON a.id = jl.account_id
+          WHERE jl.journal_entry_id = v.journal_entry_id
+            AND jl.debit > 0 AND jl.credit = 0
+          LIMIT 1
+        ) AS offset_account_name
+      FROM legacy_tenant_payment_reviews r
+      JOIN vouchers v ON v.id = r.voucher_id
+      WHERE r.tenant_id = ? AND r.status = 'pending'
+      ORDER BY v.voucher_date, v.id
+      ''',
+      [tenantId],
+    );
+  }
+
+  Future<void> resolveLegacyTenantPaymentAsUnrelated({
+    required int voucherId,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+    if (reason.trim().isEmpty) {
+      throw ArgumentError('اكتب سبب تصنيف سند الصرف القديم كعملية غير مرتبطة');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final rows = await txn.rawQuery(
+        '''
+        SELECT r.tenant_id, r.amount_minor, r.status, v.voucher_type
+        FROM legacy_tenant_payment_reviews r
+        JOIN vouchers v ON v.id = r.voucher_id
+        WHERE r.voucher_id = ?
+        LIMIT 1
+        ''',
+        [voucherId],
+      );
+      if (rows.isEmpty ||
+          rows.first['status'] != 'pending' ||
+          rows.first['voucher_type'] != 'صرف مستأجر') {
+        throw StateError('سند الصرف التاريخي غير موجود أو سبق تصنيفه');
+      }
+      final changed = await txn.update(
+        'legacy_tenant_payment_reviews',
+        {
+          'status': 'unrelated',
+          'reason': reason.trim(),
+          'reviewed_by': await _verifiedAuditUserId(txn),
+          'reviewed_at': DateTime.now().toIso8601String(),
+        },
+        where: "voucher_id = ? AND status = 'pending'",
+        whereArgs: [voucherId],
+      );
+      if (changed != 1) throw StateError('تم تصنيف السند من مستخدم آخر');
+      await _recordTenantRefundAudit(
+        txn,
+        action: 'LEGACY_TENANT_PAYMENT_MARKED_UNRELATED',
+        details: {
+          'voucher_id': voucherId,
+          'tenant_id': rows.first['tenant_id'],
+          'amount_minor': rows.first['amount_minor'],
+          'reason': reason.trim(),
+        },
+      );
+    });
+  }
+
+  Future<void> resolveLegacyTenantPaymentAsRefund({
+    required int voucherId,
+    required List<Map<String, int>> allocations,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+    if (reason.trim().isEmpty || allocations.isEmpty) {
+      throw ArgumentError('سبب المطابقة ومصادر التحصيل مطلوبة');
+    }
+    final sourceIds = allocations
+        .map((item) => item['collection_allocation_id'])
+        .whereType<int>()
+        .toList();
+    if (sourceIds.length != allocations.length ||
+        sourceIds.toSet().length != sourceIds.length ||
+        allocations.any((item) => (item['amount_minor'] ?? 0) <= 0)) {
+      throw ArgumentError('توزيع الاسترداد التاريخي غير صالح');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final rows = await txn.rawQuery(
+        '''
+        SELECT
+          r.tenant_id,
+          r.amount_minor,
+          r.status,
+          v.voucher_type,
+          v.voucher_date,
+          v.journal_entry_id,
+          v.description,
+          v.amount
+        FROM legacy_tenant_payment_reviews r
+        JOIN vouchers v ON v.id = r.voucher_id
+        WHERE r.voucher_id = ?
+        LIMIT 1
+        ''',
+        [voucherId],
+      );
+      if (rows.isEmpty ||
+          rows.first['status'] != 'pending' ||
+          rows.first['voucher_type'] != 'صرف مستأجر') {
+        throw StateError('سند الصرف التاريخي غير موجود أو سبق تصنيفه');
+      }
+      final legacy = rows.first;
+      final tenantId = (legacy['tenant_id'] as num).toInt();
+      final amountMinor = (legacy['amount_minor'] as num).toInt();
+      final allocatedMinor = allocations.fold<int>(
+        0,
+        (sum, item) => sum + item['amount_minor']!,
+      );
+      if (allocatedMinor != amountMinor ||
+          InternalTax.toMinorUnits((legacy['amount'] as num).toDouble()) !=
+              amountMinor) {
+        throw StateError(
+          'يجب أن يساوي مجموع المطابقة كامل مبلغ سند الصرف القديم',
+        );
+      }
+      final tenantRows = await txn.query(
+        'tenants',
+        columns: ['account_id'],
+        where: 'id = ?',
+        whereArgs: [tenantId],
+        limit: 1,
+      );
+      if (tenantRows.isEmpty || tenantRows.first['account_id'] == null) {
+        throw StateError('لا يوجد حساب ذمم صالح للمستأجر');
+      }
+      final tenantAccountId = (tenantRows.first['account_id'] as num).toInt();
+      await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
+
+      final refundParts = <Map<String, int>>[];
+      final rentRefundByInstallment = <int, int>{};
+      for (final allocation in allocations) {
+        final sourceId = allocation['collection_allocation_id']!;
+        final sourceRows = await txn.rawQuery(
+          '''
+          SELECT
+            cab.*,
+            ca.voucher_id AS receipt_voucher_id,
+            ca.installment_id,
+            v.tenant_id AS receipt_tenant_id,
+            v.voucher_type AS receipt_voucher_type,
+            je.is_posted AS receipt_is_posted
+          FROM collection_allocation_balances cab
+          JOIN collection_allocations ca ON ca.id = cab.id
+          JOIN vouchers v ON v.id = ca.voucher_id
+          JOIN journal_entries je ON je.id = v.journal_entry_id
+          WHERE ca.id = ?
+          LIMIT 1
+          ''',
+          [sourceId],
+        );
+        if (sourceRows.isEmpty ||
+            (sourceRows.first['receipt_tenant_id'] as num?)?.toInt() !=
+                tenantId ||
+            sourceRows.first['receipt_voucher_type'] != 'قبض مستأجر' ||
+            (sourceRows.first['receipt_is_posted'] as num?)?.toInt() != 1) {
+          throw StateError('مصدر التحصيل لا يخص المستأجر أو ليس قبضًا مرحّلًا');
+        }
+        final source = sourceRows.first;
+        final rentRemaining = (source['remaining_rent_minor'] as num).toInt();
+        final taxRemaining = (source['remaining_tax_minor'] as num).toInt();
+        final amount = allocation['amount_minor']!;
+        final split = _splitRefundMinorUnits(
+          amountMinor: amount,
+          remainingRentMinor: rentRemaining,
+          remainingTaxMinor: taxRemaining,
+        );
+        refundParts.add({
+          'source_id': sourceId,
+          'amount': amount,
+          'rent': split['rent']!,
+          'tax': split['tax']!,
+          'installment_id': (source['installment_id'] as num).toInt(),
+        });
+        final installmentId = (source['installment_id'] as num).toInt();
+        rentRefundByInstallment.update(
+          installmentId,
+          (current) => current + split['rent']!,
+          ifAbsent: () => split['rent']!,
+        );
+      }
+
+      final journalId = (legacy['journal_entry_id'] as num?)?.toInt();
+      if (journalId == null) {
+        throw StateError(
+          'سند الصرف القديم بلا قيد مرحّل؛ يلزم تصحيحه محاسبيًا أولًا',
+        );
+      }
+      final originalLines = await txn.rawQuery(
+        '''
+        SELECT jl.account_id, jl.debit, jl.credit, a.account_type, a.code
+        FROM journal_lines jl
+        JOIN accounts a ON a.id = jl.account_id
+        WHERE jl.journal_entry_id = ?
+        ORDER BY jl.id
+        ''',
+        [journalId],
+      );
+      if (originalLines.length != 2) {
+        throw StateError(
+          'قيد سند الصرف القديم غير قياسي؛ لا يمكن إعادة تصنيفه تلقائيًا',
+        );
+      }
+      final debitLines = originalLines.where((line) {
+        final debit = (line['debit'] as num?)?.toDouble() ?? 0;
+        final credit = (line['credit'] as num?)?.toDouble() ?? 0;
+        return debit > 0 && credit == 0;
+      }).toList();
+      final creditLines = originalLines.where((line) {
+        final debit = (line['debit'] as num?)?.toDouble() ?? 0;
+        final credit = (line['credit'] as num?)?.toDouble() ?? 0;
+        return credit > 0 && debit == 0;
+      }).toList();
+      final voucherAmount = (legacy['amount'] as num).toDouble();
+      if (debitLines.length != 1 ||
+          creditLines.length != 1 ||
+          !_hasCentPrecision(voucherAmount) ||
+          InternalTax.toMinorUnits(
+                (debitLines.single['debit'] as num).toDouble(),
+              ) !=
+              amountMinor ||
+          InternalTax.toMinorUnits(
+                (creditLines.single['credit'] as num).toDouble(),
+              ) !=
+              amountMinor ||
+          !(creditLines.single['code'] as String).startsWith('11')) {
+        throw StateError(
+          'قيد سند الصرف القديم غير متوازن أو لا يصرف من صندوق/بنك',
+        );
+      }
+      final oldOffsetAccountId = (debitLines.single['account_id'] as num)
+          .toInt();
+      int? reclassificationJournalId;
+      if (oldOffsetAccountId != tenantAccountId) {
+        if (![
+          'Expense',
+          'Revenue',
+        ].contains(debitLines.single['account_type'])) {
+          throw StateError(
+            'الحساب المقابل التاريخي التزام/حساب آخر؛ لا يمكن افتراض أنه رد إيجار. صنّف السند كصرف غير مرتبط أو راجعه يدويًا.',
+          );
+        }
+        final correctionDescription =
+            'إعادة تصنيف رد تاريخي مرتبط بسند قبض رقم ${refundParts.first['source_id']}';
+        reclassificationJournalId = await txn.insert('journal_entries', {
+          'entry_date': legacy['voucher_date'],
+          'description': correctionDescription,
+          'is_posted': 1,
+        });
+        await txn.insert('journal_lines', {
+          'journal_entry_id': reclassificationJournalId,
+          'account_id': tenantAccountId,
+          'debit': voucherAmount,
+          'credit': 0.0,
+          'description': correctionDescription,
+        });
+        await txn.insert('journal_lines', {
+          'journal_entry_id': reclassificationJournalId,
+          'account_id': oldOffsetAccountId,
+          'debit': 0.0,
+          'credit': voucherAmount,
+          'description': correctionDescription,
+        });
+        await _updateBalanceTx(txn, tenantAccountId, voucherAmount, 0.0);
+        await _updateBalanceTx(txn, oldOffsetAccountId, 0.0, voucherAmount);
+      }
+
+      for (final part in refundParts) {
+        await txn.insert('refund_allocations', {
+          'refund_voucher_id': voucherId,
+          'collection_allocation_id': part['source_id'],
+          'amount_minor': part['amount'],
+          'rent_amount_minor': part['rent'],
+          'tax_amount_minor': part['tax'],
+          'created_by': await _verifiedAuditUserId(txn),
+        });
+      }
+      for (final entry in rentRefundByInstallment.entries) {
+        if (entry.value == 0) continue;
+        final installmentRows = await txn.query(
+          'contract_installments',
+          columns: ['amount', 'paid_amount'],
+          where: 'id = ?',
+          whereArgs: [entry.key],
+          limit: 1,
+        );
+        if (installmentRows.isEmpty) {
+          throw StateError('قسط مصدر الاسترداد غير موجود');
+        }
+        final totalCents = InternalTax.toMinorUnits(
+          (installmentRows.first['amount'] as num).toDouble(),
+        );
+        final oldPaid =
+            (installmentRows.first['paid_amount'] as num?)?.toDouble() ?? 0;
+        final oldPaidCents = InternalTax.toMinorUnits(oldPaid);
+        if (!_hasCentPrecision(oldPaid) || oldPaidCents < entry.value) {
+          throw StateError(
+            'المبلغ المدفوع المسجل على القسط أقل من الرد التاريخي',
+          );
+        }
+        final newPaidCents = oldPaidCents - entry.value;
+        final status = newPaidCents == 0
+            ? 'Unpaid'
+            : (newPaidCents >= totalCents ? 'Paid' : 'Partially Paid');
+        final changed = await txn.update(
+          'contract_installments',
+          {'paid_amount': newPaidCents / 100.0, 'status': status},
+          where: 'id = ? AND paid_amount = ?',
+          whereArgs: [entry.key, oldPaid],
+        );
+        if (changed != 1)
+          throw StateError('تغير القسط أثناء المطابقة؛ أُلغيت المعاملة');
+      }
+      final changed = await txn.update(
+        'legacy_tenant_payment_reviews',
+        {
+          'status': 'refund',
+          'reason': reason.trim(),
+          'reviewed_by': await _verifiedAuditUserId(txn),
+          'reviewed_at': DateTime.now().toIso8601String(),
+          'reclassification_journal_entry_id': reclassificationJournalId,
+        },
+        where: "voucher_id = ? AND status = 'pending'",
+        whereArgs: [voucherId],
+      );
+      if (changed != 1) throw StateError('تم تصنيف السند من مستخدم آخر');
+      await _recordTenantRefundAudit(
+        txn,
+        action: 'LEGACY_TENANT_PAYMENT_RECONCILED_AS_REFUND',
+        details: {
+          'voucher_id': voucherId,
+          'tenant_id': tenantId,
+          'amount_minor': amountMinor,
+          'source_allocations': refundParts,
+          'reason': reason.trim(),
+          'reclassification_journal_entry_id': reclassificationJournalId,
+        },
+      );
+    });
+  }
+
+  Future<int> insertTenantRefundVoucher({
     required int tenantId,
     required double amount,
     required String voucherDate,
     required int cashAccountId,
-    required int offsetAccountId,
+    required int collectionAllocationId,
     required String description,
   }) async {
     PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
@@ -3576,65 +5289,159 @@ class DatabaseHelper {
         description.trim().isEmpty) {
       throw ArgumentError('المبلغ أو التاريخ أو البيان غير صحيح');
     }
+    final refundCents = InternalTax.toMinorUnits(amount);
     final db = await instance.database;
     return db.transaction((txn) async {
+      await _ensureNoPendingLegacyTenantPayments(txn, tenantId);
+      await _ensureNoPendingLegacyInvoicesForTenant(txn, tenantId);
       final tenantRows = await txn.query(
         'tenants',
         where: 'id = ?',
         whereArgs: [tenantId],
+        limit: 1,
       );
-      if (tenantRows.isEmpty) throw StateError('المستأجر غير موجود');
-      final tenantAccountId = tenantRows.first['account_id'] as int;
+      if (tenantRows.isEmpty || tenantRows.first['account_id'] == null) {
+        throw StateError('المستأجر أو حساب ذممه غير موجود');
+      }
+      final tenantAccountId = (tenantRows.first['account_id'] as num).toInt();
       await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
       final cashAccount = await _requireLeafAccountTx(
         txn,
         cashAccountId,
         expectedType: 'Asset',
       );
-      final offsetAccount = await _requireLeafAccountTx(txn, offsetAccountId);
       if (!(cashAccount['code'] as String).startsWith('11')) {
         throw ArgumentError('اختر حساب صندوق أو بنك صالحاً');
       }
-      if (offsetAccountId == cashAccountId ||
-          ![
-            'Liability',
-            'Expense',
-            'Revenue',
-          ].contains(offsetAccount['account_type'])) {
-        throw ArgumentError('الحساب المقابل غير صالح');
+      final sourceRows = await txn.rawQuery(
+        '''
+        SELECT
+          cab.*,
+          ca.voucher_id AS receipt_voucher_id,
+          ca.installment_id,
+          ca.invoice_id,
+          v.tenant_id AS receipt_tenant_id,
+          v.voucher_type AS receipt_voucher_type,
+          v.journal_entry_id AS receipt_journal_id,
+          je.is_posted AS receipt_is_posted
+        FROM collection_allocation_balances cab
+        JOIN collection_allocations ca ON ca.id = cab.id
+        JOIN vouchers v ON v.id = ca.voucher_id
+        JOIN journal_entries je ON je.id = v.journal_entry_id
+        WHERE ca.id = ?
+        LIMIT 1
+        ''',
+        [collectionAllocationId],
+      );
+      if (sourceRows.isEmpty ||
+          (sourceRows.first['receipt_tenant_id'] as num?)?.toInt() !=
+              tenantId ||
+          sourceRows.first['receipt_voucher_type'] != 'قبض مستأجر' ||
+          (sourceRows.first['receipt_is_posted'] as num?)?.toInt() != 1) {
+        throw StateError('مصدر الاسترداد لا يخص المستأجر أو ليس قبضًا مرحّلًا');
       }
-
+      final source = sourceRows.first;
+      final remainingMinor = (source['remaining_minor'] as num).toInt();
+      if (refundCents > remainingMinor) {
+        throw StateError('المبلغ يتجاوز الجزء غير المسترد من سند القبض الأصلي');
+      }
+      final split = _splitRefundMinorUnits(
+        amountMinor: refundCents,
+        remainingRentMinor: (source['remaining_rent_minor'] as num).toInt(),
+        remainingTaxMinor: (source['remaining_tax_minor'] as num).toInt(),
+      );
+      final sourceVoucherId = (source['receipt_voucher_id'] as num).toInt();
+      final refundDescription =
+          'رد مرتبط بسند قبض رقم $sourceVoucherId - ${description.trim()}';
       final journalId = await txn.insert('journal_entries', {
         'entry_date': voucherDate,
-        'description': description,
+        'description': refundDescription,
         'is_posted': 1,
       });
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
-        'account_id': offsetAccountId,
+        'account_id': tenantAccountId,
         'debit': amount,
         'credit': 0.0,
-        'description': description,
+        'description': refundDescription,
       });
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
         'account_id': cashAccountId,
         'debit': 0.0,
         'credit': amount,
-        'description': description,
+        'description': refundDescription,
       });
-      await _updateBalanceTx(txn, offsetAccountId, amount, 0.0);
+      await _updateBalanceTx(txn, tenantAccountId, amount, 0.0);
       await _updateBalanceTx(txn, cashAccountId, 0.0, amount);
-
-      return txn.insert('vouchers', {
+      final voucherId = await txn.insert('vouchers', {
         'voucher_type': 'صرف مستأجر',
         'voucher_date': voucherDate,
         'amount': amount,
         'tenant_id': tenantId,
         'party_name': tenantRows.first['name'],
         'journal_entry_id': journalId,
-        'description': description,
+        'description': refundDescription,
       });
+      await txn.insert('refund_allocations', {
+        'refund_voucher_id': voucherId,
+        'collection_allocation_id': collectionAllocationId,
+        'amount_minor': refundCents,
+        'rent_amount_minor': split['rent'],
+        'tax_amount_minor': split['tax'],
+        'created_by': await _verifiedAuditUserId(txn),
+      });
+      final rentRefundMinor = split['rent']!;
+      if (rentRefundMinor > 0) {
+        final installmentId = (source['installment_id'] as num).toInt();
+        final installmentRows = await txn.query(
+          'contract_installments',
+          columns: ['amount', 'paid_amount'],
+          where: 'id = ?',
+          whereArgs: [installmentId],
+          limit: 1,
+        );
+        if (installmentRows.isEmpty) {
+          throw StateError('قسط مصدر الاسترداد غير موجود');
+        }
+        final total = (installmentRows.first['amount'] as num).toDouble();
+        final oldPaid =
+            (installmentRows.first['paid_amount'] as num?)?.toDouble() ?? 0;
+        final totalMinor = InternalTax.toMinorUnits(total);
+        final oldPaidMinor = InternalTax.toMinorUnits(oldPaid);
+        if (!_hasCentPrecision(total) ||
+            !_hasCentPrecision(oldPaid) ||
+            oldPaidMinor < rentRefundMinor ||
+            oldPaidMinor > totalMinor) {
+          throw StateError('رصيد القسط المدفوع غير متسق مع مصدر الاسترداد');
+        }
+        final newPaidMinor = oldPaidMinor - rentRefundMinor;
+        final status = newPaidMinor == 0
+            ? 'Unpaid'
+            : (newPaidMinor >= totalMinor ? 'Paid' : 'Partially Paid');
+        final changed = await txn.update(
+          'contract_installments',
+          {'paid_amount': newPaidMinor / 100.0, 'status': status},
+          where: 'id = ? AND paid_amount = ?',
+          whereArgs: [installmentId, oldPaid],
+        );
+        if (changed != 1)
+          throw StateError('تغير القسط أثناء الاسترداد؛ أُلغيت المعاملة');
+      }
+      await _recordTenantRefundAudit(
+        txn,
+        action: 'TENANT_REFUND_POSTED',
+        details: {
+          'refund_voucher_id': voucherId,
+          'tenant_id': tenantId,
+          'collection_allocation_id': collectionAllocationId,
+          'source_receipt_voucher_id': sourceVoucherId,
+          'amount_minor': refundCents,
+          'rent_amount_minor': split['rent'],
+          'tax_amount_minor': split['tax'],
+        },
+      );
+      return voucherId;
     });
   }
 
@@ -3664,6 +5471,26 @@ class DatabaseHelper {
 
   Future<Map<String, dynamic>?> getVoucherDetails(int voucherId) async {
     PermissionRuntime.require('voucher_history', AppPermissionAction.view);
+    return _loadVoucherDetails(voucherId);
+  }
+
+  Future<Map<String, dynamic>?> getTenantReceiptVoucherDetails(
+    int voucherId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    final receipt = await db.query(
+      'vouchers',
+      columns: ['id'],
+      where: "id = ? AND voucher_type = 'قبض مستأجر'",
+      whereArgs: [voucherId],
+      limit: 1,
+    );
+    if (receipt.isEmpty) return null;
+    return _loadVoucherDetails(voucherId);
+  }
+
+  Future<Map<String, dynamic>?> _loadVoucherDetails(int voucherId) async {
     final db = await instance.database;
     final headers = await db.rawQuery(
       '''
@@ -3752,11 +5579,36 @@ class DatabaseHelper {
       ''',
       [voucherId],
     );
+    final refunds = await db.rawQuery(
+      '''
+      SELECT
+        ra.collection_allocation_id,
+        ra.amount_minor / 100.0 AS allocated_amount,
+        ra.rent_amount_minor / 100.0 AS rent_refund_amount,
+        ra.tax_amount_minor / 100.0 AS tax_refund_amount,
+        ca.voucher_id AS source_receipt_voucher_id,
+        source.voucher_date AS source_receipt_date,
+        ca.installment_id,
+        ca.invoice_id,
+        ti.invoice_date,
+        ti.total_amount AS invoice_total_amount,
+        ci.due_date
+      FROM refund_allocations ra
+      JOIN collection_allocations ca ON ca.id = ra.collection_allocation_id
+      JOIN vouchers source ON source.id = ca.voucher_id
+      LEFT JOIN tax_invoices ti ON ti.id = ca.invoice_id
+      LEFT JOIN contract_installments ci ON ci.id = ca.installment_id
+      WHERE ra.refund_voucher_id = ?
+      ORDER BY source.voucher_date, ca.id
+      ''',
+      [voucherId],
+    );
     return {
       'voucher': headers.first,
       'journal_lines': lines,
       'installments': installments,
       'invoices': invoices,
+      'refunds': refunds,
     };
   }
 
@@ -3813,13 +5665,22 @@ class DatabaseHelper {
               InternalTax.toMinorUnits(scheduledNet)) {
         throw StateError('صافي الفاتورة يجب أن يطابق مبلغ القسط المسجل');
       }
+      await _ensureNoPendingLegacyTenantPayments(txn, tenantId);
+      await _ensureNoPendingLegacyInvoicesForTenant(txn, tenantId);
       final priorAllocations = await txn.rawQuery(
         '''
-        SELECT via.voucher_id, via.amount, v.tenant_id, v.voucher_type
-        FROM voucher_installment_allocations via
-        JOIN vouchers v ON v.id = via.voucher_id
-        WHERE via.installment_id = ?
-        ORDER BY via.id
+        SELECT
+          ca.id AS collection_allocation_id,
+          ca.voucher_id,
+          ca.amount_minor / 100.0 AS amount,
+          cab.remaining_minor,
+          v.tenant_id,
+          v.voucher_type
+        FROM collection_allocations ca
+        JOIN collection_allocation_balances cab ON cab.id = ca.id
+        JOIN vouchers v ON v.id = ca.voucher_id
+        WHERE ca.installment_id = ? AND ca.invoice_id IS NULL
+        ORDER BY ca.id
         ''',
         [installmentId],
       );
@@ -3833,7 +5694,12 @@ class DatabaseHelper {
             'توجد تخصيصات قبض غير متسقة للقسط؛ راجعها يدويًا قبل إصدار الفاتورة',
           );
         }
-        priorAllocatedCents += InternalTax.toMinorUnits(amount);
+        final remainingCents = (allocation['remaining_minor'] as num).toInt();
+        if (remainingCents < 0 ||
+            remainingCents > InternalTax.toMinorUnits(amount)) {
+          throw StateError('رصيد تحصيل القسط بعد الردود غير متسق');
+        }
+        priorAllocatedCents += remainingCents;
       }
       if (priorAllocatedCents != InternalTax.toMinorUnits(paidBeforeInvoice)) {
         throw StateError(
@@ -3947,6 +5813,17 @@ class DatabaseHelper {
           'invoice_id': invoiceId,
           'amount': allocation['amount'],
         });
+        final linked = await txn.update(
+          'collection_allocations',
+          {'invoice_id': invoiceId},
+          where: 'id = ? AND invoice_id IS NULL',
+          whereArgs: [allocation['collection_allocation_id']],
+        );
+        if (linked != 1) {
+          throw StateError(
+            'تغير مصدر التحصيل أثناء إصدار الفاتورة؛ أُلغيت المعاملة',
+          );
+        }
       }
       return invoiceId;
     });
@@ -4047,10 +5924,23 @@ class DatabaseHelper {
           JOIN contracts c ON c.id = ci.contract_id
           LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
           LEFT JOIN (
-            SELECT invoice_id, SUM(amount) AS paid_amount
-            FROM voucher_invoice_allocations GROUP BY invoice_id
+            SELECT invoice_id, SUM(remaining_minor) / 100.0 AS paid_amount
+            FROM collection_allocation_balances
+            WHERE invoice_id IS NOT NULL
+            GROUP BY invoice_id
           ) vip ON vip.invoice_id = ti.id
-          WHERE c.status = 'Active') AS outstanding_amount
+          WHERE c.status = 'Active') AS outstanding_amount,
+        (SELECT COUNT(*) FROM legacy_tenant_payment_reviews
+          WHERE status = 'pending') AS pending_legacy_tenant_payment_count,
+        (SELECT COALESCE(SUM(amount_minor), 0) / 100.0
+          FROM legacy_tenant_payment_reviews
+          WHERE status = 'pending') AS pending_legacy_tenant_payment_amount,
+        (SELECT COUNT(*) FROM legacy_invoice_reviews
+          WHERE status = 'pending') AS pending_legacy_invoice_count,
+        (SELECT COALESCE(SUM(ti.total_amount), 0)
+          FROM legacy_invoice_reviews r
+          JOIN tax_invoices ti ON ti.id = r.invoice_id
+          WHERE r.status = 'pending') AS pending_legacy_invoice_amount
     ''');
     return rows.first;
   }
@@ -4149,8 +6039,9 @@ class DatabaseHelper {
         (SELECT COALESCE(SUM(
           CASE WHEN ti.id IS NULL THEN ci.paid_amount
             ELSE COALESCE((
-              SELECT SUM(via.amount) FROM voucher_invoice_allocations via
-              WHERE via.invoice_id = ti.id
+              SELECT SUM(cab.remaining_minor) / 100.0
+              FROM collection_allocation_balances cab
+              WHERE cab.invoice_id = ti.id
             ), 0)
           END
         ), 0)
@@ -4196,8 +6087,10 @@ class DatabaseHelper {
       JOIN tenants t ON c.tenant_id = t.id
       LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
       LEFT JOIN (
-        SELECT invoice_id, SUM(amount) AS paid_amount
-        FROM voucher_invoice_allocations GROUP BY invoice_id
+        SELECT invoice_id, SUM(remaining_minor) / 100.0 AS paid_amount
+        FROM collection_allocation_balances
+        WHERE invoice_id IS NOT NULL
+        GROUP BY invoice_id
       ) vip ON vip.invoice_id = ti.id
       WHERE c.status = 'Active'
         AND (CASE WHEN ti.id IS NULL

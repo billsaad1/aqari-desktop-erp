@@ -33,6 +33,15 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   bool _taxSettingsLoading = true;
   double _taxRate = 0;
   String? _taxSettingsError;
+  List<Map<String, dynamic>> _legacyPayments = [];
+  String? _legacyPaymentsError;
+  bool _legacyPaymentsLoading = false;
+  int _legacyPaymentsRequestId = 0;
+  List<Map<String, dynamic>> _legacyInvoices = [];
+  int? _selectedLegacyInvoiceId;
+  bool _legacyInvoicesLoading = false;
+  String? _legacyInvoicesError;
+  int _legacyInvoicesRequestId = 0;
 
   final _dateController = TextEditingController(
     text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
@@ -45,6 +54,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
   void initState() {
     super.initState();
     _loadTaxSettings();
+    _loadLegacyInvoices();
   }
 
   Future<void> _loadTaxSettings() async {
@@ -75,6 +85,226 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     }
   }
 
+  Future<void> _loadLegacyPayments(int? tenantId) async {
+    final requestId = ++_legacyPaymentsRequestId;
+    if (tenantId == null) {
+      if (mounted) {
+        setState(() {
+          _legacyPayments = [];
+          _legacyPaymentsError = null;
+          _legacyPaymentsLoading = false;
+        });
+      }
+      return;
+    }
+    if (mounted) setState(() => _legacyPaymentsLoading = true);
+    try {
+      final payments = await DatabaseHelper.instance
+          .getPendingLegacyTenantPayments(tenantId);
+      if (!mounted ||
+          requestId != _legacyPaymentsRequestId ||
+          tenantId != _selectedTenantId) {
+        return;
+      }
+      setState(() {
+        _legacyPayments = payments;
+        _legacyPaymentsError = null;
+        _legacyPaymentsLoading = false;
+      });
+    } catch (error) {
+      if (!mounted || requestId != _legacyPaymentsRequestId) return;
+      setState(() {
+        _legacyPayments = [];
+        _legacyPaymentsError = 'تعذر التحقق من مراجعات الصرف القديمة: $error';
+        _legacyPaymentsLoading = false;
+      });
+    }
+  }
+
+  bool get _hasPendingLegacyInvoiceForSelectedContract =>
+      _selectedContractId != null &&
+      _legacyInvoices.any(
+        (invoice) =>
+            (invoice['contract_id'] as num?)?.toInt() == _selectedContractId,
+      );
+
+  Future<void> _loadLegacyInvoices() async {
+    final requestId = ++_legacyInvoicesRequestId;
+    setState(() => _legacyInvoicesLoading = true);
+    try {
+      final invoices = await DatabaseHelper.instance
+          .getAllPendingLegacyInvoiceReviews();
+      if (!mounted || requestId != _legacyInvoicesRequestId) return;
+      final selectedExists = invoices.any(
+        (invoice) =>
+            (invoice['invoice_id'] as num).toInt() == _selectedLegacyInvoiceId,
+      );
+      setState(() {
+        _legacyInvoices = invoices;
+        _selectedLegacyInvoiceId = selectedExists
+            ? _selectedLegacyInvoiceId
+            : (invoices.isEmpty
+                  ? null
+                  : (invoices.first['invoice_id'] as num).toInt());
+        _legacyInvoicesError = null;
+        _legacyInvoicesLoading = false;
+      });
+    } catch (error) {
+      if (!mounted || requestId != _legacyInvoicesRequestId) return;
+      setState(() {
+        _legacyInvoices = [];
+        _selectedLegacyInvoiceId = null;
+        _legacyInvoicesError = 'تعذر تحميل مراجعات الفواتير التاريخية: $error';
+        _legacyInvoicesLoading = false;
+      });
+    }
+  }
+
+  Future<void> _reviewLegacyInvoice(Map<String, dynamic> legacy) async {
+    final invoiceId = (legacy['invoice_id'] as num).toInt();
+    List<Map<String, dynamic>> candidates;
+    try {
+      candidates = await DatabaseHelper.instance
+          .getLegacyInvoiceInstallmentCandidates(invoiceId);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تعذر تحميل الأقساط المطابقة: $error')),
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+    final reasonController = TextEditingController();
+    int? selectedInstallmentId = candidates.length == 1
+        ? (candidates.first['id'] as num).toInt()
+        : null;
+    final decision = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('مراجعة الفاتورة التاريخية رقم $invoiceId'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'التاريخ: ${legacy['invoice_date'] ?? '—'}  •  '
+                    'الصافي: ${_formatAmount(legacy['net_amount'])}  •  '
+                    'الإجمالي: ${_formatAmount(legacy['total_amount'])}',
+                  ),
+                  const SizedBox(height: 12),
+                  if (candidates.isEmpty)
+                    const Text(
+                      'لا يوجد قسط واحد غير مفوتر يطابق صافي الفاتورة. لا يمكن ربطها آليًا؛ أبقها معلقة ما لم تتحقق من أصلها وتؤكد أنها لا تغطي قسطًا قائمًا.',
+                    )
+                  else ...[
+                    DropdownButtonFormField<int>(
+                      initialValue: selectedInstallmentId,
+                      items: candidates.map((candidate) {
+                        final id = (candidate['id'] as num).toInt();
+                        return DropdownMenuItem<int>(
+                          value: id,
+                          child: Text(
+                            'قسط #$id — ${_formatDueDate(candidate['due_date'])} — ${_formatAmount(candidate['amount'])}',
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (value) =>
+                          setDialogState(() => selectedInstallmentId = value),
+                      decoration: const InputDecoration(
+                        labelText: 'القسط بعد مراجعة المستند الأصلي',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'الربط متاح فقط إذا كان صافي الفاتورة مطابقًا لقيمة القسط، وسيعاد بناء تخصيصات القبض من السندات المرحلة فقط.',
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: reasonController,
+                    maxLength: 1000,
+                    onChanged: (_) => setDialogState(() {}),
+                    decoration: const InputDecoration(
+                      labelText: 'سبب المراجعة ومصدر التحقق',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('إلغاء'),
+            ),
+            if (candidates.isNotEmpty)
+              OutlinedButton(
+                onPressed:
+                    selectedInstallmentId != null &&
+                        reasonController.text.trim().isNotEmpty
+                    ? () => Navigator.pop(dialogContext, 'linked')
+                    : null,
+                child: const Text('ربط بالقسط'),
+              ),
+            TextButton(
+              onPressed: reasonController.text.trim().isNotEmpty
+                  ? () => Navigator.pop(dialogContext, 'non_billable')
+                  : null,
+              child: const Text('تأكيد أنها غير مرتبطة بقسط جديد'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final reason = reasonController.text.trim();
+    reasonController.dispose();
+    if (!mounted || decision == null) return;
+    setState(() => _isProcessing = true);
+    try {
+      if (decision == 'linked') {
+        await DatabaseHelper.instance.resolveLegacyInvoiceAsInstallment(
+          invoiceId: invoiceId,
+          installmentId: selectedInstallmentId!,
+          reason: reason,
+        );
+      } else {
+        await DatabaseHelper.instance.resolveLegacyInvoiceAsNonBillable(
+          invoiceId: invoiceId,
+          reason: reason,
+        );
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            decision == 'linked'
+                ? 'تم ربط الفاتورة التاريخية بالقسط بعد توثيق المراجعة'
+                : 'تم توثيق استبعاد الفاتورة التاريخية من الفوترة الجديدة',
+          ),
+        ),
+      );
+      await _loadLegacyInvoices();
+      if (decision == 'linked' && _selectedContractId != null) {
+        await _loadInstallments(_selectedContractId!);
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تعذرت تسوية الفاتورة التاريخية: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
   void _calculateGross() {
     final parsedNet = double.tryParse(_netAmountController.text);
     final net = parsedNet != null && parsedNet.isFinite && parsedNet >= 0
@@ -83,6 +313,12 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
     final tax = InternalTax.calculate(net, _taxRate);
     _taxAmountController.text = tax.toStringAsFixed(2);
     _grossAmountController.text = (net + tax).toStringAsFixed(2);
+  }
+
+  String _formatAmount(dynamic value) {
+    final amount = value is num ? value.toDouble() : double.tryParse('$value');
+    if (amount == null || !amount.isFinite) return '—';
+    return NumberFormat('#,##0.00').format(amount);
   }
 
   String _formatDueDate(dynamic value) {
@@ -126,6 +362,25 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
 
   Future<void> _processInvoice({required bool saveAsPdf}) async {
     if (_isProcessing) return;
+    if (_legacyPaymentsLoading ||
+        _legacyPaymentsError != null ||
+        _legacyPayments.isNotEmpty ||
+        _legacyInvoicesLoading ||
+        _legacyInvoicesError != null ||
+        _hasPendingLegacyInvoiceForSelectedContract) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _legacyPaymentsLoading || _legacyInvoicesLoading
+                ? 'جارٍ التحقق من المراجعات التاريخية'
+                : (_legacyPaymentsError ??
+                      _legacyInvoicesError ??
+                      'راجع سندات الصرف والفواتير التاريخية قبل إصدار فاتورة جديدة'),
+          ),
+        ),
+      );
+      return;
+    }
     if (_taxSettingsLoading || _taxSettingsError != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('تحقق من إعداد نسبة الضريبة أولاً')),
@@ -585,6 +840,88 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     ],
+                    if (_legacyPaymentsLoading ||
+                        _legacyPaymentsError != null ||
+                        _legacyPayments.isNotEmpty ||
+                        _legacyInvoicesLoading ||
+                        _legacyInvoicesError != null ||
+                        _legacyInvoices.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      Card(
+                        color: Colors.amber.shade50,
+                        child: Padding(
+                          padding: const EdgeInsets.all(14),
+                          child: Text(
+                            _legacyPaymentsLoading || _legacyInvoicesLoading
+                                ? 'جارٍ التحقق من السجلات التاريخية...'
+                                : (_legacyPaymentsError ??
+                                      _legacyInvoicesError ??
+                                      'مراجعة مطلوبة: ${_legacyPayments.length} سند صرف قديم و${_legacyInvoices.length} فاتورة قديمة غير مرتبطة بقسط.'),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (_legacyInvoices.isNotEmpty &&
+                        !_legacyInvoicesLoading &&
+                        _legacyInvoicesError == null) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: DropdownButtonFormField<int>(
+                              initialValue: _selectedLegacyInvoiceId,
+                              items: _legacyInvoices.map((invoice) {
+                                final id = (invoice['invoice_id'] as num)
+                                    .toInt();
+                                final contractStatus =
+                                    invoice['contract_status']?.toString() ??
+                                    'غير محدد';
+                                return DropdownMenuItem<int>(
+                                  value: id,
+                                  child: Text(
+                                    'فاتورة #$id — ${invoice['tenant_name'] ?? 'مستأجر غير معروف'} — ${_formatAmount(invoice['total_amount'])} — العقد: $contractStatus',
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                );
+                              }).toList(),
+                              onChanged: (value) => setState(
+                                () => _selectedLegacyInvoiceId = value,
+                              ),
+                              decoration: const InputDecoration(
+                                labelText:
+                                    'الفواتير التاريخية التي تحتاج مراجعة',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          OutlinedButton.icon(
+                            onPressed:
+                                _isProcessing ||
+                                    _selectedLegacyInvoiceId == null ||
+                                    !PermissionRuntime.allows(
+                                      'tenant_financial',
+                                      AppPermissionAction.view,
+                                    ) ||
+                                    !PermissionRuntime.allows(
+                                      'tenant_financial',
+                                      AppPermissionAction.post,
+                                    )
+                                ? null
+                                : () {
+                                    final invoice = _legacyInvoices.firstWhere(
+                                      (row) =>
+                                          (row['invoice_id'] as num).toInt() ==
+                                          _selectedLegacyInvoiceId,
+                                    );
+                                    _reviewLegacyInvoice(invoice);
+                                  },
+                            icon: const Icon(Icons.fact_check_outlined),
+                            label: const Text('مراجعة وتسوية'),
+                          ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 32),
                     Row(
                       children: [
@@ -607,6 +944,9 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                                       _selectedContractId = val;
                                       _selectedInstallmentId = null;
                                       _selectedTenantId = null;
+                                      _legacyPayments = [];
+                                      _legacyPaymentsError = null;
+                                      _legacyPaymentsLoading = val != null;
                                       _unbilledInstallments = [];
                                       _installmentsLoading = false;
                                       _installmentsError = null;
@@ -620,6 +960,7 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                                             contract['tenant_id'];
                                       }
                                     });
+                                    _loadLegacyPayments(_selectedTenantId);
                                     if (val != null) _loadInstallments(val);
                                   },
                             decoration: const InputDecoration(
@@ -842,6 +1183,12 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                             onPressed:
                                 _isProcessing ||
                                     _taxSettingsError != null ||
+                                    _legacyPaymentsLoading ||
+                                    _legacyPaymentsError != null ||
+                                    _legacyPayments.isNotEmpty ||
+                                    _legacyInvoicesLoading ||
+                                    _legacyInvoicesError != null ||
+                                    _hasPendingLegacyInvoiceForSelectedContract ||
                                     !PermissionRuntime.allows(
                                       'tenant_financial',
                                       AppPermissionAction.post,
@@ -872,6 +1219,12 @@ class _TaxInvoiceScreenState extends State<TaxInvoiceScreen> {
                               onPressed:
                                   _isProcessing ||
                                       _taxSettingsError != null ||
+                                      _legacyPaymentsLoading ||
+                                      _legacyPaymentsError != null ||
+                                      _legacyPayments.isNotEmpty ||
+                                      _legacyInvoicesLoading ||
+                                      _legacyInvoicesError != null ||
+                                      _hasPendingLegacyInvoiceForSelectedContract ||
                                       !PermissionRuntime.allows(
                                         'tenant_financial',
                                         AppPermissionAction.post,
