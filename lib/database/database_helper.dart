@@ -13,7 +13,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 20;
+  static const int _schemaVersion = 21;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -328,6 +328,7 @@ class DatabaseHelper {
         'can_delete',
         'can_print',
         'can_post',
+        'can_review_approve',
       ],
       'audit_logs': ['id', 'user_id', 'action', 'details', 'timestamp'],
       'cities': ['id', 'name'],
@@ -540,6 +541,35 @@ class DatabaseHelper {
         'created_at',
         'details',
       ],
+      'property_sale_reviews': [
+        'id',
+        'target_type',
+        'property_id',
+        'unit_id',
+        'requested_by',
+        'requested_at',
+        'reason',
+        'proposed_amount_minor',
+        'proposed_sale_date',
+        'target_snapshot_json',
+        'active_contract_count_at_request',
+        'status',
+        'reviewed_by',
+        'reviewed_at',
+        'review_reason',
+        'cancelled_by',
+        'cancelled_at',
+        'cancel_reason',
+      ],
+      'property_sale_review_events': [
+        'id',
+        'sale_review_id',
+        'event_type',
+        'user_id',
+        'created_at',
+        'reason',
+        'details',
+      ],
     };
     final missingSchema = <String>[];
     for (final entry in requiredColumns.entries) {
@@ -571,6 +601,17 @@ class DatabaseHelper {
       'tenant_notices_no_delete',
       'tenant_notice_events_no_update',
       'tenant_notice_events_no_delete',
+      'property_sale_reviews_target_valid_insert',
+      'property_sale_reviews_target_valid_update',
+      'property_sale_reviews_initial_pending',
+      'property_sale_reviews_no_overlap_insert',
+      'property_sale_reviews_no_overlap_update',
+      'property_sale_reviews_identity_immutable',
+      'property_sale_reviews_decision_immutable',
+      'property_sale_reviews_valid_transition',
+      'property_sale_reviews_no_delete',
+      'property_sale_review_events_no_update',
+      'property_sale_review_events_no_delete',
     ];
     final missingTriggers = requiredTriggers
         .where((trigger) => !triggers.contains(trigger))
@@ -599,6 +640,10 @@ class DatabaseHelper {
       'refund_allocations_source_idx',
       'legacy_tenant_payment_review_status_idx',
       'legacy_invoice_review_status_idx',
+      'property_sale_reviews_status_idx',
+      'property_sale_reviews_property_open_unique',
+      'property_sale_reviews_unit_open_unique',
+      'property_sale_review_events_review_idx',
     ];
     final missingIndexes = requiredIndexes
         .where((index) => !indexes.contains(index))
@@ -1032,6 +1077,15 @@ class DatabaseHelper {
     }
     if (oldVersion < 20) {
       await _createTenantNoticeSchema(db);
+    }
+    if (oldVersion < 21) {
+      await _ensureColumn(
+        db,
+        'user_permissions',
+        'can_review_approve',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
+      await _createPropertySaleReviewSchema(db);
     }
   }
 
@@ -1551,6 +1605,225 @@ class DatabaseHelper {
     ''');
   }
 
+  Future<void> _createPropertySaleReviewSchema(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS property_sale_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_type TEXT NOT NULL CHECK (target_type IN ('property', 'unit')),
+        property_id INTEGER NOT NULL,
+        unit_id INTEGER,
+        requested_by INTEGER NOT NULL,
+        requested_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 1000),
+        proposed_amount_minor INTEGER
+          CHECK (proposed_amount_minor IS NULL OR proposed_amount_minor > 0),
+        proposed_sale_date TEXT,
+        target_snapshot_json TEXT NOT NULL,
+        active_contract_count_at_request INTEGER NOT NULL DEFAULT 0
+          CHECK (active_contract_count_at_request >= 0),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled')),
+        reviewed_by INTEGER,
+        reviewed_at TEXT,
+        review_reason TEXT,
+        cancelled_by INTEGER,
+        cancelled_at TEXT,
+        cancel_reason TEXT,
+        FOREIGN KEY (property_id) REFERENCES properties (id) ON DELETE RESTRICT,
+        FOREIGN KEY (unit_id) REFERENCES units (id) ON DELETE RESTRICT,
+        FOREIGN KEY (requested_by) REFERENCES users (id) ON DELETE RESTRICT,
+        FOREIGN KEY (reviewed_by) REFERENCES users (id) ON DELETE RESTRICT,
+        FOREIGN KEY (cancelled_by) REFERENCES users (id) ON DELETE RESTRICT,
+        CHECK ((target_type = 'property' AND unit_id IS NULL)
+          OR (target_type = 'unit' AND unit_id IS NOT NULL)),
+        CHECK (
+          (status = 'pending' AND reviewed_by IS NULL AND reviewed_at IS NULL
+            AND review_reason IS NULL AND cancelled_by IS NULL
+            AND cancelled_at IS NULL AND cancel_reason IS NULL)
+          OR
+          (status IN ('accepted', 'rejected') AND reviewed_by IS NOT NULL
+            AND reviewed_at IS NOT NULL AND review_reason IS NOT NULL
+            AND length(trim(review_reason)) > 0
+            AND cancelled_by IS NULL AND cancelled_at IS NULL
+            AND cancel_reason IS NULL)
+          OR
+          (status = 'cancelled' AND cancelled_by IS NOT NULL
+            AND cancelled_at IS NOT NULL AND cancel_reason IS NOT NULL
+            AND length(trim(cancel_reason)) > 0
+            AND ((reviewed_by IS NULL AND reviewed_at IS NULL
+                AND review_reason IS NULL)
+              OR (reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL
+                AND review_reason IS NOT NULL
+                AND length(trim(review_reason)) > 0)))
+        )
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS property_sale_review_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sale_review_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL
+          CHECK (event_type IN ('requested', 'accepted', 'rejected', 'cancelled')),
+        user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+        details TEXT,
+        FOREIGN KEY (sale_review_id) REFERENCES property_sale_reviews (id)
+          ON DELETE RESTRICT,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE RESTRICT
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS property_sale_reviews_status_idx
+      ON property_sale_reviews(status, requested_at DESC, id DESC)
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS property_sale_reviews_property_open_unique
+      ON property_sale_reviews(property_id)
+      WHERE target_type = 'property' AND status IN ('pending', 'accepted')
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS property_sale_reviews_unit_open_unique
+      ON property_sale_reviews(unit_id)
+      WHERE target_type = 'unit' AND status IN ('pending', 'accepted')
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS property_sale_review_events_review_idx
+      ON property_sale_review_events(sale_review_id, id)
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_target_valid_insert
+      BEFORE INSERT ON property_sale_reviews
+      WHEN (NEW.target_type = 'property' AND NEW.unit_id IS NOT NULL)
+        OR (NEW.target_type = 'unit' AND NOT EXISTS (
+          SELECT 1 FROM units
+          WHERE id = NEW.unit_id AND property_id = NEW.property_id
+        ))
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale target does not match property/unit');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_target_valid_update
+      BEFORE UPDATE OF target_type, property_id, unit_id
+      ON property_sale_reviews
+      WHEN (NEW.target_type = 'property' AND NEW.unit_id IS NOT NULL)
+        OR (NEW.target_type = 'unit' AND NOT EXISTS (
+          SELECT 1 FROM units
+          WHERE id = NEW.unit_id AND property_id = NEW.property_id
+        ))
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale target does not match property/unit');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_initial_pending
+      BEFORE INSERT ON property_sale_reviews
+      WHEN NEW.status != 'pending'
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale review must start pending');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_no_overlap_insert
+      BEFORE INSERT ON property_sale_reviews
+      WHEN NEW.status IN ('pending', 'accepted') AND EXISTS (
+        SELECT 1 FROM property_sale_reviews old
+        WHERE old.property_id = NEW.property_id
+          AND old.status IN ('pending', 'accepted')
+          AND (old.target_type = 'property' OR NEW.target_type = 'property'
+            OR old.unit_id = NEW.unit_id)
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'overlapping open property sale review exists');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_no_overlap_update
+      BEFORE UPDATE OF status ON property_sale_reviews
+      WHEN NEW.status IN ('pending', 'accepted') AND EXISTS (
+        SELECT 1 FROM property_sale_reviews old
+        WHERE old.id != NEW.id AND old.property_id = NEW.property_id
+          AND old.status IN ('pending', 'accepted')
+          AND (old.target_type = 'property' OR NEW.target_type = 'property'
+            OR old.unit_id = NEW.unit_id)
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'overlapping open property sale review exists');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_identity_immutable
+      BEFORE UPDATE ON property_sale_reviews
+      WHEN OLD.target_type IS NOT NEW.target_type
+        OR OLD.property_id IS NOT NEW.property_id
+        OR OLD.unit_id IS NOT NEW.unit_id
+        OR OLD.requested_by IS NOT NEW.requested_by
+        OR OLD.requested_at IS NOT NEW.requested_at
+        OR OLD.reason IS NOT NEW.reason
+        OR OLD.proposed_amount_minor IS NOT NEW.proposed_amount_minor
+        OR OLD.proposed_sale_date IS NOT NEW.proposed_sale_date
+        OR OLD.target_snapshot_json IS NOT NEW.target_snapshot_json
+        OR OLD.active_contract_count_at_request IS NOT NEW.active_contract_count_at_request
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale request details are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_valid_transition
+      BEFORE UPDATE OF status ON property_sale_reviews
+      WHEN NOT ((OLD.status = 'pending'
+          AND NEW.status IN ('accepted', 'rejected', 'cancelled'))
+        OR (OLD.status = 'accepted' AND NEW.status = 'cancelled'))
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid property sale review transition');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_decision_immutable
+      BEFORE UPDATE ON property_sale_reviews
+      WHEN (
+        NOT (OLD.status = 'pending'
+          AND NEW.status IN ('accepted', 'rejected'))
+        AND (
+          OLD.reviewed_by IS NOT NEW.reviewed_by
+          OR OLD.reviewed_at IS NOT NEW.reviewed_at
+          OR OLD.review_reason IS NOT NEW.review_reason
+        )
+      ) OR (
+        OLD.status = NEW.status AND (
+          OLD.cancelled_by IS NOT NEW.cancelled_by
+          OR OLD.cancelled_at IS NOT NEW.cancelled_at
+          OR OLD.cancel_reason IS NOT NEW.cancel_reason
+        )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale review decisions are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_reviews_no_delete
+      BEFORE DELETE ON property_sale_reviews
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale reviews cannot be deleted');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_review_events_no_update
+      BEFORE UPDATE ON property_sale_review_events
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale review events are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS property_sale_review_events_no_delete
+      BEFORE DELETE ON property_sale_review_events
+      BEGIN
+        SELECT RAISE(ABORT, 'property sale review events cannot be deleted');
+      END
+    ''');
+  }
+
   Future _createDB(Database db, int version) async {
     // 1. Company Info
     await db.execute('''
@@ -1602,6 +1875,7 @@ class DatabaseHelper {
         can_delete INTEGER DEFAULT 0,
         can_print INTEGER DEFAULT 0,
         can_post INTEGER DEFAULT 0,
+        can_review_approve INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
       )
     ''');
@@ -1909,6 +2183,7 @@ class DatabaseHelper {
 
     await _createRefundSchema(db);
     await _createTenantNoticeSchema(db);
+    await _createPropertySaleReviewSchema(db);
     await _insertSeedData(db);
   }
 
@@ -6734,6 +7009,392 @@ class DatabaseHelper {
     await txn.insert('audit_logs', {
       'user_id': userId,
       'action': 'tenant_notice_$eventType',
+      'details': jsonEncode(eventDetails),
+      'timestamp': timestamp,
+    });
+  }
+
+  String? _normalizeSaleDateOnly(String? rawDate) {
+    final value = rawDate?.trim() ?? '';
+    if (value.isEmpty) return null;
+    final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value);
+    if (match == null) {
+      throw ArgumentError('تاريخ البيع المقترح يجب أن يكون بصيغة YYYY-MM-DD');
+    }
+    final year = int.parse(match.group(1)!);
+    final month = int.parse(match.group(2)!);
+    final day = int.parse(match.group(3)!);
+    final date = DateTime.utc(year, month, day);
+    if (date.year != year || date.month != month || date.day != day) {
+      throw ArgumentError('تاريخ البيع المقترح غير صالح تقويميًا');
+    }
+    return value;
+  }
+
+  Future<int> _requirePropertySaleActorId(DatabaseExecutor txn) async {
+    final actorId = await _verifiedAuditUserId(txn);
+    if (actorId == null) {
+      throw StateError('يلزم مستخدم مسجل وموثق لتسجيل مراجعة البيع');
+    }
+    final rows = await txn.query(
+      'users',
+      columns: ['is_active'],
+      where: 'id = ?',
+      whereArgs: [actorId],
+      limit: 1,
+    );
+    if (rows.isEmpty || rows.single['is_active'] != 1) {
+      throw StateError('حساب المستخدم غير نشط؛ تعذر تسجيل مراجعة البيع');
+    }
+    return actorId;
+  }
+
+  Future<List<Map<String, Object?>>> getPropertySaleProperties() async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT
+        p.id,
+        p.name,
+        p.deed_number,
+        o.name AS owner_name,
+        COUNT(DISTINCT u.id) AS unit_count,
+        COUNT(DISTINCT CASE WHEN c.status = 'Active' THEN c.id END)
+          AS active_contract_count
+      FROM properties p
+      LEFT JOIN owners o ON o.id = p.owner_id
+      LEFT JOIN units u ON u.property_id = p.id
+      LEFT JOIN contracts c ON c.unit_id = u.id
+      GROUP BY p.id
+      ORDER BY p.name COLLATE NOCASE, p.id
+    ''');
+  }
+
+  Future<List<Map<String, Object?>>> getPropertySaleUnits(
+    int propertyId,
+  ) async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.view);
+    if (propertyId <= 0) throw ArgumentError('العقار المحدد غير صالح');
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT
+        u.id,
+        u.property_id,
+        u.unit_number,
+        u.status,
+        (SELECT COUNT(*) FROM contracts c
+          WHERE c.unit_id = u.id AND c.status = 'Active')
+          AS active_contract_count
+      FROM units u
+      WHERE u.property_id = ?
+      ORDER BY u.unit_number COLLATE NOCASE, u.id
+      ''',
+      [propertyId],
+    );
+  }
+
+  Future<int> createPropertySaleReview({
+    required String targetType,
+    required int propertyId,
+    int? unitId,
+    required String reason,
+    int? proposedAmountMinor,
+    String? proposedSaleDate,
+  }) async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.add);
+    final normalizedReason = reason.trim();
+    if (targetType != 'property' && targetType != 'unit') {
+      throw ArgumentError('نوع هدف البيع غير معروف');
+    }
+    if (propertyId <= 0 ||
+        (targetType == 'property' && unitId != null) ||
+        (targetType == 'unit' && (unitId == null || unitId <= 0))) {
+      throw ArgumentError('حدد العقار كاملًا أو وحدة صحيحة تابعة له');
+    }
+    if (normalizedReason.isEmpty || normalizedReason.length > 1000) {
+      throw ArgumentError('مبرر طلب البيع مطلوب وبحد أقصى 1000 حرف');
+    }
+    if (proposedAmountMinor != null && proposedAmountMinor <= 0) {
+      throw ArgumentError('القيمة المقترحة يجب أن تكون أكبر من صفر');
+    }
+    final normalizedDate = _normalizeSaleDateOnly(proposedSaleDate);
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final actorId = await _requirePropertySaleActorId(txn);
+      final propertyRows = await txn.rawQuery(
+        '''
+        SELECT p.id, p.name, p.deed_number, p.address, o.name AS owner_name
+        FROM properties p LEFT JOIN owners o ON o.id = p.owner_id
+        WHERE p.id = ? LIMIT 1
+        ''',
+        [propertyId],
+      );
+      if (propertyRows.isEmpty) throw StateError('العقار المحدد غير موجود');
+      final property = propertyRows.single;
+      Map<String, Object?>? unit;
+      if (targetType == 'unit') {
+        final unitRows = await txn.query(
+          'units',
+          where: 'id = ? AND property_id = ?',
+          whereArgs: [unitId, propertyId],
+          limit: 1,
+        );
+        if (unitRows.isEmpty) {
+          throw StateError('الوحدة غير موجودة أو لا تتبع العقار المحدد');
+        }
+        unit = unitRows.single;
+      }
+      final activeContractRows = await txn.rawQuery(
+        targetType == 'property'
+            ? '''
+              SELECT COUNT(DISTINCT c.id) AS count
+              FROM contracts c JOIN units u ON u.id = c.unit_id
+              WHERE u.property_id = ? AND c.status = 'Active'
+            '''
+            : '''
+              SELECT COUNT(*) AS count FROM contracts
+              WHERE unit_id = ? AND status = 'Active'
+            ''',
+        [targetType == 'property' ? propertyId : unitId],
+      );
+      final activeContractCount = (activeContractRows.single['count'] as num)
+          .toInt();
+      final now = DateTime.now().toIso8601String();
+      final snapshot = <String, Object?>{
+        'source': 'current_master_data_at_request',
+        'target_type': targetType,
+        'property_id': propertyId,
+        'property_name': property['name'],
+        'deed_number': property['deed_number'],
+        'address': property['address'],
+        'owner_name': property['owner_name'],
+        if (unit != null) ...{
+          'unit_id': unit['id'],
+          'unit_number': unit['unit_number'],
+          'unit_status_at_request': unit['status'],
+        },
+        'active_contract_count_at_request': activeContractCount,
+      };
+      final reviewId = await txn.insert('property_sale_reviews', {
+        'target_type': targetType,
+        'property_id': propertyId,
+        'unit_id': unitId,
+        'requested_by': actorId,
+        'requested_at': now,
+        'reason': normalizedReason,
+        'proposed_amount_minor': proposedAmountMinor,
+        'proposed_sale_date': normalizedDate,
+        'target_snapshot_json': jsonEncode(snapshot),
+        'active_contract_count_at_request': activeContractCount,
+        'status': 'pending',
+      });
+      await _recordPropertySaleReviewEvent(
+        txn,
+        saleReviewId: reviewId,
+        eventType: 'requested',
+        userId: actorId,
+        timestamp: now,
+        reason: normalizedReason,
+        details: {
+          'target_type': targetType,
+          'property_id': propertyId,
+          'unit_id': unitId,
+          'proposed_amount_minor': proposedAmountMinor,
+          'proposed_sale_date': normalizedDate,
+          'active_contract_count_at_request': activeContractCount,
+        },
+      );
+      return reviewId;
+    });
+  }
+
+  Future<List<Map<String, Object?>>> getPropertySaleReviews() async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT
+        r.*,
+        p.name AS current_property_name,
+        u.unit_number AS current_unit_number,
+        requester.full_name AS requester_name,
+        reviewer.full_name AS reviewer_name,
+        canceller.full_name AS canceller_name,
+        (SELECT COUNT(*) FROM contracts c JOIN units cu ON cu.id = c.unit_id
+          WHERE c.status = 'Active' AND (
+            (r.target_type = 'property' AND cu.property_id = r.property_id)
+            OR (r.target_type = 'unit' AND c.unit_id = r.unit_id)
+          )) AS active_contract_count_current
+      FROM property_sale_reviews r
+      JOIN properties p ON p.id = r.property_id
+      LEFT JOIN units u ON u.id = r.unit_id
+      JOIN users requester ON requester.id = r.requested_by
+      LEFT JOIN users reviewer ON reviewer.id = r.reviewed_by
+      LEFT JOIN users canceller ON canceller.id = r.cancelled_by
+      ORDER BY CASE r.status
+        WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
+        r.requested_at DESC, r.id DESC
+    ''');
+  }
+
+  Future<List<Map<String, Object?>>> getPropertySaleReviewEvents(
+    int saleReviewId,
+  ) async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.view);
+    if (saleReviewId <= 0) throw ArgumentError('طلب البيع المحدد غير صالح');
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT e.*, u.full_name AS user_name
+      FROM property_sale_review_events e
+      JOIN users u ON u.id = e.user_id
+      WHERE e.sale_review_id = ?
+      ORDER BY e.id
+      ''',
+      [saleReviewId],
+    );
+  }
+
+  Future<void> reviewPropertySaleRequest({
+    required int saleReviewId,
+    required bool accept,
+    required String reason,
+  }) async {
+    PermissionRuntime.require(
+      'property_sales',
+      AppPermissionAction.reviewApprove,
+    );
+    final normalizedReason = reason.trim();
+    if (saleReviewId <= 0 ||
+        normalizedReason.isEmpty ||
+        normalizedReason.length > 1000) {
+      throw ArgumentError('قرار المراجعة ومبرره الموثق مطلوبان');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final actorId = await _requirePropertySaleActorId(txn);
+      final rows = await txn.query(
+        'property_sale_reviews',
+        columns: ['status', 'property_id', 'unit_id', 'target_type'],
+        where: 'id = ?',
+        whereArgs: [saleReviewId],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('طلب البيع غير موجود');
+      if (rows.single['status'] != 'pending') {
+        throw StateError('لا يمكن مراجعة طلب بيع إلا إذا كان بانتظار المراجعة');
+      }
+      final status = accept ? 'accepted' : 'rejected';
+      final timestamp = DateTime.now().toIso8601String();
+      final changed = await txn.update(
+        'property_sale_reviews',
+        {
+          'status': status,
+          'reviewed_by': actorId,
+          'reviewed_at': timestamp,
+          'review_reason': normalizedReason,
+        },
+        where: "id = ? AND status = 'pending'",
+        whereArgs: [saleReviewId],
+      );
+      if (changed != 1) throw StateError('تغيرت حالة الطلب؛ أعد تحميل القائمة');
+      await _recordPropertySaleReviewEvent(
+        txn,
+        saleReviewId: saleReviewId,
+        eventType: status,
+        userId: actorId,
+        timestamp: timestamp,
+        reason: normalizedReason,
+        details: {
+          'status': status,
+          'target_type': rows.single['target_type'],
+          'property_id': rows.single['property_id'],
+          'unit_id': rows.single['unit_id'],
+        },
+      );
+    });
+  }
+
+  Future<void> cancelPropertySaleReview({
+    required int saleReviewId,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.edit);
+    final normalizedReason = reason.trim();
+    if (saleReviewId <= 0 ||
+        normalizedReason.isEmpty ||
+        normalizedReason.length > 1000) {
+      throw ArgumentError('سبب إلغاء طلب البيع مطلوب وبحد أقصى 1000 حرف');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final actorId = await _requirePropertySaleActorId(txn);
+      final rows = await txn.query(
+        'property_sale_reviews',
+        columns: ['status', 'property_id', 'unit_id', 'target_type'],
+        where: 'id = ?',
+        whereArgs: [saleReviewId],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('طلب البيع غير موجود');
+      if (rows.single['status'] != 'pending' &&
+          rows.single['status'] != 'accepted') {
+        throw StateError('لا يمكن إلغاء الطلب بعد رفضه أو إلغائه');
+      }
+      final timestamp = DateTime.now().toIso8601String();
+      final changed = await txn.update(
+        'property_sale_reviews',
+        {
+          'status': 'cancelled',
+          'cancelled_by': actorId,
+          'cancelled_at': timestamp,
+          'cancel_reason': normalizedReason,
+        },
+        where: "id = ? AND status IN ('pending', 'accepted')",
+        whereArgs: [saleReviewId],
+      );
+      if (changed != 1) throw StateError('تغيرت حالة الطلب؛ أعد تحميل القائمة');
+      await _recordPropertySaleReviewEvent(
+        txn,
+        saleReviewId: saleReviewId,
+        eventType: 'cancelled',
+        userId: actorId,
+        timestamp: timestamp,
+        reason: normalizedReason,
+        details: {
+          'status': 'cancelled',
+          'target_type': rows.single['target_type'],
+          'property_id': rows.single['property_id'],
+          'unit_id': rows.single['unit_id'],
+        },
+      );
+    });
+  }
+
+  Future<void> _recordPropertySaleReviewEvent(
+    DatabaseExecutor txn, {
+    required int saleReviewId,
+    required String eventType,
+    required int userId,
+    required String timestamp,
+    required String reason,
+    required Map<String, Object?> details,
+  }) async {
+    final eventDetails = <String, Object?>{
+      'sale_review_id': saleReviewId,
+      ...details,
+    };
+    await txn.insert('property_sale_review_events', {
+      'sale_review_id': saleReviewId,
+      'event_type': eventType,
+      'user_id': userId,
+      'created_at': timestamp,
+      'reason': reason,
+      'details': jsonEncode(eventDetails),
+    });
+    await txn.insert('audit_logs', {
+      'user_id': userId,
+      'action': 'property_sale_review_$eventType',
       'details': jsonEncode(eventDetails),
       'timestamp': timestamp,
     });
