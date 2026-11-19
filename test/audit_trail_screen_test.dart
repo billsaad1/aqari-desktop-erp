@@ -128,4 +128,29 @@ void main() {
     expect(find.widgetWithText(OutlinedButton, 'حذف'), findsNothing);
     expect(find.widgetWithText(OutlinedButton, 'تعديل'), findsNothing);
   });
+
+  testWidgets('discloses that the row cap truncated the trail', (tester) async {
+    await tester.runAsync(() async {
+      final db = await helper.database;
+      final batch = db.batch();
+      for (var i = 0; i < 600; i++) {
+        batch.insert('audit_logs', {
+          'user_id': 1,
+          'actor_name': 'مدير النظام',
+          'action': 'BULK_EVENT',
+          'entity_type': 'journal_entry',
+          'entity_id': i,
+          'details': '{}',
+          'timestamp': '2026-06-01T00:00:00',
+        });
+      }
+      await batch.commit(noResult: true);
+    });
+
+    await pumpScreen(tester);
+
+    // Silently showing the newest 500 rows would let a reviewer believe the
+    // trail ended there, so the cap must be visible.
+    expect(find.textContaining('تُعرض أحدث 500 حادثة فقط'), findsOneWidget);
+  });
 }

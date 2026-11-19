@@ -95,6 +95,9 @@ class _AuditTrailScreenState extends State<AuditTrailScreen> {
     super.dispose();
   }
 
+  /// Rows requested per load. The query layer caps this; the UI must say so.
+  static const _pageSize = 500;
+
   Future<void> _load() async {
     setState(() {
       _isLoading = true;
@@ -111,6 +114,7 @@ class _AuditTrailScreenState extends State<AuditTrailScreen> {
         action: _selectedAction,
         entityType: _selectedEntityType,
         search: _searchController.text,
+        limit: _pageSize,
       );
       final actions = await DatabaseHelper.instance.getAuditTrailActions();
       if (!mounted) return;
@@ -367,9 +371,21 @@ class _AuditTrailScreenState extends State<AuditTrailScreen> {
     if (_rows.isEmpty) {
       return const Center(child: Text('لا توجد أحداث مطابقة للمرشحات'));
     }
+    final truncated = _rows.length >= _pageSize;
     return SingleChildScrollView(
-      child: ErpDataTable(
-        showCheckboxColumn: false,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (truncated)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                'تُعرض أحدث $_pageSize حادثة فقط؛ ضيّق الفترة الزمنية لعرض بقية السجل',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          ErpDataTable(
+            showCheckboxColumn: false,
         columns: const [
           DataColumn(label: Text('الوقت')),
           DataColumn(label: Text('الحدث')),
@@ -406,6 +422,8 @@ class _AuditTrailScreenState extends State<AuditTrailScreen> {
                 ),
               ],
             ),
+          ],
+        ),
         ],
       ),
     );
