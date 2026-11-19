@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
+import '../models/account_statement_report_model.dart';
 
 class ReportsProvider with ChangeNotifier {
   ReportsProvider({
@@ -7,22 +8,34 @@ class ReportsProvider with ChangeNotifier {
     propertyInquiryPropertiesLoader,
     Future<List<Map<String, dynamic>>> Function(int propertyId)?
     propertyInquiryUnitsLoader,
+    Future<AccountStatementReport> Function(
+      int accountId,
+      String startDate,
+      String endDate,
+    )?
+    accountStatementLoader,
   }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
-       _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader;
+       _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader,
+       _accountStatementLoader = accountStatementLoader;
 
   final Future<List<Map<String, dynamic>>> Function()?
   _propertyInquiryPropertiesLoader;
   final Future<List<Map<String, dynamic>>> Function(int propertyId)?
   _propertyInquiryUnitsLoader;
+  final Future<AccountStatementReport> Function(
+    int accountId,
+    String startDate,
+    String endDate,
+  )?
+  _accountStatementLoader;
 
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _occupancyStats = [];
-  List<Map<String, dynamic>> _accountStatement = [];
+  AccountStatementReport? _accountStatementReport;
   List<Map<String, dynamic>> _dueInstallments = [];
   List<Map<String, dynamic>> _expiringContracts = [];
   List<Map<String, dynamic>> _propertyInquiryProperties = [];
   List<Map<String, dynamic>> _propertyInquiryUnits = [];
-  double _accountOpeningBalance = 0;
   int _searchGeneration = 0;
   int _occupancyGeneration = 0;
   int _statementGeneration = 0;
@@ -37,12 +50,28 @@ class ReportsProvider with ChangeNotifier {
   bool _propertyInquiryUnitsLoaded = false;
   String? _propertyInquiryErrorMessage;
   String? _errorMessage;
+  String? _statementErrorMessage;
 
   bool _isLoading = false;
+  bool _isStatementLoading = false;
 
   List<Map<String, dynamic>> get searchResults => _searchResults;
   List<Map<String, dynamic>> get occupancyStats => _occupancyStats;
-  List<Map<String, dynamic>> get accountStatement => _accountStatement;
+  AccountStatementReport? get accountStatementReport => _accountStatementReport;
+  List<Map<String, dynamic>> get accountStatement =>
+      _accountStatementReport?.lines
+          .map(
+            (line) => {
+              'date': line.date,
+              'voucher_no': line.journalEntryId,
+              'description': line.description,
+              'debit': line.debit,
+              'credit': line.credit,
+              'running_balance': line.runningBalance,
+            },
+          )
+          .toList(growable: false) ??
+      const [];
   List<Map<String, dynamic>> get dueInstallments => _dueInstallments;
   List<Map<String, dynamic>> get expiringContracts => _expiringContracts;
   List<Map<String, dynamic>> get propertyInquiryProperties =>
@@ -55,8 +84,11 @@ class ReportsProvider with ChangeNotifier {
   bool get propertyInquiryUnitsLoaded => _propertyInquiryUnitsLoaded;
   String? get propertyInquiryErrorMessage => _propertyInquiryErrorMessage;
   bool get isLoading => _isLoading;
-  double get accountOpeningBalance => _accountOpeningBalance;
+  bool get isStatementLoading => _isStatementLoading;
+  double get accountOpeningBalance =>
+      _accountStatementReport?.openingBalance ?? 0;
   String? get errorMessage => _errorMessage;
+  String? get statementErrorMessage => _statementErrorMessage;
 
   /// Called by the app-level auth proxy to prevent report data from surviving
   /// a session switch or loss/change of reports.view.
@@ -85,8 +117,9 @@ class ReportsProvider with ChangeNotifier {
     _propertyInquiryGeneration++;
     _searchResults = [];
     _occupancyStats = [];
-    _accountStatement = [];
-    _accountOpeningBalance = 0;
+    _accountStatementReport = null;
+    _isStatementLoading = false;
+    _statementErrorMessage = null;
     _clearPropertyInquiry();
     _isLoading = false;
     _errorMessage = null;
@@ -225,35 +258,43 @@ class ReportsProvider with ChangeNotifier {
     String endDate,
   ) async {
     final generation = ++_statementGeneration;
-    _isLoading = true;
+    _accountStatementReport = null;
+    _isStatementLoading = true;
+    _statementErrorMessage = null;
     notifyListeners();
 
     try {
-      final openingBalance = await DatabaseHelper.instance
-          .getAccountOpeningBalance(accountId, startDate);
-      if (generation != _statementGeneration) return;
-      final statement = await DatabaseHelper.instance.getAccountStatement(
-        accountId,
-        startDate,
-        endDate,
-      );
+      final loader = _accountStatementLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getLedgerAccountStatement(
+              accountId: accountId,
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(accountId, startDate, endDate);
       if (generation == _statementGeneration) {
-        _accountOpeningBalance = openingBalance;
-        _accountStatement = statement;
-        _errorMessage = null;
+        _accountStatementReport = report;
+        _statementErrorMessage = null;
       }
     } catch (e) {
       if (generation == _statementGeneration) {
-        _accountOpeningBalance = 0;
-        _accountStatement = [];
-        _errorMessage = 'تعذر تحميل كشف الحساب: $e';
+        _accountStatementReport = null;
+        _statementErrorMessage = 'تعذر تحميل كشف الحساب: $e';
       }
     } finally {
       if (generation == _statementGeneration) {
-        _isLoading = false;
+        _isStatementLoading = false;
         notifyListeners();
       }
     }
+  }
+
+  void clearAccountStatement({bool notify = true}) {
+    _statementGeneration++;
+    _accountStatementReport = null;
+    _isStatementLoading = false;
+    _statementErrorMessage = null;
+    if (notify) notifyListeners();
   }
 
   Future<void> loadAlertsDashboard() async {

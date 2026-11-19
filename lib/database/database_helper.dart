@@ -8,6 +8,7 @@ import '../core/internal_tax.dart';
 import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
+import '../models/account_statement_report_model.dart';
 import 'database_integrity_migrations.dart';
 
 class DatabaseHelper {
@@ -6397,59 +6398,209 @@ class DatabaseHelper {
     return rows.first;
   }
 
+  @Deprecated(
+    'Use getLedgerAccountStatement for a consistent statement result.',
+  )
   Future<double> getAccountOpeningBalance(
     int accountId,
     String startDate,
   ) async {
-    PermissionRuntime.require('reports', AppPermissionAction.view);
-    final db = await instance.database;
-    final accounts = await db.query(
-      'accounts',
-      columns: ['account_type'],
-      where: 'id = ?',
-      whereArgs: [accountId],
+    final report = await getLedgerAccountStatement(
+      accountId: accountId,
+      startDate: startDate,
+      endDate: startDate,
     );
-    if (accounts.isEmpty) throw StateError('الحساب غير موجود');
-    final totals = await db.rawQuery(
-      '''
-      SELECT COALESCE(SUM(jl.debit), 0) AS debit_total,
-             COALESCE(SUM(jl.credit), 0) AS credit_total
-      FROM journal_lines jl
-      JOIN journal_entries je ON jl.journal_entry_id = je.id
-      WHERE jl.account_id = ? AND je.entry_date < ? AND je.is_posted = 1
-    ''',
-      [accountId, startDate],
-    );
-    final debit = (totals.first['debit_total'] as num).toDouble();
-    final credit = (totals.first['credit_total'] as num).toDouble();
-    final type = accounts.first['account_type'];
-    return (type == 'Liability' || type == 'Revenue' || type == 'Equity')
-        ? credit - debit
-        : debit - credit;
+    return report.openingBalance;
   }
 
+  @Deprecated(
+    'Use getLedgerAccountStatement for a consistent statement result.',
+  )
   Future<List<Map<String, dynamic>>> getAccountStatement(
     int accountId,
     String startDate,
     String endDate,
   ) async {
-    PermissionRuntime.require('reports', AppPermissionAction.view);
-    final db = await instance.database;
-    return await db.rawQuery(
-      '''
-      SELECT
-        je.entry_date as date,
-        je.id as voucher_no,
-        jl.description as description,
-        jl.debit as debit,
-        jl.credit as credit
-      FROM journal_lines jl
-      JOIN journal_entries je ON jl.journal_entry_id = je.id
-      WHERE jl.account_id = ? AND je.entry_date >= ? AND je.entry_date <= ? AND je.is_posted = 1
-      ORDER BY je.entry_date ASC, je.id ASC, jl.id ASC
-    ''',
-      [accountId, startDate, endDate],
+    final report = await getLedgerAccountStatement(
+      accountId: accountId,
+      startDate: startDate,
+      endDate: endDate,
     );
+    return report.lines
+        .map(
+          (line) => {
+            'date': line.date,
+            'voucher_no': line.journalEntryId,
+            'description': line.description,
+            'debit': line.debit,
+            'credit': line.credit,
+            'running_balance': line.runningBalance,
+          },
+        )
+        .toList(growable: false);
+  }
+
+  Future<AccountStatementReport> getLedgerAccountStatement({
+    required int accountId,
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    if (accountId <= 0) throw ArgumentError('معرف الحساب غير صحيح');
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final year = parts[0]!;
+      final month = parts[1]!;
+      final day = parts[2]!;
+      if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+      }
+      final parsed = DateTime(year, month, day);
+      return parsed.year == year && parsed.month == month && parsed.day == day;
+    }
+
+    if (!isCalendarDate(startDate) || !isCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final endDateParts = endDate.split('-').map(int.parse).toList();
+    final exclusiveEndDate = DateTime.utc(
+      endDateParts[0],
+      endDateParts[1],
+      endDateParts[2] + 1,
+    ).toIso8601String().substring(0, 10);
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final accounts = await txn.rawQuery(
+        '''
+        SELECT a.id, a.code, a.name, a.account_type
+        FROM accounts a
+        WHERE a.id = ?
+          AND a.parent_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM accounts child WHERE child.parent_id = a.id
+          )
+        LIMIT 1
+        ''',
+        [accountId],
+      );
+      if (accounts.isEmpty) {
+        throw StateError(
+          'الحساب غير موجود أو حساب تجميعي وليس حسابًا تفصيليًا',
+        );
+      }
+      final account = accounts.single;
+      final accountType = account['account_type']?.toString() ?? '';
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+      const supportedTypes = {
+        'Asset',
+        'Liability',
+        'Equity',
+        'Revenue',
+        'Expense',
+      };
+      if (!supportedTypes.contains(accountType)) {
+        throw StateError('نوع الحساب غير معرف؛ لا يمكن تحديد طبيعته في الكشف');
+      }
+      final debitNormal = accountType == 'Asset' || accountType == 'Expense';
+
+      final openingRows = await txn.rawQuery(
+        '''
+        SELECT
+          CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+            AS debit_minor,
+          CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+            AS credit_minor
+        FROM journal_lines jl
+        JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE jl.account_id = ? AND je.entry_date < ? AND je.is_posted = 1
+        ''',
+        [accountId, startDate],
+      );
+      final openingDebitMinor = (openingRows.single['debit_minor'] as num)
+          .toInt();
+      final openingCreditMinor = (openingRows.single['credit_minor'] as num)
+          .toInt();
+      var runningBalanceMinor = debitNormal
+          ? openingDebitMinor - openingCreditMinor
+          : openingCreditMinor - openingDebitMinor;
+      final openingBalance = runningBalanceMinor / 100.0;
+
+      final movementRows = await txn.rawQuery(
+        '''
+        SELECT
+          je.entry_date AS date,
+          je.id AS journal_entry_id,
+          jl.description AS description,
+          CAST(ROUND(jl.debit * 100) AS INTEGER) AS debit_minor,
+          CAST(ROUND(jl.credit * 100) AS INTEGER) AS credit_minor
+        FROM journal_lines jl
+        JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE jl.account_id = ?
+          AND je.entry_date >= ?
+          AND je.entry_date < ?
+          AND je.is_posted = 1
+        ORDER BY je.entry_date ASC, je.id ASC, jl.id ASC
+        ''',
+        [accountId, startDate, exclusiveEndDate],
+      );
+
+      var totalDebitMinor = 0;
+      var totalCreditMinor = 0;
+      final lines = <AccountStatementLine>[];
+      for (final row in movementRows) {
+        final debitMinor = (row['debit_minor'] as num).toInt();
+        final creditMinor = (row['credit_minor'] as num).toInt();
+        totalDebitMinor += debitMinor;
+        totalCreditMinor += creditMinor;
+        runningBalanceMinor += debitNormal
+            ? debitMinor - creditMinor
+            : creditMinor - debitMinor;
+        lines.add(
+          AccountStatementLine(
+            date: row['date']?.toString() ?? '',
+            journalEntryId: (row['journal_entry_id'] as num).toInt(),
+            description: row['description']?.toString() ?? '',
+            debit: debitMinor / 100.0,
+            credit: creditMinor / 100.0,
+            runningBalance: runningBalanceMinor / 100.0,
+          ),
+        );
+      }
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return AccountStatementReport(
+        accountId: accountId,
+        accountCode: account['code']?.toString() ?? '',
+        accountName: account['name']?.toString() ?? '',
+        accountType: accountType,
+        currency: currency,
+        startDate: startDate,
+        endDate: endDate,
+        openingBalance: openingBalance,
+        totalDebit: totalDebitMinor / 100.0,
+        totalCredit: totalCreditMinor / 100.0,
+        closingBalance: runningBalanceMinor / 100.0,
+        lines: lines,
+      );
+    });
   }
 
   Future<List<Map<String, dynamic>>> getUnitOccupancyStats() async {
