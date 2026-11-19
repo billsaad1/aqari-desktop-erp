@@ -415,7 +415,7 @@ void main() {
   });
 
   test(
-    'v20 upgrades to v21, preserving permissions and default-denying review',
+    'v20 upgrades to v22, preserving permissions and default-denying review',
     () async {
       final db = await helper.database;
       await db.insert('user_permissions', {
@@ -438,7 +438,7 @@ void main() {
       await helper.close();
 
       final upgraded = await helper.database;
-      expect(_count(await upgraded.rawQuery('PRAGMA user_version')), 21);
+      expect(_count(await upgraded.rawQuery('PRAGMA user_version')), 22);
       final permission = (await upgraded.query(
         'user_permissions',
         where: "user_id = 1 AND screen_name = 'properties'",

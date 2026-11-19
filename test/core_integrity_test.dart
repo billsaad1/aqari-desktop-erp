@@ -1824,7 +1824,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        21,
+        22,
       );
       expect(
         (await restored.rawQuery(
@@ -1867,7 +1867,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        21,
+        22,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -2665,6 +2665,7 @@ void main() {
       expect(storedInvoice['tax_amount'], 15.0);
       expect(storedInvoice['total_amount'], 115.0);
       expect(storedInvoice['tax_rate'], 15.0);
+      expect(storedInvoice['tax_account_id'], taxAccountId);
       expect(storedInvoice['installment_id'], storedInstallments[2]['id']);
       final historicalInvoiceId = await DatabaseHelper.instance
           .insertTaxInvoice(
@@ -3469,7 +3470,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        21,
+        22,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -4859,7 +4860,7 @@ void main() {
       final upgraded = await helper.database;
       expect(
         (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
-        21,
+        22,
       );
       final migratedHistoricalCancellation = (await upgraded.query(
         'contracts',

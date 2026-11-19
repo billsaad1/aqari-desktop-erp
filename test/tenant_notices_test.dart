@@ -455,7 +455,7 @@ void main() {
       final upgraded = await helper.database;
       expect(
         _firstIntValue(await upgraded.rawQuery('PRAGMA user_version')),
-        21,
+        22,
       );
       expect(
         (await upgraded.query(
