@@ -48,6 +48,7 @@ class AppPermissionCatalog {
     AppPermissionModule('sms', 'الرسائل النصية'),
     AppPermissionModule('system_services', 'خدمات البرنامج'),
     AppPermissionModule('voucher_history', 'سجل السندات'),
+    AppPermissionModule('audit_logs', 'سجل التدقيق المالي'),
   ];
 
   static final Map<String, AppPermissionModule> _byCode = {
@@ -70,6 +71,7 @@ class AppPermissionCatalog {
     10 => 'voucher_history',
     11 => 'notices',
     12 => 'property_sales',
+    13 => 'audit_logs',
     _ => null,
   };
 
@@ -147,6 +149,7 @@ class AppPermissionCatalog {
         'reports',
         'sms',
         'voucher_history',
+        'audit_logs',
       }.contains(module),
       'DataEntry' => const {
         'dashboard',

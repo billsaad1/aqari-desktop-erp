@@ -20,7 +20,11 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 22;
+  static const int _schemaVersion = 23;
+
+  /// Current schema version, exposed so tests and diagnostics assert against a
+  /// single source of truth instead of hardcoding a number that drifts.
+  static int get schemaVersion => _schemaVersion;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -337,7 +341,17 @@ class DatabaseHelper {
         'can_post',
         'can_review_approve',
       ],
-      'audit_logs': ['id', 'user_id', 'action', 'details', 'timestamp'],
+      'audit_logs': [
+        'id',
+        'user_id',
+        'actor_name',
+        'action',
+        'details',
+        'timestamp',
+        'entity_type',
+        'entity_id',
+        'amount_minor',
+      ],
       'cities': ['id', 'name'],
       'nationalities': ['id', 'name'],
       'banks': ['id', 'name', 'account_id'],
@@ -619,6 +633,8 @@ class DatabaseHelper {
       'property_sale_reviews_no_delete',
       'property_sale_review_events_no_update',
       'property_sale_review_events_no_delete',
+      'audit_logs_no_update',
+      'audit_logs_no_delete',
     ];
     final missingTriggers = requiredTriggers
         .where((trigger) => !triggers.contains(trigger))
@@ -1102,10 +1118,102 @@ class DatabaseHelper {
         'INTEGER REFERENCES accounts (id)',
       );
     }
+    if (oldVersion < 23) {
+      await _ensureColumn(db, 'audit_logs', 'entity_type', 'TEXT');
+      await _ensureColumn(db, 'audit_logs', 'entity_id', 'INTEGER');
+      await _ensureColumn(db, 'audit_logs', 'amount_minor', 'INTEGER');
+      await _rebuildAuditLogsTable(db);
+      await _createAuditTrailSchema(db);
+    }
+  }
+
+  /// Rebuilds `audit_logs` without a foreign key on `user_id`.
+  ///
+  /// The trail must outlive the user it names. The original plain foreign key
+  /// aborted user deletion, and `ON DELETE SET NULL` fires an UPDATE that the
+  /// append-only trigger rejects — so no FK action is viable. The rebuild also
+  /// adds the `entity_*`/`amount_minor` columns and the actor snapshot.
+  Future<void> _rebuildAuditLogsTable(DatabaseExecutor db) async {
+    final existing = await db.rawQuery(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'audit_logs'",
+    );
+    if (existing.isEmpty) return;
+    final definition = (existing.first['sql'] as String?) ?? '';
+    if (!definition.contains('REFERENCES users')) return;
+    await db.execute('''
+      CREATE TABLE audit_logs_rebuilt (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        actor_name TEXT,
+        action TEXT NOT NULL,
+        details TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        entity_type TEXT,
+        entity_id INTEGER,
+        amount_minor INTEGER
+      )
+    ''');
+    await db.execute('''
+      INSERT INTO audit_logs_rebuilt
+        (id, user_id, actor_name, action, details, timestamp,
+         entity_type, entity_id, amount_minor)
+      SELECT
+        a.id,
+        a.user_id,
+        COALESCE(u.full_name, u.username),
+        a.action,
+        a.details,
+        a.timestamp,
+        a.entity_type,
+        a.entity_id,
+        a.amount_minor
+      FROM audit_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+    ''');
+    await db.execute('DROP TABLE audit_logs');
+    await db.execute('ALTER TABLE audit_logs_rebuilt RENAME TO audit_logs');
+  }
+
+  /// Append-only enforcement for [audit_logs].
+  ///
+  /// This is application/SQLite-level protection: it stops the app and any SQL
+  /// executed through this database connection from rewriting history. It does
+  /// not protect the file from someone with direct filesystem access who opens
+  /// it with another tool and drops the triggers.
+  Future<void> _createAuditTrailSchema(DatabaseExecutor db) async {
+    await _ensureColumn(db, 'audit_logs', 'entity_type', 'TEXT');
+    await _ensureColumn(db, 'audit_logs', 'entity_id', 'INTEGER');
+    await _ensureColumn(db, 'audit_logs', 'amount_minor', 'INTEGER');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp
+      ON audit_logs (timestamp, id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_action
+      ON audit_logs (action)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_entity
+      ON audit_logs (entity_type, entity_id)
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS audit_logs_no_update
+      BEFORE UPDATE ON audit_logs
+      BEGIN
+        SELECT RAISE(ABORT, 'audit log records are append-only');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS audit_logs_no_delete
+      BEFORE DELETE ON audit_logs
+      BEGIN
+        SELECT RAISE(ABORT, 'audit log records are append-only');
+      END
+    ''');
   }
 
   Future<void> _ensureColumn(
-    Database db,
+    DatabaseExecutor db,
     String table,
     String column,
     String declaration,
@@ -1896,14 +2004,22 @@ class DatabaseHelper {
     ''');
 
     // 3. Audit Logs
+    //
+    // Deliberately no foreign key on user_id: an append-only trail must survive
+    // user deletion, and any FK action would either block the delete or fire an
+    // UPDATE that the append-only trigger rejects. actor_name snapshots the
+    // acting user so the trail stays readable after the user is gone.
     await db.execute('''
       CREATE TABLE audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
+        actor_name TEXT,
         action TEXT NOT NULL,
         details TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id)
+        entity_type TEXT,
+        entity_id INTEGER,
+        amount_minor INTEGER
       )
     ''');
 
@@ -2200,6 +2316,7 @@ class DatabaseHelper {
     await _createRefundSchema(db);
     await _createTenantNoticeSchema(db);
     await _createPropertySaleReviewSchema(db);
+    await _createAuditTrailSchema(db);
     await _insertSeedData(db);
   }
 
@@ -2452,12 +2569,13 @@ class DatabaseHelper {
         'cash_box_account_id': user['cash_box_account_id'],
         'must_change_password': user['must_change_password'] ?? 1,
       });
-      await txn.insert('audit_logs', {
-        'user_id': PermissionRuntime.userId,
-        'action': 'USER_CREATE',
-        'details': 'تم إنشاء المستخدم $username بدور $role',
-        'timestamp': DateTime.now().toIso8601String(),
-      });
+      await _recordAuditTx(
+        txn,
+        action: 'USER_CREATE',
+        entityType: 'user',
+        entityId: id,
+        details: {'username': username, 'role': role},
+      );
       return id;
     });
   }
@@ -2532,12 +2650,13 @@ class DatabaseHelper {
         whereArgs: [id],
       );
       if (updated > 0) {
-        await txn.insert('audit_logs', {
-          'user_id': PermissionRuntime.userId,
-          'action': 'USER_UPDATE',
-          'details': 'تم تحديث بيانات المستخدم رقم $id',
-          'timestamp': DateTime.now().toIso8601String(),
-        });
+        await _recordAuditTx(
+          txn,
+          action: 'USER_UPDATE',
+          entityType: 'user',
+          entityId: id,
+          details: {'user_id': id},
+        );
       }
       return updated;
     });
@@ -2615,12 +2734,13 @@ class DatabaseHelper {
         whereArgs: [userId],
       );
       if (updated > 0) {
-        await txn.insert('audit_logs', {
-          'user_id': PermissionRuntime.userId,
-          'action': isActive ? 'USER_ACTIVATE' : 'USER_DEACTIVATE',
-          'details': 'تم ${isActive ? 'تفعيل' : 'إيقاف'} المستخدم رقم $userId',
-          'timestamp': DateTime.now().toIso8601String(),
-        });
+        await _recordAuditTx(
+          txn,
+          action: isActive ? 'USER_ACTIVATE' : 'USER_DEACTIVATE',
+          entityType: 'user',
+          entityId: userId,
+          details: {'user_id': userId, 'is_active': isActive ? 1 : 0},
+        );
       }
       return updated;
     });
@@ -2736,12 +2856,13 @@ class DatabaseHelper {
           ...permission,
         });
       }
-      await txn.insert('audit_logs', {
-        'user_id': PermissionRuntime.userId,
-        'action': 'USER_PERMISSIONS_UPDATE',
-        'details': 'تم تحديث صلاحيات المستخدم رقم $userId',
-        'timestamp': DateTime.now().toIso8601String(),
-      });
+      await _recordAuditTx(
+        txn,
+        action: 'USER_PERMISSIONS_UPDATE',
+        entityType: 'user',
+        entityId: userId,
+        details: {'user_id': userId},
+      );
     });
   }
 
@@ -2759,12 +2880,15 @@ class DatabaseHelper {
       throw StateError('لا توجد جلسة مطابقة لتسجيل حدث التدقيق');
     }
     final db = await instance.database;
-    return db.insert('audit_logs', {
-      'user_id': userId,
-      'action': isLogin ? 'LOGIN' : 'LOGOUT',
-      'details': isLogin ? 'تم تسجيل الدخول بنجاح' : 'تم تسجيل الخروج',
-      'timestamp': DateTime.now().toIso8601String(),
-    });
+    return db.transaction(
+      (txn) => _recordAuditTx(
+        txn,
+        action: isLogin ? 'LOGIN' : 'LOGOUT',
+        entityType: 'session',
+        entityId: userId,
+        details: {'user_id': userId},
+      ),
+    );
   }
 
   // --- CRUD Operations for Company Info ---
@@ -3077,12 +3201,13 @@ class DatabaseHelper {
         'account_type': accountType,
         'balance': 0.0,
       });
-      await txn.insert('audit_logs', {
-        'user_id': PermissionRuntime.userId,
-        'action': 'ACCOUNT_CREATE',
-        'details': 'إنشاء الحساب $code - $name',
-        'timestamp': DateTime.now().toIso8601String(),
-      });
+      await _recordAuditTx(
+        txn,
+        action: 'ACCOUNT_CREATE',
+        entityType: 'account',
+        entityId: id,
+        details: {'code': code, 'name': name, 'account_type': accountType},
+      );
       return id;
     });
   }
@@ -3111,12 +3236,17 @@ class DatabaseHelper {
         whereArgs: [accountId],
       );
       if (changed != 1) throw StateError('تعذر تحديث الحساب');
-      await txn.insert('audit_logs', {
-        'user_id': PermissionRuntime.userId,
-        'action': 'ACCOUNT_RENAME',
-        'details': 'تعديل اسم الحساب ${rows.first['code']}: $oldName ← $name',
-        'timestamp': DateTime.now().toIso8601String(),
-      });
+      await _recordAuditTx(
+        txn,
+        action: 'ACCOUNT_RENAME',
+        entityType: 'account',
+        entityId: accountId,
+        details: {
+          'code': rows.first['code'],
+          'old_name': oldName,
+          'new_name': name,
+        },
+      );
       return changed;
     });
   }
@@ -3165,12 +3295,13 @@ class DatabaseHelper {
         }
       }
 
-      await txn.insert('audit_logs', {
-        'user_id': PermissionRuntime.userId,
-        'action': 'ACCOUNT_DELETE',
-        'details': 'حذف الحساب $code - ${account['name']}',
-        'timestamp': DateTime.now().toIso8601String(),
-      });
+      await _recordAuditTx(
+        txn,
+        action: 'ACCOUNT_DELETE',
+        entityType: 'account',
+        entityId: accountId,
+        details: {'code': code, 'name': account['name']},
+      );
       return txn.delete('accounts', where: 'id = ?', whereArgs: [accountId]);
     });
   }
@@ -3258,6 +3389,21 @@ class DatabaseHelper {
         final credit = (line['credit'] as num? ?? 0).toDouble();
         await _updateBalanceTx(txn, accountId, debit, credit);
       }
+      await _recordAuditTx(
+        txn,
+        action: 'JOURNAL_ENTRY_POSTED',
+        entityType: 'journal_entry',
+        entityId: journalId,
+        amountMinor: debitCents,
+        details: {
+          'entry_date': dateText,
+          'description': description,
+          'line_count': validatedLines.length,
+          'debit_minor': debitCents,
+          'credit_minor': creditCents,
+          'is_posted': true,
+        },
+      );
       return journalId;
     });
   }
@@ -3401,6 +3547,21 @@ class DatabaseHelper {
       // 3. Insert Voucher
       voucher['journal_entry_id'] = journalId;
       final voucherId = await txn.insert('vouchers', voucher);
+      await _recordAuditTx(
+        txn,
+        action: 'GENERAL_VOUCHER_POSTED',
+        entityType: 'voucher',
+        entityId: voucherId,
+        amountMinor: InternalTax.toMinorUnits(amount),
+        details: {
+          'voucher_type': voucherType,
+          'voucher_date': date,
+          'journal_entry_id': journalId,
+          'cash_account_id': cashAccountId,
+          'opposite_account_id': oppositeAccountId,
+          'cost_center_id': costCenterId,
+        },
+      );
       return voucherId;
     });
   }
@@ -4316,6 +4477,21 @@ class DatabaseHelper {
         whereArgs: [unitId],
       );
       if (updated != 1) throw StateError('تعذر اعتماد الوحدة؛ أُلغيت المعاملة');
+      await _recordAuditTx(
+        txn,
+        action: 'CONTRACT_CREATED',
+        entityType: 'contract',
+        entityId: contractId,
+        amountMinor: (rent * 100).round(),
+        details: {
+          'tenant_id': tenantId,
+          'unit_id': unitId,
+          'start_date': contract['start_date']?.toString(),
+          'end_date': contract['end_date']?.toString(),
+          'rent_amount_minor': (rent * 100).round(),
+          'installment_count': installments.length,
+        },
+      );
       return contractId;
     });
   }
@@ -4820,10 +4996,12 @@ class DatabaseHelper {
         where: "invoice_id = ? AND status = 'pending'",
         whereArgs: [invoiceId],
       );
-      await txn.insert('audit_logs', {
-        'user_id': createdBy,
-        'action': 'LEGACY_INVOICE_LINKED_TO_INSTALLMENT',
-        'details': jsonEncode({
+      await _recordAuditTx(
+        txn,
+        action: 'LEGACY_INVOICE_LINKED_TO_INSTALLMENT',
+        entityType: 'tax_invoice',
+        entityId: invoiceId,
+        details: {
           'invoice_id': invoiceId,
           'installment_id': installmentId,
           'contract_id': contractId,
@@ -4831,9 +5009,8 @@ class DatabaseHelper {
               .map((receipt) => receipt['voucher_id'])
               .toList(),
           'reason': normalizedReason,
-        }),
-        'timestamp': DateTime.now().toIso8601String(),
-      });
+        },
+      );
     });
   }
 
@@ -4885,15 +5062,13 @@ class DatabaseHelper {
         where: "invoice_id = ? AND status = 'pending'",
         whereArgs: [invoiceId],
       );
-      await txn.insert('audit_logs', {
-        'user_id': reviewedBy,
-        'action': 'LEGACY_INVOICE_MARKED_NON_BILLABLE',
-        'details': jsonEncode({
-          'invoice_id': invoiceId,
-          'reason': normalizedReason,
-        }),
-        'timestamp': DateTime.now().toIso8601String(),
-      });
+      await _recordAuditTx(
+        txn,
+        action: 'LEGACY_INVOICE_MARKED_NON_BILLABLE',
+        entityType: 'tax_invoice',
+        entityId: invoiceId,
+        details: {'invoice_id': invoiceId, 'reason': normalizedReason},
+      );
     });
   }
 
@@ -5311,6 +5486,23 @@ class DatabaseHelper {
         if (changed != 1)
           throw StateError('تم تحديث القسط من عملية أخرى؛ أُلغيت المعاملة');
       }
+      await _recordAuditTx(
+        txn,
+        action: 'TENANT_RECEIPT_POSTED',
+        entityType: 'voucher',
+        entityId: voucherId,
+        amountMinor: InternalTax.toMinorUnits(amount),
+        details: {
+          'tenant_id': tenantId,
+          'voucher_date': voucherDate,
+          'journal_entry_id': journalId,
+          'invoice_id': invoiceId,
+          'installment_ids': [
+            for (final installment in verifiedUpdates)
+              (installment['id'] as num).toInt(),
+          ],
+        },
+      );
       return voucherId;
     });
   }
@@ -5359,17 +5551,148 @@ class DatabaseHelper {
     return rows.isEmpty ? null : userId;
   }
 
-  Future<void> _recordTenantRefundAudit(
+  /// Resolves the acting user's id and display name for an audit snapshot.
+  ///
+  /// Returns nulls when no session is active or the user no longer exists; the
+  /// caller still records the event so the trail never silently drops a posting.
+  Future<({int? id, String? name})> _auditActor(DatabaseExecutor txn) async {
+    final userId = PermissionRuntime.userId;
+    if (userId == null) return (id: null, name: null);
+    final rows = await txn.query(
+      'users',
+      columns: ['full_name', 'username'],
+      where: 'id = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return (id: null, name: null);
+    final fullName = rows.first['full_name']?.toString().trim() ?? '';
+    final username = rows.first['username']?.toString().trim() ?? '';
+    return (id: userId, name: fullName.isNotEmpty ? fullName : username);
+  }
+
+  /// Writes one append-only audit row inside the caller's transaction.
+  ///
+  /// Must be called from within the same transaction as the financial change so
+  /// that a rollback erases both the change and its trail. [amountMinor] is the
+  /// primary monetary figure in minor units (cents); the remaining figures go
+  /// into [details] and must never contain credentials or keys.
+  Future<int> _recordAuditTx(
     DatabaseExecutor txn, {
     required String action,
-    required Map<String, Object?> details,
+    required String entityType,
+    required int entityId,
+    int? amountMinor,
+    Map<String, Object?> details = const {},
+    String? timestamp,
   }) async {
-    await txn.insert('audit_logs', {
-      'user_id': await _verifiedAuditUserId(txn),
+    final actor = await _auditActor(txn);
+    return txn.insert('audit_logs', {
+      'user_id': actor.id,
+      'actor_name': actor.name,
       'action': action,
+      'entity_type': entityType,
+      'entity_id': entityId,
+      'amount_minor': amountMinor,
       'details': jsonEncode(details),
-      'timestamp': DateTime.now().toIso8601String(),
+      'timestamp': timestamp ?? DateTime.now().toIso8601String(),
     });
+  }
+
+  /// Read-only, permission-gated audit trail query.
+  ///
+  /// Returns rows newest first. [fromDate]/[toDate] are inclusive calendar
+  /// dates (YYYY-MM-DD); [action], [entityType] and [entityId] narrow the
+  /// result. Only view permission on the dedicated `audit_logs` module grants
+  /// access — no other module can read this table.
+  Future<List<Map<String, dynamic>>> getAuditTrail({
+    String? fromDate,
+    String? toDate,
+    String? action,
+    String? entityType,
+    int? entityId,
+    String? search,
+    int limit = 500,
+  }) async {
+    PermissionRuntime.require('audit_logs', AppPermissionAction.view);
+    for (final value in [fromDate, toDate]) {
+      if (value == null) continue;
+      // DateTime.tryParse normalizes out-of-range parts (month 13 rolls into the
+      // next year), so require an exact round-trip instead of trusting it.
+      final parsed = DateTime.tryParse(value);
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value) ||
+          parsed == null ||
+          parsed.toIso8601String().substring(0, 10) != value) {
+        throw ArgumentError('تاريخ غير صحيح بصيغة YYYY-MM-DD');
+      }
+    }
+    if (fromDate != null && toDate != null && fromDate.compareTo(toDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    if (limit < 1 || limit > 5000) {
+      throw ArgumentError('حد الصفوف غير صالح');
+    }
+    final where = <String>[];
+    final args = <Object?>[];
+    if (fromDate != null) {
+      where.add('a.timestamp >= ?');
+      args.add(fromDate);
+    }
+    if (toDate != null) {
+      where.add('a.timestamp < ?');
+      args.add(
+        DateTime.parse(toDate)
+            .add(const Duration(days: 1))
+            .toIso8601String()
+            .substring(0, 10),
+      );
+    }
+    if (action != null && action.trim().isNotEmpty) {
+      where.add('a.action = ?');
+      args.add(action.trim());
+    }
+    if (entityType != null && entityType.trim().isNotEmpty) {
+      where.add('a.entity_type = ?');
+      args.add(entityType.trim());
+    }
+    if (entityId != null) {
+      where.add('a.entity_id = ?');
+      args.add(entityId);
+    }
+    final term = search?.trim();
+    if (term != null && term.isNotEmpty) {
+      where.add('(a.action LIKE ? OR a.details LIKE ?)');
+      args..add('%$term%')..add('%$term%');
+    }
+    final clause = where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}';
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT
+        a.id,
+        a.timestamp,
+        a.action,
+        a.entity_type,
+        a.entity_id,
+        a.amount_minor,
+        a.details,
+        a.user_id,
+        COALESCE(a.actor_name, u.full_name, u.username, 'غير محدد') AS user_name
+      FROM audit_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      $clause
+      ORDER BY a.timestamp DESC, a.id DESC
+      LIMIT ?
+    ''', [...args, limit]);
+  }
+
+  /// Distinct action codes present in the trail, for the screen's filter menu.
+  Future<List<String>> getAuditTrailActions() async {
+    PermissionRuntime.require('audit_logs', AppPermissionAction.view);
+    final db = await instance.database;
+    final rows = await db.rawQuery(
+      'SELECT DISTINCT action FROM audit_logs ORDER BY action',
+    );
+    return rows.map((row) => row['action'] as String).toList();
   }
 
   Future<List<Map<String, dynamic>>> getRefundableCollectionAllocations(
@@ -5475,9 +5798,12 @@ class DatabaseHelper {
         whereArgs: [voucherId],
       );
       if (changed != 1) throw StateError('تم تصنيف السند من مستخدم آخر');
-      await _recordTenantRefundAudit(
+      await _recordAuditTx(
         txn,
         action: 'LEGACY_TENANT_PAYMENT_MARKED_UNRELATED',
+        entityType: 'voucher',
+        entityId: voucherId,
+        amountMinor: (rows.first['amount_minor'] as num).toInt(),
         details: {
           'voucher_id': voucherId,
           'tenant_id': rows.first['tenant_id'],
@@ -5755,9 +6081,12 @@ class DatabaseHelper {
         whereArgs: [voucherId],
       );
       if (changed != 1) throw StateError('تم تصنيف السند من مستخدم آخر');
-      await _recordTenantRefundAudit(
+      await _recordAuditTx(
         txn,
         action: 'LEGACY_TENANT_PAYMENT_RECONCILED_AS_REFUND',
+        entityType: 'voucher',
+        entityId: voucherId,
+        amountMinor: amountMinor,
         details: {
           'voucher_id': voucherId,
           'tenant_id': tenantId,
@@ -5924,9 +6253,12 @@ class DatabaseHelper {
         if (changed != 1)
           throw StateError('تغير القسط أثناء الاسترداد؛ أُلغيت المعاملة');
       }
-      await _recordTenantRefundAudit(
+      await _recordAuditTx(
         txn,
         action: 'TENANT_REFUND_POSTED',
+        entityType: 'voucher',
+        entityId: voucherId,
+        amountMinor: refundCents,
         details: {
           'refund_voucher_id': voucherId,
           'tenant_id': tenantId,
@@ -6326,6 +6658,22 @@ class DatabaseHelper {
           );
         }
       }
+      await _recordAuditTx(
+        txn,
+        action: 'TAX_INVOICE_ISSUED',
+        entityType: 'tax_invoice',
+        entityId: invoiceId,
+        amountMinor: InternalTax.toMinorUnits(grossAmount),
+        details: {
+          'contract_id': contractId,
+          'installment_id': installmentId,
+          'journal_entry_id': journalId,
+          'invoice_date': invoiceDate,
+          'net_amount_minor': InternalTax.toMinorUnits(netAmount),
+          'tax_amount_minor': InternalTax.toMinorUnits(calculatedTaxAmount),
+          'tax_rate': configuredTaxRate,
+        },
+      );
       return invoiceId;
     });
   }
@@ -6397,16 +6745,18 @@ class DatabaseHelper {
         where: 'id = ?',
         whereArgs: [contractId],
       );
-      await txn.insert('audit_logs', {
-        'user_id': await _verifiedAuditUserId(txn),
-        'action': 'contract_cancelled',
-        'details': jsonEncode({
+      await _recordAuditTx(
+        txn,
+        action: 'contract_cancelled',
+        entityType: 'contract',
+        entityId: contractId,
+        details: {
           'contract_id': contractId,
           'unit_id': unitId,
           'reason': normalizedReason,
-        }),
-        'timestamp': cancelledAt,
-      });
+        },
+        timestamp: cancelledAt,
+      );
 
       final otherActiveContracts = await txn.rawQuery(
         "SELECT COUNT(*) AS count FROM contracts WHERE unit_id = ? AND status = 'Active'",
@@ -8260,12 +8610,14 @@ class DatabaseHelper {
       'created_at': timestamp,
       'details': jsonEncode(eventDetails),
     });
-    await txn.insert('audit_logs', {
-      'user_id': userId,
-      'action': 'tenant_notice_$eventType',
-      'details': jsonEncode(eventDetails),
-      'timestamp': timestamp,
-    });
+    await _recordAuditTx(
+      txn,
+      action: 'tenant_notice_$eventType',
+      entityType: 'tenant_notice',
+      entityId: noticeId,
+      details: eventDetails,
+      timestamp: timestamp,
+    );
   }
 
   String? _normalizeSaleDateOnly(String? rawDate) {
@@ -8646,12 +8998,14 @@ class DatabaseHelper {
       'reason': reason,
       'details': jsonEncode(eventDetails),
     });
-    await txn.insert('audit_logs', {
-      'user_id': userId,
-      'action': 'property_sale_review_$eventType',
-      'details': jsonEncode(eventDetails),
-      'timestamp': timestamp,
-    });
+    await _recordAuditTx(
+      txn,
+      action: 'property_sale_review_$eventType',
+      entityType: 'property_sale_review',
+      entityId: saleReviewId,
+      details: eventDetails,
+      timestamp: timestamp,
+    );
   }
 
   // --- SMS Operations ---

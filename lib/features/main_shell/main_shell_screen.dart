@@ -7,6 +7,7 @@ import '../../core/permission_policy.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/navigation_provider.dart';
 import '../auth/login_screen.dart';
+import '../audit/audit_trail_screen.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../general_accounting/accounting_main_screen.dart';
 import '../master_data/lookups_screen.dart';
@@ -111,6 +112,7 @@ class MainShellScreen extends StatelessWidget {
       10 => 'سجل السندات',
       11 => 'إشعارات المستأجرين',
       12 => 'مراجعة بيع العقار والوحدة',
+      13 => 'سجل التدقيق المالي',
       _ => 'نظام إدارة العقارات',
     };
   }
@@ -130,6 +132,7 @@ class MainShellScreen extends StatelessWidget {
       10 => const VoucherHistoryScreen(),
       11 => const TenantNoticesScreen(),
       12 => const PropertySaleReviewsScreen(),
+      13 => const AuditTrailScreen(),
       _ => const DashboardScreen(),
     };
   }
@@ -427,16 +430,26 @@ class AppSidebar extends StatelessWidget {
                         11,
                         navProvider,
                       ),
-                    if (auth.canAccessScreen('system_services')) ...[
+                    if (auth.canAccessScreen('system_services') ||
+                        auth.canAccessScreen('audit_logs')) ...[
                       const SizedBox(height: 14),
                       _sectionLabel(context, 'إدارة النظام'),
-                      _buildNavItem(
-                        context,
-                        'خدمات البرنامج',
-                        Icons.build_circle_outlined,
-                        9,
-                        navProvider,
-                      ),
+                      if (auth.canAccessScreen('system_services'))
+                        _buildNavItem(
+                          context,
+                          'خدمات البرنامج',
+                          Icons.build_circle_outlined,
+                          9,
+                          navProvider,
+                        ),
+                      if (auth.canAccessScreen('audit_logs'))
+                        _buildNavItem(
+                          context,
+                          'سجل التدقيق المالي',
+                          Icons.policy_outlined,
+                          13,
+                          navProvider,
+                        ),
                     ],
                   ],
                 );

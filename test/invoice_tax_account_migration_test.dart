@@ -65,7 +65,7 @@ void main() {
         whereArgs: [invoiceId],
       )).single;
 
-      expect(version, 22);
+      expect(version, DatabaseHelper.schemaVersion);
       expect(columns, contains('tax_account_id'));
       expect(invoice['tax_account_id'], isNull);
       expect(invoice['net_amount'], 100.0);
