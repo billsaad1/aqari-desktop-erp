@@ -2,16 +2,40 @@ import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 
 class ReportsProvider with ChangeNotifier {
+  ReportsProvider({
+    Future<List<Map<String, dynamic>>> Function()?
+    propertyInquiryPropertiesLoader,
+    Future<List<Map<String, dynamic>>> Function(int propertyId)?
+    propertyInquiryUnitsLoader,
+  }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
+       _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader;
+
+  final Future<List<Map<String, dynamic>>> Function()?
+  _propertyInquiryPropertiesLoader;
+  final Future<List<Map<String, dynamic>>> Function(int propertyId)?
+  _propertyInquiryUnitsLoader;
+
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _occupancyStats = [];
   List<Map<String, dynamic>> _accountStatement = [];
   List<Map<String, dynamic>> _dueInstallments = [];
   List<Map<String, dynamic>> _expiringContracts = [];
+  List<Map<String, dynamic>> _propertyInquiryProperties = [];
+  List<Map<String, dynamic>> _propertyInquiryUnits = [];
   double _accountOpeningBalance = 0;
   int _searchGeneration = 0;
   int _occupancyGeneration = 0;
   int _statementGeneration = 0;
   int _alertsGeneration = 0;
+  int _propertyInquiryGeneration = 0;
+  int? _authorizedUserId;
+  bool? _hadReportsAccess;
+  int? _selectedInquiryPropertyId;
+  DateTime? _propertyInquiryAsOf;
+  bool _isPropertyInquiryLoading = false;
+  bool _propertyInquiryPropertiesLoaded = false;
+  bool _propertyInquiryUnitsLoaded = false;
+  String? _propertyInquiryErrorMessage;
   String? _errorMessage;
 
   bool _isLoading = false;
@@ -21,9 +45,30 @@ class ReportsProvider with ChangeNotifier {
   List<Map<String, dynamic>> get accountStatement => _accountStatement;
   List<Map<String, dynamic>> get dueInstallments => _dueInstallments;
   List<Map<String, dynamic>> get expiringContracts => _expiringContracts;
+  List<Map<String, dynamic>> get propertyInquiryProperties =>
+      _propertyInquiryProperties;
+  List<Map<String, dynamic>> get propertyInquiryUnits => _propertyInquiryUnits;
+  int? get selectedInquiryPropertyId => _selectedInquiryPropertyId;
+  DateTime? get propertyInquiryAsOf => _propertyInquiryAsOf;
+  bool get isPropertyInquiryLoading => _isPropertyInquiryLoading;
+  bool get propertyInquiryPropertiesLoaded => _propertyInquiryPropertiesLoaded;
+  bool get propertyInquiryUnitsLoaded => _propertyInquiryUnitsLoaded;
+  String? get propertyInquiryErrorMessage => _propertyInquiryErrorMessage;
   bool get isLoading => _isLoading;
   double get accountOpeningBalance => _accountOpeningBalance;
   String? get errorMessage => _errorMessage;
+
+  /// Called by the app-level auth proxy to prevent report data from surviving
+  /// a session switch or loss/change of reports.view.
+  void syncAuthorization({required int? userId, required bool canViewReports}) {
+    if (_authorizedUserId != userId ||
+        (_hadReportsAccess != null && _hadReportsAccess != canViewReports)) {
+      clearReportResults(notify: false);
+      clearSensitiveAlerts(notify: false);
+    }
+    _authorizedUserId = userId;
+    _hadReportsAccess = canViewReports;
+  }
 
   void clearSensitiveAlerts({bool notify = true}) {
     _alertsGeneration++;
@@ -37,13 +82,96 @@ class ReportsProvider with ChangeNotifier {
     _searchGeneration++;
     _occupancyGeneration++;
     _statementGeneration++;
+    _propertyInquiryGeneration++;
     _searchResults = [];
     _occupancyStats = [];
     _accountStatement = [];
     _accountOpeningBalance = 0;
+    _clearPropertyInquiry();
     _isLoading = false;
     _errorMessage = null;
     if (notify) notifyListeners();
+  }
+
+  void _clearPropertyInquiry() {
+    _propertyInquiryProperties = [];
+    _propertyInquiryUnits = [];
+    _selectedInquiryPropertyId = null;
+    _propertyInquiryAsOf = null;
+    _isPropertyInquiryLoading = false;
+    _propertyInquiryPropertiesLoaded = false;
+    _propertyInquiryUnitsLoaded = false;
+    _propertyInquiryErrorMessage = null;
+  }
+
+  Future<void> loadPropertyInquiryProperties() async {
+    final generation = ++_propertyInquiryGeneration;
+    _isPropertyInquiryLoading = true;
+    _propertyInquiryErrorMessage = null;
+    _propertyInquiryPropertiesLoaded = false;
+    _propertyInquiryUnits = [];
+    _selectedInquiryPropertyId = null;
+    _propertyInquiryAsOf = null;
+    notifyListeners();
+
+    try {
+      final properties =
+          await (_propertyInquiryPropertiesLoader ??
+              DatabaseHelper.instance.getPropertyUnitInquiryProperties)();
+      if (generation == _propertyInquiryGeneration) {
+        _propertyInquiryProperties = properties;
+        _propertyInquiryPropertiesLoaded = true;
+      }
+    } catch (error) {
+      if (generation == _propertyInquiryGeneration) {
+        _propertyInquiryProperties = [];
+        _propertyInquiryErrorMessage = 'تعذر تحميل قائمة العقارات: $error';
+      }
+    } finally {
+      if (generation == _propertyInquiryGeneration) {
+        _isPropertyInquiryLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> loadPropertyInquiryUnits(int propertyId) async {
+    if (propertyId <= 0) throw ArgumentError('العقار المحدد غير صالح');
+    final isKnownProperty = _propertyInquiryProperties.any(
+      (property) => property['id'] == propertyId,
+    );
+    if (!isKnownProperty) throw StateError('العقار المحدد غير موجود');
+
+    final generation = ++_propertyInquiryGeneration;
+    _selectedInquiryPropertyId = propertyId;
+    _propertyInquiryUnits = [];
+    _propertyInquiryAsOf = null;
+    _propertyInquiryUnitsLoaded = false;
+    _isPropertyInquiryLoading = true;
+    _propertyInquiryErrorMessage = null;
+    notifyListeners();
+
+    try {
+      final units =
+          await (_propertyInquiryUnitsLoader ??
+              DatabaseHelper.instance.getPropertyUnitInquiryUnits)(propertyId);
+      if (generation == _propertyInquiryGeneration &&
+          _selectedInquiryPropertyId == propertyId) {
+        _propertyInquiryUnits = units;
+        _propertyInquiryAsOf = DateTime.now();
+        _propertyInquiryUnitsLoaded = true;
+      }
+    } catch (error) {
+      if (generation == _propertyInquiryGeneration) {
+        _propertyInquiryUnits = [];
+        _propertyInquiryErrorMessage = 'تعذر تحميل وحدات العقار: $error';
+      }
+    } finally {
+      if (generation == _propertyInquiryGeneration) {
+        _isPropertyInquiryLoading = false;
+        notifyListeners();
+      }
+    }
   }
 
   Future<void> search(String query) async {
@@ -57,8 +185,9 @@ class ReportsProvider with ChangeNotifier {
           : <Map<String, dynamic>>[];
       if (generation == _searchGeneration) _searchResults = results;
     } catch (e) {
-      if (generation == _searchGeneration)
+      if (generation == _searchGeneration) {
         _errorMessage = 'تعذر تنفيذ الاستعلام: $e';
+      }
     } finally {
       if (generation == _searchGeneration) {
         _isLoading = false;

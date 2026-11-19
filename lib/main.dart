@@ -38,7 +38,17 @@ void main() async {
           },
         ),
         ChangeNotifierProvider(create: (_) => LeasingProvider()),
-        ChangeNotifierProvider(create: (_) => ReportsProvider()),
+        ChangeNotifierProxyProvider<AuthProvider, ReportsProvider>(
+          create: (_) => ReportsProvider(),
+          update: (context, auth, provider) {
+            final next = provider ?? ReportsProvider();
+            next.syncAuthorization(
+              userId: auth.currentUser?.id,
+              canViewReports: auth.canAccessScreen('reports'),
+            );
+            return next;
+          },
+        ),
         ChangeNotifierProxyProvider<AuthProvider, SmsProvider>(
           create: (_) => SmsProvider(),
           update: (context, auth, provider) {

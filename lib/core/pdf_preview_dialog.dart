@@ -15,31 +15,42 @@ class PdfDocumentPreviewDialog extends StatefulWidget {
     required this.bytes,
     required this.fileName,
     required this.preferredIntent,
-    this.permissionModule,
+    required this.authorizationUserId,
+    required this.authorizationRole,
+    required this.permissionModule,
     super.key,
   });
 
   final Uint8List bytes;
   final String fileName;
   final PdfPreviewIntent preferredIntent;
-  final String? permissionModule;
+  final int? authorizationUserId;
+  final String? authorizationRole;
+  final String permissionModule;
 
   static Future<void> show({
     required BuildContext context,
     required Uint8List bytes,
     required String fileName,
     required PdfPreviewIntent preferredIntent,
-    String? permissionModule,
-  }) => showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => PdfDocumentPreviewDialog(
-      bytes: bytes,
-      fileName: fileName,
-      preferredIntent: preferredIntent,
-      permissionModule: permissionModule,
-    ),
-  );
+    required String permissionModule,
+  }) {
+    PermissionRuntime.require(permissionModule, AppPermissionAction.view);
+    final authorizationUserId = PermissionRuntime.userId;
+    final authorizationRole = PermissionRuntime.role;
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PdfDocumentPreviewDialog(
+        bytes: bytes,
+        fileName: fileName,
+        preferredIntent: preferredIntent,
+        authorizationUserId: authorizationUserId,
+        authorizationRole: authorizationRole,
+        permissionModule: permissionModule,
+      ),
+    );
+  }
 
   @override
   State<PdfDocumentPreviewDialog> createState() =>
@@ -50,15 +61,76 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
   bool _isWorking = false;
   String? _feedback;
   bool _feedbackIsError = false;
+  late final int? _userIdAtOpen;
+  late final String? _roleAtOpen;
+
+  @override
+  void initState() {
+    super.initState();
+    _userIdAtOpen = widget.authorizationUserId;
+    _roleAtOpen = widget.authorizationRole;
+    PermissionRuntime.authorizationRevision.addListener(
+      _handleAuthorizationChange,
+    );
+  }
+
+  @override
+  void dispose() {
+    PermissionRuntime.authorizationRevision.removeListener(
+      _handleAuthorizationChange,
+    );
+    super.dispose();
+  }
+
+  void _handleAuthorizationChange() {
+    if (mounted) setState(() {});
+  }
+
+  bool get _canViewDocument {
+    return PermissionRuntime.userId == _userIdAtOpen &&
+        PermissionRuntime.role == _roleAtOpen &&
+        PermissionRuntime.allows(
+          widget.permissionModule,
+          AppPermissionAction.view,
+        );
+  }
+
+  bool get _canPerformOutput {
+    return _canViewDocument &&
+        PermissionRuntime.allows(
+          widget.permissionModule,
+          AppPermissionAction.print,
+        );
+  }
+
+  void _showAuthorizationError(String message) {
+    if (!mounted) return;
+    setState(() {
+      _feedback = message;
+      _feedbackIsError = true;
+    });
+  }
 
   Future<void> _save() async {
     if (_isWorking) return;
+    if (!_canViewDocument) {
+      _showAuthorizationError('تغيرت الجلسة أو انتهت صلاحية عرض هذا المستند.');
+      return;
+    }
+    if (!_canPerformOutput) {
+      _showAuthorizationError('لا تملك صلاحية حفظ أو طباعة هذا المستند.');
+      return;
+    }
     setState(() {
       _isWorking = true;
       _feedback = null;
     });
     try {
-      final saved = await PrintUtils.savePdf(widget.bytes, widget.fileName);
+      final saved = await PrintUtils.savePdf(
+        widget.bytes,
+        widget.fileName,
+        isAuthorized: () => _canPerformOutput,
+      );
       if (!mounted) return;
       setState(() {
         _feedback = saved ? PrintUtils.savedPdfMessage : 'أُلغي حفظ الملف.';
@@ -77,12 +149,24 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
 
   Future<void> _print() async {
     if (_isWorking) return;
+    if (!_canViewDocument) {
+      _showAuthorizationError('تغيرت الجلسة أو انتهت صلاحية عرض هذا المستند.');
+      return;
+    }
+    if (!_canPerformOutput) {
+      _showAuthorizationError('لا تملك صلاحية حفظ أو طباعة هذا المستند.');
+      return;
+    }
     setState(() {
       _isWorking = true;
       _feedback = null;
     });
     try {
-      await PrintUtils.printPdf(widget.bytes, widget.fileName);
+      await PrintUtils.printPdf(
+        widget.bytes,
+        widget.fileName,
+        isAuthorized: () => _canPerformOutput,
+      );
       if (!mounted) return;
       setState(() {
         _feedback = 'تم إرسال المستند إلى نافذة الطباعة.';
@@ -105,12 +189,8 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
     final width = math.min(screen.width * 0.96, 1280.0).toDouble();
     final height = math.min(screen.height * 0.94, 960.0).toDouble();
     final saveIsPrimary = widget.preferredIntent == PdfPreviewIntent.save;
-    final canPrint =
-        widget.permissionModule == null ||
-        PermissionRuntime.allows(
-          widget.permissionModule!,
-          AppPermissionAction.print,
-        );
+    final canView = _canViewDocument;
+    final canPrint = _canPerformOutput;
 
     return Dialog(
       insetPadding: const EdgeInsets.all(16),
@@ -162,55 +242,67 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
             ),
             const Divider(height: 1),
             Expanded(
-              child: PdfPreview(
-                build: (_) async => widget.bytes,
-                pdfFileName: PrintUtils.suggestedPdfName(widget.fileName),
-                allowPrinting: false,
-                allowSharing: false,
-                canChangePageFormat: false,
-                canChangeOrientation: false,
-                canDebug: false,
-                useActions: false,
-                maxPageWidth: 1050,
-                padding: const EdgeInsets.all(20),
-                previewPageMargin: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                scrollViewDecoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                ),
-                pdfPreviewPageDecoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(4),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x26000000),
-                      blurRadius: 12,
-                      offset: Offset(0, 4),
+              child: !canView
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          'تغيرت الجلسة أو انتهت صلاحية العرض؛ أُخفيت المعاينة لحماية البيانات.',
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    )
+                  : PdfPreview(
+                      build: (_) async => widget.bytes,
+                      pdfFileName: PrintUtils.suggestedPdfName(widget.fileName),
+                      allowPrinting: false,
+                      allowSharing: false,
+                      canChangePageFormat: false,
+                      canChangeOrientation: false,
+                      canDebug: false,
+                      useActions: false,
+                      maxPageWidth: 1050,
+                      padding: const EdgeInsets.all(20),
+                      previewPageMargin: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      scrollViewDecoration: BoxDecoration(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.surfaceContainerHighest,
+                      ),
+                      pdfPreviewPageDecoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(4),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x26000000),
+                            blurRadius: 12,
+                            offset: Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      loadingWidget: const Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(),
+                            SizedBox(height: 12),
+                            Text('جارٍ تجهيز معاينة الصفحات...'),
+                          ],
+                        ),
+                      ),
+                      onError: (_, error) => Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(
+                            'تعذرت معاينة هذا المستند:\n$error',
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
                     ),
-                  ],
-                ),
-                loadingWidget: const Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 12),
-                      Text('جارٍ تجهيز معاينة الصفحات...'),
-                    ],
-                  ),
-                ),
-                onError: (_, error) => Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      'تعذرت معاينة هذا المستند:\n$error',
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ),
-              ),
             ),
             const Divider(height: 1),
             Padding(
@@ -231,7 +323,15 @@ class _PdfDocumentPreviewDialogState extends State<PdfDocumentPreviewDialog> {
                         ),
                       ),
                     ),
-                  if (!canPrint)
+                  if (!canView)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        'أُخفي محتوى المستند بعد تغير الجلسة أو صلاحية العرض.',
+                        textAlign: TextAlign.center,
+                      ),
+                    )
+                  else if (!canPrint)
                     const Padding(
                       padding: EdgeInsets.only(bottom: 8),
                       child: Text(

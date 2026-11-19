@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 enum AppPermissionAction { view, add, edit, delete, print, post, reviewApprove }
 
 extension AppPermissionActionDetails on AppPermissionAction {
@@ -163,6 +165,10 @@ class AppPermissionCatalog {
 class PermissionRuntime {
   PermissionRuntime._();
 
+  /// Changes when the active user or effective permission map changes.
+  /// Long-lived previews listen to this to redact stale data immediately.
+  static final ValueNotifier<int> authorizationRevision = ValueNotifier(0);
+
   static int? _userId;
   static String? _role;
   static Map<String, Map<AppPermissionAction, bool>> _overrides = {};
@@ -176,6 +182,9 @@ class PermissionRuntime {
     required String role,
     required Iterable<Map<String, dynamic>> permissionRows,
   }) {
+    final previousUserId = _userId;
+    final previousRole = _role;
+    final previousOverrides = _overrides;
     _userId = userId;
     _role = role;
     final overrides = <String, Map<AppPermissionAction, bool>>{};
@@ -196,12 +205,19 @@ class PermissionRuntime {
             };
     }
     _overrides = overrides;
+    if (previousUserId != _userId ||
+        previousRole != _role ||
+        !_sameOverrides(previousOverrides, _overrides)) {
+      authorizationRevision.value++;
+    }
   }
 
   static void clear() {
+    final changed = _userId != null || _role != null || _overrides.isNotEmpty;
     _userId = null;
     _role = null;
     _overrides = {};
+    if (changed) authorizationRevision.value++;
   }
 
   static bool allows(String module, AppPermissionAction action) {
@@ -226,6 +242,21 @@ class PermissionRuntime {
       final moduleName = AppPermissionCatalog.module(module)?.label ?? module;
       throw StateError('لا تملك صلاحية ${action.arabicLabel} في $moduleName');
     }
+  }
+
+  static bool _sameOverrides(
+    Map<String, Map<AppPermissionAction, bool>> left,
+    Map<String, Map<AppPermissionAction, bool>> right,
+  ) {
+    if (left.length != right.length) return false;
+    for (final entry in left.entries) {
+      final other = right[entry.key];
+      if (other == null || entry.value.length != other.length) return false;
+      for (final action in AppPermissionAction.values) {
+        if (entry.value[action] != other[action]) return false;
+      }
+    }
+    return true;
   }
 
   static bool _asBool(Object? value) =>

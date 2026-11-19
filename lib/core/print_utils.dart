@@ -116,7 +116,14 @@ class PrintUtils {
     return value.replaceAll(RegExp(r'\s*\([A-Za-z]{3}\)\s*'), '').trim();
   }
 
-  static Future<bool> savePdf(Uint8List bytes, String name) async {
+  static Future<bool> savePdf(
+    Uint8List bytes,
+    String name, {
+    bool Function()? isAuthorized,
+  }) async {
+    if (isAuthorized != null && !isAuthorized()) {
+      throw StateError('لا تملك صلاحية حفظ هذا المستند');
+    }
     final filename = suggestedPdfName(name);
     if (usesShareSheet) {
       await Printing.sharePdf(bytes: bytes, filename: filename);
@@ -129,14 +136,29 @@ class PrintUtils {
       ],
     );
     if (location == null) return false;
+    if (isAuthorized != null && !isAuthorized()) {
+      throw StateError('انتهت صلاحية حفظ هذا المستند قبل اكتمال العملية');
+    }
     await File(location.path).writeAsBytes(bytes, flush: true);
     return true;
   }
 
-  static Future<void> printPdf(Uint8List bytes, String name) async {
+  static Future<void> printPdf(
+    Uint8List bytes,
+    String name, {
+    bool Function()? isAuthorized,
+  }) async {
+    if (isAuthorized != null && !isAuthorized()) {
+      throw StateError('لا تملك صلاحية طباعة هذا المستند');
+    }
     await Printing.layoutPdf(
       name: suggestedPdfName(name),
-      onLayout: (_) async => bytes,
+      onLayout: (_) async {
+        if (isAuthorized != null && !isAuthorized()) {
+          throw StateError('انتهت صلاحية طباعة هذا المستند قبل إرساله');
+        }
+        return bytes;
+      },
     );
   }
 
