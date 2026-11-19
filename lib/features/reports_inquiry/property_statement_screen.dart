@@ -221,7 +221,7 @@ class _PropertyStatementScreenState extends State<PropertyStatementScreen> {
                             (property) => DropdownMenuItem<int>(
                               value: property['id'] as int,
                               child: Text(
-                                property['name']?.toString() ?? '',
+                                _propertyLabel(property),
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
@@ -455,6 +455,18 @@ class _PropertyStatementScreenState extends State<PropertyStatementScreen> {
       ),
     ],
   );
+
+  /// Warns before loading: a property with no centre, or one sharing its
+  /// centre with another property, cannot have lines attributed to it.
+  String _propertyLabel(Map<String, dynamic> property) {
+    final name = property['name']?.toString() ?? '';
+    final centerId = (property['cost_center_id'] as num?)?.toInt();
+    if (centerId == null) return '$name — بلا مركز تكلفة';
+    final sharers = (property['center_property_count'] as num?)?.toInt() ?? 1;
+    return sharers > 1
+        ? '$name — مركز تكلفة مشترك'
+        : name;
+  }
 
   String _gapLabel(PropertyStatementGap gap) => switch (gap.reason) {
     PropertyStatementGapReason.propertyWithoutCostCenter =>

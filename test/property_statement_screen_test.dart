@@ -275,7 +275,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byType(DropdownButtonFormField<int>));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('عقار النخيل').last);
+    expect(
+      find.text('عقار النخيل — بلا مركز تكلفة'),
+      findsWidgets,
+    );
+    await tester.tap(find.text('عقار النخيل — بلا مركز تكلفة').last);
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(ElevatedButton, 'عرض الكشف'));
     await tester.pumpAndSettle();
@@ -287,6 +291,77 @@ void main() {
     expect(find.text('مركز التكلفة: غير مرتبط'), findsOneWidget);
     expect(
       find.textContaining('العقار بلا مركز تكلفة'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('لا توجد حركات مرحلة لهذا العقار خلال الفترة المحددة.'),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    reports.dispose();
+  });
+
+  testWidgets('warns in the picker when a centre is shared', (tester) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    PermissionRuntime.activate(
+      userId: 1,
+      role: 'SuperAdmin',
+      permissionRows: const [],
+    );
+
+    final reports = ReportsProvider(
+      propertyStatementPropertiesLoader: () async => [
+        {
+          'id': 3,
+          'name': 'عقار مشترك',
+          'cost_center_id': 7,
+          'center_property_count': 2,
+        },
+      ],
+      propertyStatementLoader: (propertyId, startDate, endDate) async =>
+          _report(
+            startDate: startDate,
+            endDate: endDate,
+            costCenterId: 7,
+            lines: const [],
+            gaps: const [
+              PropertyStatementGap(
+                reason: PropertyStatementGapReason.sharedCostCenter,
+                lineCount: 1,
+                debitMinor: 0,
+                creditMinor: 70000,
+              ),
+            ],
+          ),
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider<ReportsProvider>.value(
+        value: reports,
+        child: const MaterialApp(
+          home: Scaffold(body: PropertyStatementScreen()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(DropdownButtonFormField<int>));
+    await tester.pumpAndSettle();
+    expect(find.text('عقار مشترك — مركز تكلفة مشترك'), findsWidgets);
+
+    await tester.tap(find.text('عقار مشترك — مركز تكلفة مشترك').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'عرض الكشف'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('مركز تكلفة مشترك مع عقارات أخرى'),
       findsOneWidget,
     );
     expect(
