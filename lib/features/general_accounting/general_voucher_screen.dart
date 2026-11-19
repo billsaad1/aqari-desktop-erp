@@ -21,6 +21,8 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
   );
   final _amountController = TextEditingController();
   final _descController = TextEditingController();
+  final _periodFromController = TextEditingController();
+  final _periodToController = TextEditingController();
 
   int? _cashAccountId;
   int? _oppositeAccountId;
@@ -41,6 +43,8 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
     _dateController.dispose();
     _amountController.dispose();
     _descController.dispose();
+    _periodFromController.dispose();
+    _periodToController.dispose();
     super.dispose();
   }
 
@@ -57,6 +61,42 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         () => _dateController.text = DateFormat('yyyy-MM-dd').format(date),
       );
     }
+  }
+
+  Future<void> _pickPeriodDate(
+    TextEditingController controller, {
+    required bool isStart,
+  }) async {
+    final from = DateTime.tryParse(_periodFromController.text);
+    final to = DateTime.tryParse(_periodToController.text);
+    final firstDate = isStart ? DateTime(2000) : (from ?? DateTime(2000));
+    final lastDate = isStart ? (to ?? DateTime(2100)) : DateTime(2100);
+    var initialDate = DateTime.tryParse(controller.text) ?? DateTime.now();
+    if (initialDate.isBefore(firstDate)) initialDate = firstDate;
+    if (initialDate.isAfter(lastDate)) initialDate = lastDate;
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+    );
+    if (date != null && mounted) {
+      setState(() => controller.text = DateFormat('yyyy-MM-dd').format(date));
+    }
+  }
+
+  String? _validateVoucherPeriod() {
+    final fromText = _periodFromController.text.trim();
+    final toText = _periodToController.text.trim();
+    if (fromText.isEmpty && toText.isEmpty) return null;
+    if (fromText.isEmpty || toText.isEmpty) {
+      return 'أدخل تاريخ البداية والنهاية معاً أو اتركهما فارغين';
+    }
+    final from = DateTime.tryParse(fromText);
+    final to = DateTime.tryParse(toText);
+    if (from == null || to == null) return 'تاريخ الفترة غير صحيح';
+    if (from.isAfter(to)) return 'تاريخ البداية يجب ألا يتجاوز تاريخ النهاية';
+    return null;
   }
 
   Future<void> _saveVoucher({required bool saveAsPdf}) async {
@@ -89,6 +129,12 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
       'amount': amount,
       'party_name': _descController.text.trim(),
       'description': _descController.text.trim(),
+      'period_from_date': _periodFromController.text.trim().isEmpty
+          ? null
+          : _periodFromController.text.trim(),
+      'period_to_date': _periodToController.text.trim().isEmpty
+          ? null
+          : _periodToController.text.trim(),
     };
     setState(() => _isProcessing = true);
     late final int voucherId;
@@ -130,6 +176,12 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         paymentMethod: null,
         accountName: '${cashAccount['name']} / ${counterpart['name']}',
         description: _descController.text.trim(),
+        periodStartDate: _periodFromController.text.trim().isEmpty
+            ? null
+            : _periodFromController.text.trim(),
+        periodEndDate: _periodToController.text.trim().isEmpty
+            ? null
+            : _periodToController.text.trim(),
       );
       if (mounted) {
         await PdfDocumentPreviewDialog.show(
@@ -161,6 +213,8 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         _costCenterId = null;
         _amountController.clear();
         _descController.clear();
+        _periodFromController.clear();
+        _periodToController.clear();
         _isProcessing = false;
       });
     }
@@ -181,189 +235,203 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
           child: Center(
             child: Container(
               constraints: const BoxConstraints(maxWidth: 800),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      'سند ${widget.voucherType}',
-                      style: TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
-                        color: primaryColor,
+              child: SingleChildScrollView(
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'سند ${widget.voucherType}',
+                        style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: primaryColor,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 32),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: _dateController,
-                            decoration: const InputDecoration(
-                              labelText: 'التاريخ',
-                              border: OutlineInputBorder(),
-                            ),
-                            readOnly: true,
-                            onTap: _pickDate,
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: TextFormField(
-                            controller: _amountController,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                              labelText: 'المبلغ',
-                              border: OutlineInputBorder(),
-                            ),
-                            validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DropdownButtonFormField<int>(
-                            value: _cashAccountId,
-                            items: provider.detailAccounts
-                                .where(
-                                  (a) =>
-                                      a['account_type'] == 'Asset' &&
-                                      a['code'].toString().startsWith('11') &&
-                                      a['parent_id'] != null,
-                                )
-                                .map(
-                                  (a) => DropdownMenuItem<int>(
-                                    value: a['id'],
-                                    child: Text('${a['code']} - ${a['name']}'),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (val) =>
-                                setState(() => _cashAccountId = val),
-                            decoration: InputDecoration(
-                              labelText: isReceipt
-                                  ? 'يُقبض إلى حساب (الصندوق/البنك)'
-                                  : 'يُصرف من حساب (الصندوق/البنك)',
-                              border: const OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: DropdownButtonFormField<int>(
-                            value: _oppositeAccountId,
-                            items: provider.detailAccounts
-                                .where(
-                                  (a) => (isReceipt
-                                      ? [
-                                          'Asset',
-                                          'Liability',
-                                          'Equity',
-                                          'Revenue',
-                                        ].contains(a['account_type'])
-                                      : [
-                                          'Asset',
-                                          'Liability',
-                                          'Equity',
-                                          'Expense',
-                                        ].contains(a['account_type'])),
-                                )
-                                .map(
-                                  (a) => DropdownMenuItem<int>(
-                                    value: a['id'],
-                                    child: Text('${a['code']} - ${a['name']}'),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (val) =>
-                                setState(() => _oppositeAccountId = val),
-                            decoration: InputDecoration(
-                              labelText: isReceipt
-                                  ? 'حساب الإيراد / الحساب الدائن'
-                                  : 'حساب المصروف / الحساب المدين',
-                              border: const OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Expanded(
-                          flex: 2,
-                          child: TextFormField(
-                            controller: _descController,
-                            maxLines: 2,
-                            decoration: const InputDecoration(
-                              labelText: 'البيان',
-                              border: OutlineInputBorder(),
-                            ),
-                            validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          flex: 1,
-                          child: DropdownButtonFormField<int>(
-                            value: _costCenterId,
-                            items: provider.costCenters
-                                .map(
-                                  (c) => DropdownMenuItem<int>(
-                                    value: c['id'],
-                                    child: Text(c['name']),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (val) =>
-                                setState(() => _costCenterId = val),
-                            decoration: const InputDecoration(
-                              labelText: 'مركز التكلفة',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 32),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed:
-                                _isProcessing ||
-                                    !PermissionRuntime.allows(
-                                      'accounting',
-                                      AppPermissionAction.post,
-                                    )
-                                ? null
-                                : () => _saveVoucher(saveAsPdf: false),
-                            icon: const Icon(Icons.print),
-                            style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.all(16),
-                              backgroundColor: primaryColor,
-                            ),
-                            label: Text(
-                              PermissionRuntime.allows(
-                                    'accounting',
-                                    AppPermissionAction.print,
-                                  )
-                                  ? 'حفظ وترحيل وطباعة'
-                                  : 'حفظ وترحيل ومعاينة',
-                            ),
-                          ),
-                        ),
-                        if (PermissionRuntime.allows(
-                          'accounting',
-                          AppPermissionAction.print,
-                        )) ...[
-                          const SizedBox(width: 12),
+                      const SizedBox(height: 32),
+                      Row(
+                        children: [
                           Expanded(
-                            child: OutlinedButton.icon(
+                            child: TextFormField(
+                              controller: _dateController,
+                              decoration: const InputDecoration(
+                                labelText: 'التاريخ',
+                                border: OutlineInputBorder(),
+                              ),
+                              readOnly: true,
+                              onTap: _pickDate,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: TextFormField(
+                              controller: _amountController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'المبلغ',
+                                border: OutlineInputBorder(),
+                              ),
+                              validator: (v) =>
+                                  v!.trim().isEmpty ? 'مطلوب' : null,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: _periodFromController,
+                              readOnly: true,
+                              decoration: const InputDecoration(
+                                labelText: 'من تاريخ (اختياري)',
+                                border: OutlineInputBorder(),
+                                suffixIcon: Icon(Icons.calendar_today),
+                              ),
+                              onTap: () => _pickPeriodDate(
+                                _periodFromController,
+                                isStart: true,
+                              ),
+                              validator: (_) => _validateVoucherPeriod(),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: TextFormField(
+                              controller: _periodToController,
+                              readOnly: true,
+                              decoration: const InputDecoration(
+                                labelText: 'إلى تاريخ (اختياري)',
+                                border: OutlineInputBorder(),
+                                suffixIcon: Icon(Icons.calendar_today),
+                              ),
+                              onTap: () => _pickPeriodDate(
+                                _periodToController,
+                                isStart: false,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: DropdownButtonFormField<int>(
+                              value: _cashAccountId,
+                              items: provider.detailAccounts
+                                  .where(
+                                    (a) =>
+                                        a['account_type'] == 'Asset' &&
+                                        a['code'].toString().startsWith('11') &&
+                                        a['parent_id'] != null,
+                                  )
+                                  .map(
+                                    (a) => DropdownMenuItem<int>(
+                                      value: a['id'],
+                                      child: Text(
+                                        '${a['code']} - ${a['name']}',
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (val) =>
+                                  setState(() => _cashAccountId = val),
+                              decoration: InputDecoration(
+                                labelText: isReceipt
+                                    ? 'يُقبض إلى حساب (الصندوق/البنك)'
+                                    : 'يُصرف من حساب (الصندوق/البنك)',
+                                border: const OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: DropdownButtonFormField<int>(
+                              value: _oppositeAccountId,
+                              items: provider.detailAccounts
+                                  .where(
+                                    (a) => (isReceipt
+                                        ? [
+                                            'Asset',
+                                            'Liability',
+                                            'Equity',
+                                            'Revenue',
+                                          ].contains(a['account_type'])
+                                        : [
+                                            'Asset',
+                                            'Liability',
+                                            'Equity',
+                                            'Expense',
+                                          ].contains(a['account_type'])),
+                                  )
+                                  .map(
+                                    (a) => DropdownMenuItem<int>(
+                                      value: a['id'],
+                                      child: Text(
+                                        '${a['code']} - ${a['name']}',
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (val) =>
+                                  setState(() => _oppositeAccountId = val),
+                              decoration: InputDecoration(
+                                labelText: isReceipt
+                                    ? 'حساب الإيراد / الحساب الدائن'
+                                    : 'حساب المصروف / الحساب المدين',
+                                border: const OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          Expanded(
+                            flex: 2,
+                            child: TextFormField(
+                              controller: _descController,
+                              maxLines: 2,
+                              decoration: const InputDecoration(
+                                labelText: 'البيان',
+                                border: OutlineInputBorder(),
+                              ),
+                              validator: (v) =>
+                                  v!.trim().isEmpty ? 'البيان مطلوب' : null,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            flex: 1,
+                            child: DropdownButtonFormField<int>(
+                              value: _costCenterId,
+                              items: provider.costCenters
+                                  .map(
+                                    (c) => DropdownMenuItem<int>(
+                                      value: c['id'],
+                                      child: Text(c['name']),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (val) =>
+                                  setState(() => _costCenterId = val),
+                              decoration: const InputDecoration(
+                                labelText: 'مركز التكلفة',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 32),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
                               onPressed:
                                   _isProcessing ||
                                       !PermissionRuntime.allows(
@@ -371,18 +439,49 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                                         AppPermissionAction.post,
                                       )
                                   ? null
-                                  : () => _saveVoucher(saveAsPdf: true),
-                              icon: const Icon(Icons.picture_as_pdf),
-                              style: OutlinedButton.styleFrom(
+                                  : () => _saveVoucher(saveAsPdf: false),
+                              icon: const Icon(Icons.print),
+                              style: ElevatedButton.styleFrom(
                                 padding: const EdgeInsets.all(16),
+                                backgroundColor: primaryColor,
                               ),
-                              label: const Text('حفظ السند PDF'),
+                              label: Text(
+                                PermissionRuntime.allows(
+                                      'accounting',
+                                      AppPermissionAction.print,
+                                    )
+                                    ? 'حفظ وترحيل وطباعة'
+                                    : 'حفظ وترحيل ومعاينة',
+                              ),
                             ),
                           ),
+                          if (PermissionRuntime.allows(
+                            'accounting',
+                            AppPermissionAction.print,
+                          )) ...[
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed:
+                                    _isProcessing ||
+                                        !PermissionRuntime.allows(
+                                          'accounting',
+                                          AppPermissionAction.post,
+                                        )
+                                    ? null
+                                    : () => _saveVoucher(saveAsPdf: true),
+                                icon: const Icon(Icons.picture_as_pdf),
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.all(16),
+                                ),
+                                label: const Text('حفظ السند PDF'),
+                              ),
+                            ),
+                          ],
                         ],
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

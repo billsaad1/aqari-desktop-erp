@@ -13,7 +13,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 17;
+  static const int _schemaVersion = 18;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -433,6 +433,8 @@ class DatabaseHelper {
         'party_name',
         'journal_entry_id',
         'description',
+        'period_from_date',
+        'period_to_date',
       ],
       'voucher_installment_allocations': [
         'id',
@@ -987,6 +989,10 @@ class DatabaseHelper {
       // Reinstall stricter source-validation triggers for databases upgraded
       // to v16 before the ledger checks were introduced.
       await _createRefundSchema(db);
+    }
+    if (oldVersion < 18) {
+      await _ensureColumn(db, 'vouchers', 'period_from_date', 'TEXT');
+      await _ensureColumn(db, 'vouchers', 'period_to_date', 'TEXT');
     }
   }
 
@@ -1696,6 +1702,8 @@ class DatabaseHelper {
         party_name TEXT,
         journal_entry_id INTEGER,
         description TEXT,
+        period_from_date TEXT,
+        period_to_date TEXT,
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (journal_entry_id) REFERENCES journal_entries (id)
       )
@@ -2864,6 +2872,28 @@ class DatabaseHelper {
         DateTime.tryParse(voucher['voucher_date']?.toString() ?? '') == null) {
       throw ArgumentError('مبلغ أو تاريخ السند غير صحيح');
     }
+    String? optionalVoucherDate(String key) {
+      final value = voucher[key];
+      if (value == null) return null;
+      if (value is! String) throw ArgumentError('تاريخ الفترة غير صحيح');
+      final normalized = value.trim();
+      return normalized.isEmpty ? null : normalized;
+    }
+
+    final periodFromDate = optionalVoucherDate('period_from_date');
+    final periodToDate = optionalVoucherDate('period_to_date');
+    if ((periodFromDate == null) != (periodToDate == null)) {
+      throw ArgumentError('يجب إدخال تاريخي بداية ونهاية الفترة معاً');
+    }
+    if (periodFromDate != null && periodToDate != null) {
+      final from = DateTime.tryParse(periodFromDate);
+      final to = DateTime.tryParse(periodToDate);
+      if (from == null || to == null || from.isAfter(to)) {
+        throw ArgumentError('تاريخ الفترة غير صحيح؛ راجع البداية والنهاية');
+      }
+    }
+    voucher['period_from_date'] = periodFromDate;
+    voucher['period_to_date'] = periodToDate;
     final db = await instance.database;
     return db.transaction((txn) async {
       final cashAccount = await _requireLeafAccountTx(
@@ -5461,6 +5491,8 @@ class DatabaseHelper {
         v.tenant_id,
         COALESCE(NULLIF(TRIM(v.party_name), ''), t.name, v.description, '') AS party_name,
         v.description,
+        v.period_from_date,
+        v.period_to_date,
         v.journal_entry_id
       FROM vouchers v
       LEFT JOIN tenants t ON t.id = v.tenant_id
@@ -5503,6 +5535,8 @@ class DatabaseHelper {
         COALESCE(NULLIF(TRIM(v.party_name), ''), t.name, v.description, '') AS party_name,
         t.name AS current_tenant_name,
         v.description,
+        v.period_from_date,
+        v.period_to_date,
         v.journal_entry_id
       FROM vouchers v
       LEFT JOIN tenants t ON t.id = v.tenant_id

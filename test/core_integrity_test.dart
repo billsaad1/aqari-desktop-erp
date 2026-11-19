@@ -1503,7 +1503,10 @@ void main() {
           'party_snapshot',
         ]),
       );
-      expect(voucherColumns, contains('party_name'));
+      expect(
+        voucherColumns,
+        containsAll(['party_name', 'period_from_date', 'period_to_date']),
+      );
       expect(voucherTables, contains('voucher_installment_allocations'));
 
       final summary = await DatabaseHelper.instance.getDashboardSummary();
@@ -1530,6 +1533,8 @@ void main() {
         amount: 1250.50,
         accountName: '',
         description: 'دفعة إيجار اختبارية',
+        periodStartDate: '2026-11-01',
+        periodEndDate: '2026-11-30',
         journalLines: [
           {'account_name': 'الصندوق الرئيسي', 'debit': 1250.5, 'credit': 0},
           {'account_name': 'حساب المستأجر', 'debit': 0, 'credit': 1250.5},
@@ -1783,7 +1788,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        17,
+        18,
       );
       expect(
         (await restored.rawQuery(
@@ -1826,7 +1831,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        17,
+        18,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -2429,6 +2434,49 @@ void main() {
       expect((await db.query('vouchers')).length, vouchersBeforeMismatch);
       expect((await db.query('journal_entries')).length, entriesBeforeMismatch);
 
+      final vouchersBeforeInvalidPeriod = (await db.query('vouchers')).length;
+      final entriesBeforeInvalidPeriod = (await db.query(
+        'journal_entries',
+      )).length;
+      await expectLater(
+        DatabaseHelper.instance.insertGeneralVoucher(
+          {
+            'voucher_type': 'قبض عام',
+            'voucher_date': '2026-11-10',
+            'amount': 20.0,
+            'description': 'فترة ناقصة',
+            'period_from_date': '2026-11-01',
+          },
+          cashAccountId,
+          revenueAccount['id'] as int,
+          null,
+          'قبض عام',
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        DatabaseHelper.instance.insertGeneralVoucher(
+          {
+            'voucher_type': 'قبض عام',
+            'voucher_date': '2026-11-10',
+            'amount': 20.0,
+            'description': 'فترة معكوسة',
+            'period_from_date': '2026-11-30',
+            'period_to_date': '2026-11-01',
+          },
+          cashAccountId,
+          revenueAccount['id'] as int,
+          null,
+          'قبض عام',
+        ),
+        throwsArgumentError,
+      );
+      expect((await db.query('vouchers')).length, vouchersBeforeInvalidPeriod);
+      expect(
+        (await db.query('journal_entries')).length,
+        entriesBeforeInvalidPeriod,
+      );
+
       final generalVoucherId = await DatabaseHelper.instance
           .insertGeneralVoucher(
             {
@@ -2436,6 +2484,8 @@ void main() {
               'voucher_date': '2026-11-10',
               'amount': 20.0,
               'description': 'اختبار',
+              'period_from_date': '2026-11-01',
+              'period_to_date': '2026-11-30',
             },
             cashAccountId,
             revenueAccount['id'] as int,
@@ -2448,6 +2498,14 @@ void main() {
       );
       expect(generalDetails, isNotNull);
       expect((generalDetails!['voucher'] as Map)['party_name'], 'اختبار');
+      expect(
+        (generalDetails['voucher'] as Map)['period_from_date'],
+        '2026-11-01',
+      );
+      expect(
+        (generalDetails['voucher'] as Map)['period_to_date'],
+        '2026-11-30',
+      );
       expect((generalDetails['journal_lines'] as List).length, 2);
 
       final refundSource = (await db.query(
@@ -3339,7 +3397,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        17,
+        18,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -3989,8 +4047,22 @@ void main() {
       final upgraded = await helper.database;
       expect(
         (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
-        17,
+        18,
       );
+      final migratedVoucherColumns = (await upgraded.rawQuery(
+        "PRAGMA table_info('vouchers')",
+      )).map((row) => row['name']).toSet();
+      expect(
+        migratedVoucherColumns,
+        containsAll(['period_from_date', 'period_to_date']),
+      );
+      final migratedLegacyVoucher = (await upgraded.query(
+        'vouchers',
+        where: 'id = ?',
+        whereArgs: [legacyReceiptId],
+      )).single;
+      expect(migratedLegacyVoucher['period_from_date'], isNull);
+      expect(migratedLegacyVoucher['period_to_date'], isNull);
       final company = (await upgraded.query(
         'company_info',
         where: 'id = ?',
