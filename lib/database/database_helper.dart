@@ -9,6 +9,7 @@ import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/financial_position_report_model.dart';
 import '../models/income_expense_report_model.dart';
 import '../models/invoice_ledger_reconciliation_report_model.dart';
 import '../models/tenant_collection_report_model.dart';
@@ -6707,6 +6708,101 @@ class DatabaseHelper {
         totalCredit: totalCreditMinor / 100.0,
         closingBalance: runningBalanceMinor / 100.0,
         lines: lines,
+      );
+    });
+  }
+
+  Future<FinancialPositionReport> getFinancialPositionReport({
+    required String asOfDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+
+    if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(asOfDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    final dateParts = asOfDate.split('-').map(int.tryParse).toList();
+    if (dateParts.any((part) => part == null)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    final year = dateParts[0]!;
+    final month = dateParts[1]!;
+    final day = dateParts[2]!;
+    if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    final parsedDate = DateTime.utc(year, month, day);
+    if (parsedDate.year != year ||
+        parsedDate.month != month ||
+        parsedDate.day != day) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    final exclusiveEndDate = parsedDate
+        .add(const Duration(days: 1))
+        .toIso8601String()
+        .substring(0, 10);
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final accountRows = await txn.rawQuery(
+        '''
+        WITH ledger_totals AS (
+          SELECT
+            jl.account_id,
+            CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+              AS debit_minor,
+            CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+              AS credit_minor
+          FROM journal_lines jl
+          JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE je.is_posted = 1 AND je.entry_date < ?
+          GROUP BY jl.account_id
+        )
+        SELECT
+          totals.account_id AS account_id,
+          COALESCE(NULLIF(TRIM(a.code), ''), '—') AS account_code,
+          COALESCE(
+            NULLIF(TRIM(a.name), ''),
+            'حساب غير موجود (#' || totals.account_id || ')'
+          ) AS account_name,
+          COALESCE(a.account_type, 'Unclassified') AS account_type,
+          totals.debit_minor AS debit_minor,
+          totals.credit_minor AS credit_minor
+        FROM ledger_totals totals
+        LEFT JOIN accounts a ON a.id = totals.account_id
+        WHERE totals.debit_minor != 0 OR totals.credit_minor != 0
+        ORDER BY account_code COLLATE NOCASE, totals.account_id
+        ''',
+        [exclusiveEndDate],
+      );
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return FinancialPositionReport(
+        asOfDate: asOfDate,
+        currency: currency,
+        rows: accountRows
+            .map(
+              (row) => FinancialPositionAccountRow(
+                accountId: (row['account_id'] as num).toInt(),
+                accountCode: row['account_code']?.toString() ?? '—',
+                accountName: row['account_name']?.toString() ?? 'غير محدد',
+                accountType: row['account_type']?.toString() ?? 'Unclassified',
+                debitMinor: (row['debit_minor'] as num).toInt(),
+                creditMinor: (row['credit_minor'] as num).toInt(),
+              ),
+            )
+            .toList(growable: false),
       );
     });
   }
