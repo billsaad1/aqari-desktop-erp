@@ -9,6 +9,7 @@ import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
 
 class DatabaseHelper {
@@ -6693,6 +6694,120 @@ class DatabaseHelper {
         totalCredit: totalCreditMinor / 100.0,
         closingBalance: runningBalanceMinor / 100.0,
         lines: lines,
+      );
+    });
+  }
+
+  Future<TrialBalanceReport> getTrialBalance({
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final year = parts[0]!;
+      final month = parts[1]!;
+      final day = parts[2]!;
+      if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+      }
+      final date = DateTime(year, month, day);
+      return date.year == year && date.month == month && date.day == day;
+    }
+
+    if (!isCalendarDate(startDate) || !isCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final endParts = endDate.split('-').map(int.parse).toList();
+    final exclusiveEndDate = DateTime.utc(
+      endParts[0],
+      endParts[1],
+      endParts[2] + 1,
+    ).toIso8601String().substring(0, 10);
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final accountRows = await txn.rawQuery(
+        '''
+        WITH account_totals AS (
+          SELECT
+            jl.account_id,
+            CAST(ROUND(COALESCE(SUM(
+              CASE WHEN je.entry_date < ? THEN jl.debit ELSE 0 END
+            ), 0) * 100) AS INTEGER) AS opening_debit_minor,
+            CAST(ROUND(COALESCE(SUM(
+              CASE WHEN je.entry_date < ? THEN jl.credit ELSE 0 END
+            ), 0) * 100) AS INTEGER) AS opening_credit_minor,
+            CAST(ROUND(COALESCE(SUM(
+              CASE WHEN je.entry_date >= ? AND je.entry_date < ?
+                   THEN jl.debit ELSE 0 END
+            ), 0) * 100) AS INTEGER) AS period_debit_minor,
+            CAST(ROUND(COALESCE(SUM(
+              CASE WHEN je.entry_date >= ? AND je.entry_date < ?
+                   THEN jl.credit ELSE 0 END
+            ), 0) * 100) AS INTEGER) AS period_credit_minor
+          FROM journal_lines jl
+          JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE je.is_posted = 1 AND je.entry_date < ?
+          GROUP BY jl.account_id
+        )
+        SELECT
+          a.id AS account_id,
+          a.code AS account_code,
+          a.name AS account_name,
+          a.account_type AS account_type,
+          COALESCE(t.opening_debit_minor, 0) AS opening_debit_minor,
+          COALESCE(t.opening_credit_minor, 0) AS opening_credit_minor,
+          COALESCE(t.period_debit_minor, 0) AS period_debit_minor,
+          COALESCE(t.period_credit_minor, 0) AS period_credit_minor
+        FROM accounts a
+        LEFT JOIN account_totals t ON t.account_id = a.id
+        WHERE (
+          (a.parent_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM accounts child WHERE child.parent_id = a.id
+          ))
+          OR COALESCE(t.opening_debit_minor, 0) != 0
+          OR COALESCE(t.opening_credit_minor, 0) != 0
+          OR COALESCE(t.period_debit_minor, 0) != 0
+          OR COALESCE(t.period_credit_minor, 0) != 0
+        )
+        ORDER BY a.code COLLATE NOCASE, a.id
+        ''',
+        [
+          startDate,
+          startDate,
+          startDate,
+          exclusiveEndDate,
+          startDate,
+          exclusiveEndDate,
+          exclusiveEndDate,
+        ],
+      );
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return TrialBalanceReport(
+        startDate: startDate,
+        endDate: endDate,
+        currency: currency,
+        rows: accountRows.map(TrialBalanceRow.fromMap).toList(growable: false),
       );
     });
   }
