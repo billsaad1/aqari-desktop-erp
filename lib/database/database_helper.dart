@@ -13,6 +13,7 @@ import '../models/financial_close_readiness_report_model.dart';
 import '../models/financial_position_report_model.dart';
 import '../models/income_expense_report_model.dart';
 import '../models/invoice_ledger_reconciliation_report_model.dart';
+import '../models/property_statement_report_model.dart';
 import '../models/tenant_collection_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
@@ -7182,6 +7183,299 @@ class DatabaseHelper {
     });
   }
 
+  /// Read-only statement of posted lines attributed to [propertyId].
+  ///
+  /// Only lines whose cost centre is assigned to this property and to no other
+  /// property are counted. Anything else is reported as a gap, never guessed.
+  Future<PropertyStatementReport> getPropertyStatement({
+    required int propertyId,
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    if (propertyId <= 0) throw ArgumentError('معرف العقار غير صحيح');
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final year = parts[0]!;
+      final month = parts[1]!;
+      final day = parts[2]!;
+      if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+      }
+      final parsed = DateTime(year, month, day);
+      return parsed.year == year && parsed.month == month && parsed.day == day;
+    }
+
+    if (!isCalendarDate(startDate) || !isCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final endDateParts = endDate.split('-').map(int.parse).toList();
+    final exclusiveEndDate = DateTime.utc(
+      endDateParts[0],
+      endDateParts[1],
+      endDateParts[2] + 1,
+    ).toIso8601String().substring(0, 10);
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final propertyRows = await txn.rawQuery(
+        '''
+        SELECT p.id, p.name, p.cost_center_id, o.name AS owner_name
+        FROM properties p
+        LEFT JOIN owners o ON o.id = p.owner_id
+        WHERE p.id = ?
+        LIMIT 1
+        ''',
+        [propertyId],
+      );
+      if (propertyRows.isEmpty) throw StateError('العقار المطلوب غير موجود');
+      final property = propertyRows.single;
+      final costCenterId = (property['cost_center_id'] as num?)?.toInt();
+
+      var costCenterCode = '';
+      var costCenterName = '';
+      var costCenterIsShared = false;
+      if (costCenterId != null) {
+        final centerRows = await txn.query(
+          'cost_centers',
+          columns: ['code', 'name'],
+          where: 'id = ?',
+          whereArgs: [costCenterId],
+          limit: 1,
+        );
+        if (centerRows.isNotEmpty) {
+          costCenterCode = centerRows.single['code']?.toString() ?? '';
+          costCenterName = centerRows.single['name']?.toString() ?? '';
+        }
+        final sharers = await txn.rawQuery(
+          'SELECT COUNT(*) AS total FROM properties WHERE cost_center_id = ?',
+          [costCenterId],
+        );
+        costCenterIsShared = ((sharers.single['total'] as num).toInt()) > 1;
+      }
+
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency =
+          configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+
+      final gaps = <PropertyStatementGap>[];
+
+      /// Counts posted lines in the period matching [where] into a gap.
+      Future<void> recordGap(
+        PropertyStatementGapReason reason,
+        String where,
+        List<Object?> args,
+      ) async {
+        final rows = await txn.rawQuery(
+          '''
+          SELECT
+            COUNT(*) AS line_count,
+            CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+              AS debit_minor,
+            CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+              AS credit_minor
+          FROM journal_lines jl
+          JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE je.is_posted = 1
+            AND je.entry_date >= ?
+            AND je.entry_date < ?
+            AND $where
+          ''',
+          [startDate, exclusiveEndDate, ...args],
+        );
+        final row = rows.single;
+        final lineCount = (row['line_count'] as num).toInt();
+        if (lineCount == 0) return;
+        gaps.add(
+          PropertyStatementGap(
+            reason: reason,
+            lineCount: lineCount,
+            debitMinor: (row['debit_minor'] as num).toInt(),
+            creditMinor: (row['credit_minor'] as num).toInt(),
+          ),
+        );
+      }
+
+      final lines = <PropertyStatementLine>[];
+      var openingBalanceMinor = 0;
+      var totalDebitMinor = 0;
+      var totalCreditMinor = 0;
+      var closingBalanceMinor = 0;
+
+      // Only a centre owned by this property alone may carry its lines.
+      if (costCenterId != null && !costCenterIsShared) {
+        final openingRows = await txn.rawQuery(
+          '''
+          SELECT
+            CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+              AS debit_minor,
+            CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+              AS credit_minor
+          FROM journal_lines jl
+          JOIN journal_entries je ON je.id = jl.journal_entry_id
+          WHERE jl.cost_center_id = ?
+            AND je.is_posted = 1
+            AND je.entry_date < ?
+          ''',
+          [costCenterId, startDate],
+        );
+        openingBalanceMinor =
+            (openingRows.single['debit_minor'] as num).toInt() -
+            (openingRows.single['credit_minor'] as num).toInt();
+        var runningBalanceMinor = openingBalanceMinor;
+
+        final movementRows = await txn.rawQuery(
+          '''
+          SELECT
+            je.entry_date AS date,
+            je.id AS journal_entry_id,
+            jl.id AS journal_line_id,
+            a.code AS account_code,
+            a.name AS account_name,
+            jl.description AS description,
+            CAST(ROUND(jl.debit * 100) AS INTEGER) AS debit_minor,
+            CAST(ROUND(jl.credit * 100) AS INTEGER) AS credit_minor
+          FROM journal_lines jl
+          JOIN journal_entries je ON je.id = jl.journal_entry_id
+          JOIN accounts a ON a.id = jl.account_id
+          WHERE jl.cost_center_id = ?
+            AND je.is_posted = 1
+            AND je.entry_date >= ?
+            AND je.entry_date < ?
+          ORDER BY je.entry_date ASC, je.id ASC, jl.id ASC
+          ''',
+          [costCenterId, startDate, exclusiveEndDate],
+        );
+
+        for (final row in movementRows) {
+          final debitMinor = (row['debit_minor'] as num).toInt();
+          final creditMinor = (row['credit_minor'] as num).toInt();
+          totalDebitMinor += debitMinor;
+          totalCreditMinor += creditMinor;
+          runningBalanceMinor += debitMinor - creditMinor;
+          lines.add(
+            PropertyStatementLine(
+              date: row['date']?.toString() ?? '',
+              journalEntryId: (row['journal_entry_id'] as num).toInt(),
+              journalLineId: (row['journal_line_id'] as num).toInt(),
+              accountCode: row['account_code']?.toString() ?? '',
+              accountName: row['account_name']?.toString() ?? '',
+              description: row['description']?.toString() ?? '',
+              debitMinor: debitMinor,
+              creditMinor: creditMinor,
+              runningBalanceMinor: runningBalanceMinor,
+            ),
+          );
+        }
+        closingBalanceMinor = runningBalanceMinor;
+      } else if (costCenterId == null) {
+        await recordGap(
+          PropertyStatementGapReason.propertyWithoutCostCenter,
+          'jl.cost_center_id IS NULL',
+          const [],
+        );
+        return _buildPropertyStatementReport(
+          property: property,
+          propertyId: propertyId,
+          costCenterId: null,
+          costCenterCode: costCenterCode,
+          costCenterName: costCenterName,
+          currency: currency,
+          startDate: startDate,
+          endDate: endDate,
+          lines: const [],
+          gaps: gaps,
+          openingBalanceMinor: 0,
+          totalDebitMinor: 0,
+          totalCreditMinor: 0,
+          closingBalanceMinor: 0,
+        );
+      } else {
+        await recordGap(
+          PropertyStatementGapReason.sharedCostCenter,
+          'jl.cost_center_id = ?',
+          [costCenterId],
+        );
+      }
+
+      // Lines with no centre can never be tied to this property. Disclose them
+      // so the reader knows the report is not silently dropping amounts.
+      await recordGap(
+        PropertyStatementGapReason.unassignedCostCenter,
+        'jl.cost_center_id IS NULL',
+        const [],
+      );
+
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return _buildPropertyStatementReport(
+        property: property,
+        propertyId: propertyId,
+        costCenterId: costCenterId,
+        costCenterCode: costCenterCode,
+        costCenterName: costCenterName,
+        currency: currency,
+        startDate: startDate,
+        endDate: endDate,
+        lines: lines,
+        gaps: gaps,
+        openingBalanceMinor: openingBalanceMinor,
+        totalDebitMinor: totalDebitMinor,
+        totalCreditMinor: totalCreditMinor,
+        closingBalanceMinor: closingBalanceMinor,
+      );
+    });
+  }
+
+  PropertyStatementReport _buildPropertyStatementReport({
+    required Map<String, dynamic> property,
+    required int propertyId,
+    required int? costCenterId,
+    required String costCenterCode,
+    required String costCenterName,
+    required String currency,
+    required String startDate,
+    required String endDate,
+    required List<PropertyStatementLine> lines,
+    required List<PropertyStatementGap> gaps,
+    required int openingBalanceMinor,
+    required int totalDebitMinor,
+    required int totalCreditMinor,
+    required int closingBalanceMinor,
+  }) => PropertyStatementReport(
+    propertyId: propertyId,
+    propertyName: property['name']?.toString() ?? '',
+    ownerName: property['owner_name']?.toString() ?? '',
+    costCenterId: costCenterId,
+    costCenterCode: costCenterCode,
+    costCenterName: costCenterName,
+    currency: currency,
+    startDate: startDate,
+    endDate: endDate,
+    openingBalanceMinor: openingBalanceMinor,
+    totalDebitMinor: totalDebitMinor,
+    totalCreditMinor: totalCreditMinor,
+    closingBalanceMinor: closingBalanceMinor,
+    lines: lines,
+    gaps: gaps,
+  );
+
   Future<FinancialPositionReport> getFinancialPositionReport({
     required String asOfDate,
   }) async {
@@ -8148,6 +8442,29 @@ class DatabaseHelper {
 
   /// A deliberately limited, read-only projection for property/unit inquiry.
   /// Do not add owner, tenant, lease, rent, balance, or sale-review fields here.
+  /// Properties available to the property statement, with the cost centre each
+  /// one owns exclusively. A shared centre is flagged so the reader knows the
+  /// statement will disclose rather than attribute those lines.
+  Future<List<Map<String, dynamic>>> getPropertyStatementProperties() async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT
+        p.id AS id,
+        p.name AS name,
+        p.cost_center_id AS cost_center_id,
+        cc.code AS cost_center_code,
+        cc.name AS cost_center_name,
+        (
+          SELECT COUNT(*) FROM properties other
+          WHERE other.cost_center_id = p.cost_center_id
+        ) AS center_property_count
+      FROM properties p
+      LEFT JOIN cost_centers cc ON cc.id = p.cost_center_id
+      ORDER BY p.name COLLATE NOCASE, p.id
+    ''');
+  }
+
   Future<List<Map<String, dynamic>>> getPropertyUnitInquiryProperties() async {
     PermissionRuntime.require('reports', AppPermissionAction.view);
     final db = await instance.database;

@@ -6,6 +6,7 @@ import '../models/financial_position_report_model.dart';
 import '../models/income_expense_report_model.dart';
 import '../models/invoice_ledger_reconciliation_report_model.dart';
 import '../models/owner_statement_account_model.dart';
+import '../models/property_statement_report_model.dart';
 import '../models/tenant_statement_account_model.dart';
 import '../models/tenant_collection_report_model.dart';
 import '../models/trial_balance_report_model.dart';
@@ -57,6 +58,13 @@ class ReportsProvider with ChangeNotifier {
     invoiceLedgerReconciliationLoader,
     Future<TenantCollectionReport> Function(String startDate, String endDate)?
     tenantCollectionReportLoader,
+    Future<List<Map<String, dynamic>>> Function()? propertyStatementPropertiesLoader,
+    Future<PropertyStatementReport> Function(
+      int propertyId,
+      String startDate,
+      String endDate,
+    )?
+    propertyStatementLoader,
   }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
        _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader,
        _accountStatementLoader = accountStatementLoader,
@@ -69,8 +77,18 @@ class ReportsProvider with ChangeNotifier {
        _trialBalanceLoader = trialBalanceLoader,
        _incomeExpenseReportLoader = incomeExpenseReportLoader,
        _invoiceLedgerReconciliationLoader = invoiceLedgerReconciliationLoader,
-       _tenantCollectionReportLoader = tenantCollectionReportLoader;
+       _tenantCollectionReportLoader = tenantCollectionReportLoader,
+       _propertyStatementPropertiesLoader = propertyStatementPropertiesLoader,
+       _propertyStatementLoader = propertyStatementLoader;
 
+  final Future<List<Map<String, dynamic>>> Function()?
+  _propertyStatementPropertiesLoader;
+  final Future<PropertyStatementReport> Function(
+    int propertyId,
+    String startDate,
+    String endDate,
+  )?
+  _propertyStatementLoader;
   final Future<List<Map<String, dynamic>>> Function()?
   _propertyInquiryPropertiesLoader;
   final Future<List<Map<String, dynamic>>> Function(int propertyId)?
@@ -153,6 +171,7 @@ class ReportsProvider with ChangeNotifier {
   int _tenantCollectionGeneration = 0;
   int _alertsGeneration = 0;
   int _propertyInquiryGeneration = 0;
+  int _propertyStatementGeneration = 0;
   int? _authorizedUserId;
   bool? _hadReportsAccess;
   int? _selectedInquiryPropertyId;
@@ -161,6 +180,11 @@ class ReportsProvider with ChangeNotifier {
   bool _propertyInquiryPropertiesLoaded = false;
   bool _propertyInquiryUnitsLoaded = false;
   String? _propertyInquiryErrorMessage;
+  List<Map<String, dynamic>> _propertyStatementProperties = [];
+  PropertyStatementReport? _propertyStatementReport;
+  bool _isPropertyStatementLoading = false;
+  bool _propertyStatementPropertiesLoaded = false;
+  String? _propertyStatementErrorMessage;
   String? _errorMessage;
   String? _statementErrorMessage;
   String? _tenantStatementErrorMessage;
@@ -267,6 +291,13 @@ class ReportsProvider with ChangeNotifier {
   bool get propertyInquiryPropertiesLoaded => _propertyInquiryPropertiesLoaded;
   bool get propertyInquiryUnitsLoaded => _propertyInquiryUnitsLoaded;
   String? get propertyInquiryErrorMessage => _propertyInquiryErrorMessage;
+  List<Map<String, dynamic>> get propertyStatementProperties =>
+      List.unmodifiable(_propertyStatementProperties);
+  PropertyStatementReport? get propertyStatementReport => _propertyStatementReport;
+  bool get isPropertyStatementLoading => _isPropertyStatementLoading;
+  bool get propertyStatementPropertiesLoaded =>
+      _propertyStatementPropertiesLoaded;
+  String? get propertyStatementErrorMessage => _propertyStatementErrorMessage;
   bool get isLoading => _isLoading;
   bool get isStatementLoading => _isStatementLoading;
   double get accountOpeningBalance =>
@@ -353,6 +384,80 @@ class ReportsProvider with ChangeNotifier {
     _isLoading = false;
     _errorMessage = null;
     if (notify) notifyListeners();
+  }
+
+  Future<void> loadPropertyStatementProperties() async {
+    final generation = ++_propertyStatementGeneration;
+    _isPropertyStatementLoading = true;
+    _propertyStatementErrorMessage = null;
+    _propertyStatementPropertiesLoaded = false;
+    notifyListeners();
+
+    try {
+      final properties =
+          await (_propertyStatementPropertiesLoader ??
+              DatabaseHelper.instance.getPropertyStatementProperties)();
+      if (generation == _propertyStatementGeneration) {
+        _propertyStatementProperties = properties;
+        _propertyStatementPropertiesLoaded = true;
+      }
+    } catch (error) {
+      if (generation == _propertyStatementGeneration) {
+        _propertyStatementProperties = [];
+        _propertyStatementErrorMessage =
+            'تعذر تحميل قائمة العقارات: $error';
+      }
+    } finally {
+      if (generation == _propertyStatementGeneration) {
+        _isPropertyStatementLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> loadPropertyStatement(
+    int propertyId,
+    String startDate,
+    String endDate,
+  ) async {
+    final generation = ++_propertyStatementGeneration;
+    _propertyStatementReport = null;
+    _propertyStatementErrorMessage = null;
+    _isPropertyStatementLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _propertyStatementLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getPropertyStatement(
+              propertyId: propertyId,
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(propertyId, startDate, endDate);
+      if (generation == _propertyStatementGeneration) {
+        _propertyStatementReport = report;
+        _propertyStatementErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _propertyStatementGeneration) {
+        _propertyStatementReport = null;
+        _propertyStatementErrorMessage = 'تعذر تحميل كشف العقار: $error';
+      }
+    } finally {
+      if (generation == _propertyStatementGeneration) {
+        _isPropertyStatementLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearPropertyStatement() {
+    _propertyStatementGeneration++;
+    _propertyStatementReport = null;
+    _propertyStatementErrorMessage = null;
+    _isPropertyStatementLoading = false;
+    notifyListeners();
   }
 
   void _clearPropertyInquiry() {
