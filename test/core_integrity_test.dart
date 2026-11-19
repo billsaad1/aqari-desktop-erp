@@ -38,7 +38,10 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
-  const testDocuments = '/tmp/aqari_erp_flutter_test';
+  final testDirectory = Directory.systemTemp.createTempSync(
+    'aqari_erp_flutter_test_',
+  );
+  final testDocuments = testDirectory.path;
 
   setUpAll(() async {
     PermissionRuntime.activate(
@@ -46,10 +49,7 @@ void main() {
       role: 'SuperAdmin',
       permissionRows: const [],
     );
-    final staleTestDirectory = Directory(testDocuments);
-    if (await staleTestDirectory.exists()) {
-      await staleTestDirectory.delete(recursive: true);
-    }
+    await testDirectory.create(recursive: true);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pathProvider, (call) async {
           if (call.method == 'getApplicationDocumentsDirectory') {
@@ -858,7 +858,9 @@ void main() {
             isFalse,
           );
           await expectLater(
-            DatabaseHelper.instance.backupToFile('/tmp/aqari-denied-backup.db'),
+            DatabaseHelper.instance.backupToFile(
+              '$testDocuments/aqari-denied-backup.db',
+            ),
             throwsA(isA<StateError>()),
           );
         } finally {

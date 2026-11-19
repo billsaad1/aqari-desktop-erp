@@ -3,15 +3,19 @@ version: 1.0.{build}
 image: Visual Studio 2022
 
 environment:
-  FLUTTER_CHANNEL: stable
+  FLUTTER_VERSION: 3.47.9
 
 install:
-  - git clone https://github.com/flutter/flutter.git --depth 1 -b %FLUTTER_CHANNEL% C:\flutter_sdk
+  - git clone https://github.com/flutter/flutter.git --depth 1 -b %FLUTTER_VERSION% C:\flutter_sdk
   - set PATH=C:\flutter_sdk\bin;%PATH%
   - choco install innosetup --no-progress -y
   - flutter config --enable-windows-desktop
   - flutter doctor
   - flutter pub get
+
+before_build:
+  - flutter analyze --no-pub --no-fatal-infos
+  - flutter test --no-pub --reporter=expanded
 
 build_script:
   - flutter build windows --release
