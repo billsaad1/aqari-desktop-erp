@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/app_theme.dart';
@@ -256,8 +259,48 @@ class _DesktopTopBar extends StatelessWidget {
   }
 }
 
-class AppSidebar extends StatelessWidget {
+class AppSidebar extends StatefulWidget {
   const AppSidebar({super.key});
+
+  @override
+  State<AppSidebar> createState() => _AppSidebarState();
+}
+
+class _AppSidebarState extends State<AppSidebar> {
+  final ScrollController _sidebarScrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _sidebarScrollController.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleSidebarKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final direction = event.logicalKey == LogicalKeyboardKey.pageDown
+        ? 1
+        : event.logicalKey == LogicalKeyboardKey.pageUp
+        ? -1
+        : 0;
+    if (direction == 0 || !_sidebarScrollController.hasClients) {
+      return KeyEventResult.ignored;
+    }
+
+    final position = _sidebarScrollController.position;
+    final target = (position.pixels + direction * position.viewportDimension)
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+    unawaited(
+      _sidebarScrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    return KeyEventResult.handled;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -328,132 +371,164 @@ class AppSidebar extends StatelessWidget {
             child: Divider(color: Colors.white.withValues(alpha: 0.12)),
           ),
           Expanded(
-            child: Consumer<AuthProvider>(
-              builder: (context, auth, child) {
-                return ListView(
-                  padding: const EdgeInsetsDirectional.fromSTEB(12, 10, 12, 14),
-                  children: [
-                    _sectionLabel(context, 'مساحة العمل'),
-                    if (auth.canAccessScreen('dashboard'))
-                      _buildNavItem(
-                        context,
-                        'الرئيسية',
-                        Icons.grid_view_rounded,
-                        0,
-                        navProvider,
+            child: Focus(
+              canRequestFocus: false,
+              onKeyEvent: _handleSidebarKey,
+              child: Consumer<AuthProvider>(
+                builder: (context, auth, child) {
+                  return ScrollbarTheme(
+                    data: ScrollbarThemeData(
+                      thumbColor: WidgetStatePropertyAll<Color?>(
+                        Colors.white.withValues(alpha: 0.58),
                       ),
-                    if (auth.canAccessScreen('system_settings'))
-                      _buildNavItem(
-                        context,
-                        'إعدادات النظام',
-                        Icons.settings_outlined,
-                        1,
-                        navProvider,
+                      trackColor: WidgetStatePropertyAll<Color?>(
+                        Colors.white.withValues(alpha: 0.12),
                       ),
-                    if (auth.canAccessScreen('lookups'))
-                      _buildNavItem(
-                        context,
-                        'البيانات الأساسية',
-                        Icons.tune_rounded,
-                        2,
-                        navProvider,
+                      trackBorderColor: WidgetStatePropertyAll<Color?>(
+                        Colors.transparent,
                       ),
-                    if (auth.canAccessScreen('properties'))
-                      _buildNavItem(
-                        context,
-                        'العقارات والملاك',
-                        Icons.location_city_rounded,
-                        3,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('property_sales'))
-                      _buildNavItem(
-                        context,
-                        'مراجعة البيع',
-                        Icons.real_estate_agent_outlined,
-                        12,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('leasing'))
-                      _buildNavItem(
-                        context,
-                        'المستأجرون والعقود',
-                        Icons.people_alt_rounded,
-                        4,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('tenant_financial'))
-                      _buildNavItem(
-                        context,
-                        'العمليات المالية',
-                        Icons.payments_outlined,
-                        5,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('voucher_history'))
-                      _buildNavItem(
-                        context,
-                        'سجل السندات',
-                        Icons.receipt_long_rounded,
-                        10,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('accounting'))
-                      _buildNavItem(
-                        context,
-                        'الحسابات العامة',
-                        Icons.account_balance_wallet_outlined,
-                        6,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('reports'))
-                      _buildNavItem(
-                        context,
-                        'التقارير',
-                        Icons.insert_chart_outlined_rounded,
-                        7,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('sms'))
-                      _buildNavItem(
-                        context,
-                        'الرسائل النصية',
-                        Icons.mark_chat_unread_outlined,
-                        8,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('notices'))
-                      _buildNavItem(
-                        context,
-                        'إشعارات المستأجرين',
-                        Icons.mark_email_unread_outlined,
-                        11,
-                        navProvider,
-                      ),
-                    if (auth.canAccessScreen('system_services') ||
-                        auth.canAccessScreen('audit_logs')) ...[
-                      const SizedBox(height: 14),
-                      _sectionLabel(context, 'إدارة النظام'),
-                      if (auth.canAccessScreen('system_services'))
-                        _buildNavItem(
-                          context,
-                          'خدمات البرنامج',
-                          Icons.build_circle_outlined,
-                          9,
-                          navProvider,
+                    ),
+                    child: Scrollbar(
+                      controller: _sidebarScrollController,
+                      thumbVisibility: true,
+                      trackVisibility: true,
+                      interactive: true,
+                      thickness: 8,
+                      radius: const Radius.circular(8),
+                      child: ListView(
+                        controller: _sidebarScrollController,
+                        physics: const ClampingScrollPhysics(),
+                        padding: const EdgeInsetsDirectional.fromSTEB(
+                          12,
+                          10,
+                          12,
+                          14,
                         ),
-                      if (auth.canAccessScreen('audit_logs'))
-                        _buildNavItem(
-                          context,
-                          'سجل التدقيق المالي',
-                          Icons.policy_outlined,
-                          13,
-                          navProvider,
-                        ),
-                    ],
-                  ],
-                );
-              },
+                        children: [
+                          _sectionLabel(context, 'مساحة العمل'),
+                          if (auth.canAccessScreen('dashboard'))
+                            _buildNavItem(
+                              context,
+                              'الرئيسية',
+                              Icons.grid_view_rounded,
+                              0,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('system_settings'))
+                            _buildNavItem(
+                              context,
+                              'إعدادات النظام',
+                              Icons.settings_outlined,
+                              1,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('lookups'))
+                            _buildNavItem(
+                              context,
+                              'البيانات الأساسية',
+                              Icons.tune_rounded,
+                              2,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('properties'))
+                            _buildNavItem(
+                              context,
+                              'العقارات والملاك',
+                              Icons.location_city_rounded,
+                              3,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('property_sales'))
+                            _buildNavItem(
+                              context,
+                              'مراجعة البيع',
+                              Icons.real_estate_agent_outlined,
+                              12,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('leasing'))
+                            _buildNavItem(
+                              context,
+                              'المستأجرون والعقود',
+                              Icons.people_alt_rounded,
+                              4,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('tenant_financial'))
+                            _buildNavItem(
+                              context,
+                              'العمليات المالية',
+                              Icons.payments_outlined,
+                              5,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('voucher_history'))
+                            _buildNavItem(
+                              context,
+                              'سجل السندات',
+                              Icons.receipt_long_rounded,
+                              10,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('accounting'))
+                            _buildNavItem(
+                              context,
+                              'الحسابات العامة',
+                              Icons.account_balance_wallet_outlined,
+                              6,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('reports'))
+                            _buildNavItem(
+                              context,
+                              'التقارير',
+                              Icons.insert_chart_outlined_rounded,
+                              7,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('sms'))
+                            _buildNavItem(
+                              context,
+                              'الرسائل النصية',
+                              Icons.mark_chat_unread_outlined,
+                              8,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('notices'))
+                            _buildNavItem(
+                              context,
+                              'إشعارات المستأجرين',
+                              Icons.mark_email_unread_outlined,
+                              11,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('system_services') ||
+                              auth.canAccessScreen('audit_logs')) ...[
+                            const SizedBox(height: 14),
+                            _sectionLabel(context, 'إدارة النظام'),
+                            if (auth.canAccessScreen('system_services'))
+                              _buildNavItem(
+                                context,
+                                'خدمات البرنامج',
+                                Icons.build_circle_outlined,
+                                9,
+                                navProvider,
+                              ),
+                            if (auth.canAccessScreen('audit_logs'))
+                              _buildNavItem(
+                                context,
+                                'سجل التدقيق المالي',
+                                Icons.policy_outlined,
+                                13,
+                                navProvider,
+                              ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
           ),
           Padding(

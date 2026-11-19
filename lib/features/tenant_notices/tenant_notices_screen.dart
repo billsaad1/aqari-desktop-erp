@@ -1,12 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/pdf_preview_dialog.dart';
 import '../../core/permission_policy.dart';
 import '../../providers/tenant_notices_provider.dart';
 
@@ -27,9 +26,24 @@ class _TenantNoticesScreenState extends State<TenantNoticesScreen> {
   @override
   void initState() {
     super.initState();
+    PermissionRuntime.authorizationRevision.addListener(
+      _handleAuthorizationChange,
+    );
     final provider = context.read<TenantNoticesProvider>();
     _companyFuture = provider.loadCompanyInfo();
     WidgetsBinding.instance.addPostFrameCallback((_) => _reload());
+  }
+
+  @override
+  void dispose() {
+    PermissionRuntime.authorizationRevision.removeListener(
+      _handleAuthorizationChange,
+    );
+    super.dispose();
+  }
+
+  void _handleAuthorizationChange() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _reload({int? selectNoticeId}) async {
@@ -134,49 +148,37 @@ class _TenantNoticesScreenState extends State<TenantNoticesScreen> {
     }
   }
 
-  Future<void> _saveWord(Map<String, dynamic> notice) async {
+  Future<void> _previewPdf(Map<String, dynamic> notice) async {
     final id = notice['id'] as int;
+    final userId = PermissionRuntime.userId;
+    final role = PermissionRuntime.role;
     final provider = context.read<TenantNoticesProvider>();
-    late final String path;
+    bool canContinue() =>
+        mounted &&
+        _selectedNoticeId == id &&
+        _selectedNotice?['status'] == 'Issued' &&
+        PermissionRuntime.userId == userId &&
+        PermissionRuntime.role == role &&
+        PermissionRuntime.allows('notices', AppPermissionAction.print);
+
     try {
-      final bytes = await provider.buildWord(id);
-      final location = await getSaveLocation(
-        suggestedName: 'إشعار_مستأجر_$id.docx',
-        acceptedTypeGroups: const [
-          XTypeGroup(label: 'Word', extensions: ['docx']),
-        ],
+      PermissionRuntime.require('notices', AppPermissionAction.print);
+      if (!canContinue()) return;
+      final bytes = await provider.buildPdf(id);
+      if (!canContinue()) return;
+      PermissionRuntime.require('notices', AppPermissionAction.print);
+      await PdfDocumentPreviewDialog.show(
+        context: context,
+        bytes: bytes,
+        fileName: 'إشعار_مستأجر_$id',
+        preferredIntent: PdfPreviewIntent.save,
+        permissionModule: 'notices',
       );
-      if (!mounted || location == null) return;
-      path = p.extension(location.path).toLowerCase() == '.docx'
-          ? location.path
-          : '${location.path}.docx';
-      await File(path).writeAsBytes(bytes, flush: true);
     } catch (error) {
       if (mounted) {
-        _showMessage('تعذر إنشاء ملف Word أو حفظه: $error', isError: true);
+        _showMessage('تعذر إنشاء أو معاينة ملف PDF: $error', isError: true);
       }
-      return;
     }
-
-    try {
-      await provider.recordWordExport(noticeId: id, fileName: p.basename(path));
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _eventsFuture = provider.loadEvents(id);
-      });
-      _showMessage(
-        'تم حفظ الملف، لكن تعذر تسجيل التصدير في سجل التدقيق: $error',
-        isError: true,
-      );
-      return;
-    }
-
-    if (!mounted) return;
-    setState(() {
-      _eventsFuture = provider.loadEvents(id);
-    });
-    _showMessage('تم حفظ ملف Word وتسجيل عملية التصدير.');
   }
 
   void _showMessage(String message, {bool isError = false}) {
@@ -226,7 +228,7 @@ class _TenantNoticesScreenState extends State<TenantNoticesScreen> {
                     ),
                     const SizedBox(height: 2),
                     const Text(
-                      'إنشاء خطاب موثق ومعاينته قبل الإصدار أو التصدير إلى Word.',
+                      'إنشاء خطاب موثق ومعاينته قبل الإصدار، ثم حفظه أو طباعته PDF.',
                     ),
                   ],
                 ),
@@ -387,32 +389,39 @@ class _TenantNoticesScreenState extends State<TenantNoticesScreen> {
         children: [
           Padding(
             padding: const EdgeInsetsDirectional.fromSTEB(16, 12, 16, 12),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: Text(
-                    'معاينة الإشعار رقم ${notice['id']}',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
+                Text(
+                  'معاينة الإشعار رقم ${notice['id']}',
+                  style: Theme.of(context).textTheme.titleMedium,
                 ),
-                if (!issued && canEdit)
-                  TextButton.icon(
-                    onPressed: () => _editNotice(notice),
-                    icon: const Icon(Icons.edit_outlined),
-                    label: const Text('تعديل'),
-                  ),
-                if (!issued && canIssue)
-                  FilledButton.tonalIcon(
-                    onPressed: () => _issueNotice(notice),
-                    icon: const Icon(Icons.verified_outlined),
-                    label: const Text('إصدار'),
-                  ),
-                if (issued && canPrint)
-                  FilledButton.icon(
-                    onPressed: () => _saveWord(notice),
-                    icon: const Icon(Icons.description_outlined),
-                    label: const Text('حفظ Word'),
-                  ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    if (!issued && canEdit)
+                      TextButton.icon(
+                        onPressed: () => _editNotice(notice),
+                        icon: const Icon(Icons.edit_outlined),
+                        label: const Text('تعديل'),
+                      ),
+                    if (!issued && canIssue)
+                      FilledButton.tonalIcon(
+                        onPressed: () => _issueNotice(notice),
+                        icon: const Icon(Icons.verified_outlined),
+                        label: const Text('إصدار'),
+                      ),
+                    if (issued && canPrint) ...[
+                      FilledButton.icon(
+                        onPressed: () => _previewPdf(notice),
+                        icon: const Icon(Icons.picture_as_pdf_outlined),
+                        label: const Text('معاينة PDF'),
+                      ),
+                    ],
+                  ],
+                ),
               ],
             ),
           ),

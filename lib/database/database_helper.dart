@@ -15,6 +15,7 @@ import '../models/income_expense_report_model.dart';
 import '../models/invoice_ledger_reconciliation_report_model.dart';
 import '../models/property_statement_report_model.dart';
 import '../models/tenant_collection_report_model.dart';
+import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
 
@@ -3706,7 +3707,9 @@ class DatabaseHelper {
       ''',
       [installmentId],
     );
-    return rows.isEmpty ? null : (rows.first['cost_center_id'] as num?)?.toInt();
+    return rows.isEmpty
+        ? null
+        : (rows.first['cost_center_id'] as num?)?.toInt();
   }
 
   /// Same resolution as [_installmentCostCenterTx] but starting from a
@@ -3728,7 +3731,9 @@ class DatabaseHelper {
       ''',
       [contractId],
     );
-    return rows.isEmpty ? null : (rows.first['cost_center_id'] as num?)?.toInt();
+    return rows.isEmpty
+        ? null
+        : (rows.first['cost_center_id'] as num?)?.toInt();
   }
 
   /// Merges per-source amounts into one bucket per cost centre, keeping the
@@ -5746,10 +5751,9 @@ class DatabaseHelper {
     if (toDate != null) {
       where.add('a.timestamp < ?');
       args.add(
-        DateTime.parse(toDate)
-            .add(const Duration(days: 1))
-            .toIso8601String()
-            .substring(0, 10),
+        DateTime.parse(
+          toDate,
+        ).add(const Duration(days: 1)).toIso8601String().substring(0, 10),
       );
     }
     if (action != null && action.trim().isNotEmpty) {
@@ -5779,7 +5783,8 @@ class DatabaseHelper {
     }
     final clause = where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}';
     final db = await instance.database;
-    return db.rawQuery('''
+    return db.rawQuery(
+      '''
       SELECT
         a.id,
         a.timestamp,
@@ -5795,7 +5800,9 @@ class DatabaseHelper {
       $clause
       ORDER BY a.timestamp DESC, a.id DESC
       LIMIT ?
-    ''', [...args, limit]);
+    ''',
+      [...args, limit],
+    );
   }
 
   /// Distinct action codes present in the trail, for the screen's filter menu.
@@ -7270,8 +7277,7 @@ class DatabaseHelper {
       final configuredCurrency = companyRows.isEmpty
           ? null
           : companyRows.first['default_currency']?.toString().trim();
-      final currency =
-          configuredCurrency == null || configuredCurrency.isEmpty
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
           ? 'غير محددة'
           : configuredCurrency;
 
@@ -8421,6 +8427,632 @@ class DatabaseHelper {
               ),
             )
             .toList(growable: false),
+      );
+    });
+  }
+
+  /// Reconstructs tenant installment balances using only posted documents
+  /// dated on/before [asOfDate]. This is not a historical knowledge snapshot:
+  /// documents entered later with an earlier document date are reflected.
+  Future<TenantAgingReport> getTenantAgingReport({
+    required String asOfDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final year = parts[0]!;
+      final month = parts[1]!;
+      final day = parts[2]!;
+      if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+      }
+      final date = DateTime.utc(year, month, day);
+      return date.year == year && date.month == month && date.day == day;
+    }
+
+    if (!isCalendarDate(asOfDate)) {
+      throw ArgumentError('يجب إدخال تاريخ قطع صحيح بصيغة YYYY-MM-DD');
+    }
+    final parts = asOfDate.split('-').map(int.parse).toList();
+    final cutoff = DateTime.utc(parts[0], parts[1], parts[2]);
+    final exclusiveEndDate = DateTime.utc(
+      parts[0],
+      parts[1],
+      parts[2] + 1,
+    ).toIso8601String().substring(0, 10);
+    String dateOnly(Object? value) {
+      final text = value?.toString() ?? '';
+      return text.length >= 10 ? text.substring(0, 10) : text;
+    }
+
+    int minor(Object? value) =>
+        value is num ? (value.toDouble() * 100).round() : 0;
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final exceptions = <TenantAgingReviewException>[];
+      final installments = await txn.rawQuery('''
+        SELECT
+          ci.id AS installment_id,
+          ci.contract_id,
+          ci.amount AS installment_amount,
+          ci.due_date,
+          ci.status AS installment_status,
+          ci.paid_amount AS legacy_paid_amount,
+          c.status AS contract_status,
+          c.tenant_id,
+          COALESCE(t.name, 'غير محدد') AS tenant_name,
+          COALESCE(p.name, 'غير محدد') AS property_name,
+          COALESCE(u.unit_number, 'غير محدد') AS unit_number
+        FROM contract_installments ci
+        JOIN contracts c ON c.id = ci.contract_id
+        JOIN tenants t ON t.id = c.tenant_id
+        LEFT JOIN units u ON u.id = c.unit_id
+        LEFT JOIN properties p ON p.id = u.property_id
+        ORDER BY t.name COLLATE NOCASE, ci.due_date, ci.id
+      ''');
+      final installmentById = <int, Map<String, Object?>>{
+        for (final row in installments)
+          (row['installment_id'] as num).toInt(): row,
+      };
+
+      // Only a posted, internally consistent invoice linked to its contract
+      // installment replaces the rent-only schedule amount with its gross
+      // amount (total_amount already includes tax).
+      final invoiceRows = await txn.rawQuery(
+        '''
+        SELECT
+          invoice.id AS invoice_id,
+          invoice.contract_id,
+          invoice.installment_id,
+          invoice.invoice_date,
+          invoice.net_amount,
+          invoice.tax_amount,
+          invoice.total_amount,
+          installment.contract_id AS installment_contract_id,
+          installment.amount AS installment_amount,
+          contract.tenant_id,
+          COALESCE(tenant.name, 'غير محدد') AS tenant_name,
+          journal.is_posted AS journal_is_posted
+        FROM tax_invoices invoice
+        LEFT JOIN contract_installments installment
+          ON installment.id = invoice.installment_id
+        LEFT JOIN contracts contract ON contract.id = invoice.contract_id
+        LEFT JOIN tenants tenant ON tenant.id = contract.tenant_id
+        LEFT JOIN journal_entries journal
+          ON journal.id = invoice.journal_entry_id
+        WHERE invoice.invoice_date < ?
+        ORDER BY invoice.invoice_date, invoice.id
+      ''',
+        [exclusiveEndDate],
+      );
+      final invoiceAmountByInstallment = <int, int>{};
+      final invoicesSeenByInstallment = <int, int>{};
+      for (final invoice in invoiceRows) {
+        final invoiceDate = dateOnly(invoice['invoice_date']);
+        if (!isCalendarDate(invoiceDate) ||
+            invoiceDate.compareTo(asOfDate) > 0) {
+          continue;
+        }
+        final invoiceId = (invoice['invoice_id'] as num).toInt();
+        final installmentId = (invoice['installment_id'] as num?)?.toInt();
+        final totalMinor = minor(invoice['total_amount']);
+        final netMinor = minor(invoice['net_amount']);
+        final taxMinor = minor(invoice['tax_amount']);
+        final installment = installmentId == null
+            ? null
+            : installmentById[installmentId];
+        final isValid =
+            installment != null &&
+            invoice['contract_id'] is num &&
+            (invoice['contract_id'] as num).toInt() ==
+                (installment['contract_id'] as num).toInt() &&
+            invoice['installment_contract_id'] is num &&
+            (invoice['installment_contract_id'] as num).toInt() ==
+                (invoice['contract_id'] as num).toInt() &&
+            (invoice['journal_is_posted'] as num?)?.toInt() == 1 &&
+            totalMinor > 0 &&
+            netMinor + taxMinor == totalMinor;
+        if (!isValid) {
+          exceptions.add(
+            TenantAgingReviewException(
+              documentId: invoiceId,
+              documentDate: invoiceDate,
+              documentType: 'فاتورة',
+              tenantName: invoice['tenant_name']?.toString() ?? 'غير محدد',
+              amountMinor: totalMinor.abs(),
+              reason:
+                  'فاتورة غير مرحّلة أو لا ترتبط بقسط/عقد متسق؛ لم تدخل في الرصيد المؤكد.',
+            ),
+          );
+          continue;
+        }
+        final previous = invoicesSeenByInstallment[installmentId];
+        if (previous != null) {
+          invoiceAmountByInstallment.remove(installmentId);
+          exceptions.add(
+            TenantAgingReviewException(
+              documentId: invoiceId,
+              documentDate: invoiceDate,
+              documentType: 'فاتورة',
+              tenantName: invoice['tenant_name']?.toString() ?? 'غير محدد',
+              amountMinor: totalMinor,
+              reason:
+                  'تعددت الفواتير المرتبطة بالقسط؛ يلزم التحقق قبل اعتماد الإجمالي.',
+            ),
+          );
+          continue;
+        }
+        invoicesSeenByInstallment[installmentId!] = invoiceId;
+        invoiceAmountByInstallment[installmentId] = totalMinor;
+      }
+
+      final receipts = await txn.rawQuery(
+        '''
+        SELECT voucher.id AS voucher_id, voucher.tenant_id,
+               voucher.voucher_date, voucher.amount,
+               COALESCE(tenant.name, voucher.party_name, 'غير محدد') AS tenant_name
+        FROM vouchers voucher
+        JOIN journal_entries journal ON journal.id = voucher.journal_entry_id
+          AND journal.is_posted = 1
+        LEFT JOIN tenants tenant ON tenant.id = voucher.tenant_id
+        WHERE voucher.voucher_type = 'قبض مستأجر'
+          AND voucher.tenant_id IS NOT NULL
+          AND voucher.voucher_date < ?
+        ORDER BY voucher.voucher_date, voucher.id
+      ''',
+        [exclusiveEndDate],
+      );
+      final detailRows = await txn.rawQuery(
+        '''
+        SELECT allocation.id AS allocation_id, allocation.voucher_id,
+               allocation.installment_id, allocation.invoice_id,
+               allocation.amount_minor, allocation.rent_amount_minor,
+               allocation.tax_amount_minor,
+               installment.contract_id AS installment_contract_id,
+               contract.tenant_id AS installment_tenant_id,
+               invoice.contract_id AS invoice_contract_id,
+               invoice.installment_id AS invoice_installment_id,
+               invoice.invoice_date,
+               invoice_journal.is_posted AS invoice_is_posted
+        FROM collection_allocations allocation
+        LEFT JOIN contract_installments installment
+          ON installment.id = allocation.installment_id
+        LEFT JOIN contracts contract ON contract.id = installment.contract_id
+        LEFT JOIN tax_invoices invoice ON invoice.id = allocation.invoice_id
+        LEFT JOIN journal_entries invoice_journal
+          ON invoice_journal.id = invoice.journal_entry_id
+        JOIN vouchers receipt ON receipt.id = allocation.voucher_id
+        JOIN journal_entries receipt_journal
+          ON receipt_journal.id = receipt.journal_entry_id
+          AND receipt_journal.is_posted = 1
+        WHERE receipt.voucher_type = 'قبض مستأجر'
+          AND receipt.voucher_date < ?
+        ORDER BY receipt.voucher_date, receipt.id, allocation.id
+      ''',
+        [exclusiveEndDate],
+      );
+      final legacyInstallmentRows = await txn.rawQuery(
+        '''
+        SELECT legacy.voucher_id, legacy.installment_id,
+               SUM(CAST(ROUND(legacy.amount * 100) AS INTEGER)) AS amount_minor
+        FROM voucher_installment_allocations legacy
+        JOIN vouchers voucher ON voucher.id = legacy.voucher_id
+        JOIN journal_entries journal ON journal.id = voucher.journal_entry_id
+          AND journal.is_posted = 1
+        WHERE voucher.voucher_type = 'قبض مستأجر'
+          AND voucher.voucher_date < ?
+        GROUP BY legacy.voucher_id, legacy.installment_id
+      ''',
+        [exclusiveEndDate],
+      );
+      final legacyInvoiceRows = await txn.rawQuery(
+        '''
+        SELECT legacy.voucher_id, legacy.invoice_id,
+               SUM(CAST(ROUND(legacy.amount * 100) AS INTEGER)) AS amount_minor
+        FROM voucher_invoice_allocations legacy
+        JOIN vouchers voucher ON voucher.id = legacy.voucher_id
+        JOIN journal_entries journal ON journal.id = voucher.journal_entry_id
+          AND journal.is_posted = 1
+        WHERE voucher.voucher_type = 'قبض مستأجر'
+          AND voucher.voucher_date < ?
+        GROUP BY legacy.voucher_id, legacy.invoice_id
+      ''',
+        [exclusiveEndDate],
+      );
+      final detailByReceipt = <int, List<Map<String, Object?>>>{};
+      for (final row in detailRows) {
+        final id = (row['voucher_id'] as num).toInt();
+        detailByReceipt.putIfAbsent(id, () => []).add(row);
+      }
+      final legacyByReceipt = <int, Map<String, int>>{};
+      for (final row in legacyInstallmentRows) {
+        final voucherId = (row['voucher_id'] as num).toInt();
+        final installmentId = (row['installment_id'] as num).toInt();
+        legacyByReceipt.putIfAbsent(voucherId, () => {})['i:$installmentId'] =
+            (row['amount_minor'] as num).toInt();
+      }
+      for (final row in legacyInvoiceRows) {
+        final voucherId = (row['voucher_id'] as num).toInt();
+        final invoiceId = (row['invoice_id'] as num).toInt();
+        legacyByReceipt.putIfAbsent(voucherId, () => {})['f:$invoiceId'] =
+            (row['amount_minor'] as num).toInt();
+      }
+      final acceptedSourceAllocations = <int, Map<String, Object?>>{};
+      final sourceIssues = <int, String>{};
+      void addException({
+        required int id,
+        required String date,
+        required String type,
+        required String tenant,
+        required int amount,
+        required String reason,
+      }) {
+        exceptions.add(
+          TenantAgingReviewException(
+            documentId: id,
+            documentDate: date,
+            documentType: type,
+            tenantName: tenant,
+            amountMinor: amount.abs(),
+            reason: reason,
+          ),
+        );
+      }
+
+      for (final receipt in receipts) {
+        final id = (receipt['voucher_id'] as num).toInt();
+        final tenantId = (receipt['tenant_id'] as num).toInt();
+        final date = dateOnly(receipt['voucher_date']);
+        final amountMinor = minor(receipt['amount']);
+        final rows = detailByReceipt[id] ?? const <Map<String, Object?>>[];
+        final legacy = legacyByReceipt[id] ?? const <String, int>{};
+        if (amountMinor <= 0 || !isCalendarDate(date)) {
+          final reason = 'مبلغ القبض أو تاريخه غير صالح؛ لم يُخصم من الأقساط.';
+          sourceIssues[id] = reason;
+          addException(
+            id: id,
+            date: date,
+            type: 'قبض',
+            tenant: receipt['tenant_name']?.toString() ?? 'غير محدد',
+            amount: amountMinor,
+            reason: reason,
+          );
+          continue;
+        } else if (rows.isEmpty) {
+          addException(
+            id: id,
+            date: date,
+            type: 'قبض',
+            tenant: receipt['tenant_name']?.toString() ?? 'غير محدد',
+            amount: amountMinor,
+            reason: legacy.isEmpty
+                ? 'قبض مرحّل بلا تخصيص تفصيلي موثق؛ لم يُخصم من الأقساط.'
+                : 'تخصيص موجود في السجل التاريخي القديم فقط؛ لم يُكرر ولم يُخصم من الأقساط.',
+          );
+          continue;
+        }
+
+        final detailTotals = <String, int>{};
+        var detailAmount = 0;
+        var detailInvalid = false;
+        for (final row in rows) {
+          final installmentId = (row['installment_id'] as num?)?.toInt();
+          final invoiceId = (row['invoice_id'] as num?)?.toInt();
+          final installment = installmentId == null
+              ? null
+              : installmentById[installmentId];
+          final amount = (row['amount_minor'] as num).toInt();
+          final rent = (row['rent_amount_minor'] as num).toInt();
+          final tax = (row['tax_amount_minor'] as num).toInt();
+          detailAmount += amount;
+          if (rent > 0 && installmentId != null) {
+            detailTotals['i:$installmentId'] =
+                (detailTotals['i:$installmentId'] ?? 0) + rent;
+          }
+          if (invoiceId != null) {
+            detailTotals['f:$invoiceId'] =
+                (detailTotals['f:$invoiceId'] ?? 0) + amount;
+          }
+          final invoiceDate = dateOnly(row['invoice_date']);
+          if (amount <= 0 ||
+              rent < 0 ||
+              tax < 0 ||
+              rent + tax != amount ||
+              installment == null ||
+              (row['installment_tenant_id'] as num?)?.toInt() != tenantId ||
+              (invoiceId == null && tax != 0) ||
+              (invoiceId != null &&
+                  ((row['invoice_contract_id'] as num?)?.toInt() !=
+                          (installment['contract_id'] as num).toInt() ||
+                      (row['invoice_installment_id'] as num?)?.toInt() !=
+                          installmentId ||
+                      (row['invoice_is_posted'] as num?)?.toInt() != 1 ||
+                      !isCalendarDate(invoiceDate) ||
+                      invoiceDate.compareTo(asOfDate) > 0))) {
+            detailInvalid = true;
+          }
+        }
+        final expectedKeys = {...detailTotals.keys, ...legacy.keys};
+        final historicalMismatch = expectedKeys.any(
+          (key) => (detailTotals[key] ?? 0) != (legacy[key] ?? 0),
+        );
+        if (detailInvalid || detailAmount > amountMinor || historicalMismatch) {
+          sourceIssues[id] = detailInvalid
+              ? 'رابط التخصيص التفصيلي غير متسق؛ يلزم التحقق.'
+              : detailAmount > amountMinor
+              ? 'التخصيص التفصيلي يتجاوز مبلغ سند القبض.'
+              : 'سجل التخصيص التفصيلي لا يطابق سجل التخصيص التاريخي؛ يلزم التحقق.';
+          addException(
+            id: id,
+            date: date,
+            type: 'قبض',
+            tenant: receipt['tenant_name']?.toString() ?? 'غير محدد',
+            amount: amountMinor,
+            reason:
+                '${sourceIssues[id]} لم يُستخدم أي جزء من هذا السند في الرصيد المؤكد.',
+          );
+          continue;
+        }
+        for (final row in rows) {
+          final allocationId = (row['allocation_id'] as num).toInt();
+          acceptedSourceAllocations[allocationId] = {
+            'installment_id': (row['installment_id'] as num).toInt(),
+            'amount_minor': (row['amount_minor'] as num).toInt(),
+            'voucher_id': id,
+            'voucher_date': date,
+            'tenant_id': tenantId,
+          };
+        }
+        if (detailAmount < amountMinor) {
+          addException(
+            id: id,
+            date: date,
+            type: 'قبض',
+            tenant: receipt['tenant_name']?.toString() ?? 'غير محدد',
+            amount: amountMinor - detailAmount,
+            reason: 'جزء من القبض غير مخصص تفصيليًا؛ عُزل عن الرصيد المؤكد.',
+          );
+        }
+      }
+
+      final refunds = await txn.rawQuery(
+        '''
+        SELECT voucher.id AS voucher_id, voucher.tenant_id,
+               voucher.voucher_date, voucher.amount,
+               COALESCE(tenant.name, voucher.party_name, 'غير محدد') AS tenant_name
+        FROM vouchers voucher
+        JOIN journal_entries journal ON journal.id = voucher.journal_entry_id
+          AND journal.is_posted = 1
+        LEFT JOIN tenants tenant ON tenant.id = voucher.tenant_id
+        WHERE voucher.voucher_type = 'صرف مستأجر'
+          AND voucher.tenant_id IS NOT NULL
+          AND voucher.voucher_date < ?
+        ORDER BY voucher.voucher_date, voucher.id
+      ''',
+        [exclusiveEndDate],
+      );
+      final refundDetails = await txn.rawQuery(
+        '''
+        SELECT refund.refund_voucher_id AS voucher_id,
+               refund.collection_allocation_id,
+               refund.amount_minor, refund.rent_amount_minor,
+               refund.tax_amount_minor
+        FROM refund_allocations refund
+        JOIN vouchers voucher ON voucher.id = refund.refund_voucher_id
+        JOIN journal_entries journal ON journal.id = voucher.journal_entry_id
+          AND journal.is_posted = 1
+        WHERE voucher.voucher_type = 'صرف مستأجر'
+          AND voucher.voucher_date < ?
+        ORDER BY voucher.voucher_date, voucher.id, refund.id
+      ''',
+        [exclusiveEndDate],
+      );
+      final refundDetailsById = <int, List<Map<String, Object?>>>{};
+      for (final row in refundDetails) {
+        final id = (row['voucher_id'] as num).toInt();
+        refundDetailsById.putIfAbsent(id, () => []).add(row);
+      }
+      final refundedBySource = <int, int>{};
+      for (final refund in refunds) {
+        final id = (refund['voucher_id'] as num).toInt();
+        final tenantId = (refund['tenant_id'] as num).toInt();
+        final date = dateOnly(refund['voucher_date']);
+        final amountMinor = minor(refund['amount']);
+        final rows = refundDetailsById[id] ?? const <Map<String, Object?>>[];
+        var allocatedMinor = 0;
+        var invalid = amountMinor <= 0 || !isCalendarDate(date) || rows.isEmpty;
+        final totalsBySource = <int, int>{};
+        for (final row in rows) {
+          final sourceId = (row['collection_allocation_id'] as num).toInt();
+          final amount = (row['amount_minor'] as num).toInt();
+          final rent = (row['rent_amount_minor'] as num).toInt();
+          final tax = (row['tax_amount_minor'] as num).toInt();
+          allocatedMinor += amount;
+          totalsBySource[sourceId] = (totalsBySource[sourceId] ?? 0) + amount;
+          final source = acceptedSourceAllocations[sourceId];
+          if (amount <= 0 ||
+              rent < 0 ||
+              tax < 0 ||
+              rent + tax != amount ||
+              source == null ||
+              (source['tenant_id'] as int?) != tenantId ||
+              date.compareTo(source['voucher_date']?.toString() ?? '9999') <
+                  0) {
+            invalid = true;
+          }
+        }
+        if (allocatedMinor != amountMinor) invalid = true;
+        for (final entry in totalsBySource.entries) {
+          final source = acceptedSourceAllocations[entry.key];
+          final cap = (source?['amount_minor'] as int?) ?? 0;
+          final previouslyRefunded = refundedBySource[entry.key] ?? 0;
+          if (entry.value > cap - previouslyRefunded) invalid = true;
+        }
+        if (invalid) {
+          addException(
+            id: id,
+            date: date,
+            type: 'استرداد',
+            tenant: refund['tenant_name']?.toString() ?? 'غير محدد',
+            amount: amountMinor,
+            reason:
+                'استرداد غير مكتمل أو لا يرتبط بقبض تفصيلي موثق تحت سقف المصدر؛ لم يُخصم.',
+          );
+          continue;
+        }
+        for (final entry in totalsBySource.entries) {
+          refundedBySource[entry.key] =
+              (refundedBySource[entry.key] ?? 0) + entry.value;
+        }
+      }
+
+      final paidByInstallment = <int, int>{};
+      for (final entry in acceptedSourceAllocations.entries) {
+        final allocation = entry.value;
+        final installmentId = allocation['installment_id'] as int;
+        final netAmount =
+            (allocation['amount_minor'] as int) -
+            (refundedBySource[entry.key] ?? 0);
+        paidByInstallment[installmentId] =
+            (paidByInstallment[installmentId] ?? 0) + netAmount;
+      }
+
+      final reportRows = <TenantAgingReportRow>[];
+      for (final installment in installments) {
+        final installmentId = (installment['installment_id'] as num).toInt();
+        final contractId = (installment['contract_id'] as num).toInt();
+        final tenantId = (installment['tenant_id'] as num).toInt();
+        final tenantName = installment['tenant_name']?.toString() ?? 'غير محدد';
+        final dueDate = dateOnly(installment['due_date']);
+        final scheduleMinor = minor(installment['installment_amount']);
+        final isCancelled =
+            installment['installment_status'] == 'Cancelled' ||
+            installment['contract_status'] == 'Cancelled';
+        if (isCancelled) {
+          final invoiceAmount = invoiceAmountByInstallment[installmentId];
+          final allocatedPaid = paidByInstallment[installmentId] ?? 0;
+          final legacyPaid = minor(installment['legacy_paid_amount']);
+          if (invoiceAmount != null || allocatedPaid > 0 || legacyPaid != 0) {
+            final reviewAmount = [
+              scheduleMinor.abs(),
+              invoiceAmount ?? 0,
+              allocatedPaid,
+              legacyPaid.abs(),
+            ].reduce((a, b) => a > b ? a : b);
+            addException(
+              id: installmentId,
+              date: dueDate,
+              type: 'قسط ملغى',
+              tenant: tenantName,
+              amount: reviewAmount,
+              reason:
+                  'عقد أو قسط ملغى مرتبط بحركة مالية؛ استُبعد من الرصيد المؤكد ويحتاج تسوية ومراجعة.',
+            );
+          }
+          continue;
+        }
+        if (!isCalendarDate(dueDate)) {
+          addException(
+            id: installmentId,
+            date: dueDate,
+            type: 'قسط',
+            tenant: tenantName,
+            amount: minor(installment['installment_amount']),
+            reason: 'تاريخ استحقاق القسط غير صالح؛ لم يدخل في شرائح الأعمار.',
+          );
+          continue;
+        }
+        if (scheduleMinor <= 0) {
+          addException(
+            id: installmentId,
+            date: dueDate,
+            type: 'قسط',
+            tenant: tenantName,
+            amount: scheduleMinor,
+            reason: 'مبلغ القسط غير موجب؛ لم يدخل في الرصيد المؤكد.',
+          );
+          continue;
+        }
+        final obligationMinor =
+            invoiceAmountByInstallment[installmentId] ?? scheduleMinor;
+        final paid = paidByInstallment[installmentId] ?? 0;
+        if (paid > obligationMinor) {
+          addException(
+            id: installmentId,
+            date: dueDate,
+            type: 'قسط',
+            tenant: tenantName,
+            amount: paid - obligationMinor,
+            reason:
+                'تخصيصات القبض الصالحة تجاوزت قيمة الالتزام؛ عُزل الفائض عن أعمار الذمم.',
+          );
+        }
+        final confirmedPaid = paid.clamp(0, obligationMinor).toInt();
+        final balance = obligationMinor - confirmedPaid;
+        if (balance == 0) continue;
+        final dueParts = dueDate.split('-').map(int.parse).toList();
+        final due = DateTime.utc(dueParts[0], dueParts[1], dueParts[2]);
+        final daysOverdue = due.isAfter(cutoff)
+            ? 0
+            : cutoff.difference(due).inDays;
+        final bucket = due.isAfter(cutoff)
+            ? TenantAgingBucket.notDue
+            : daysOverdue <= 30
+            ? TenantAgingBucket.days0To30
+            : daysOverdue <= 60
+            ? TenantAgingBucket.days31To60
+            : daysOverdue <= 90
+            ? TenantAgingBucket.days61To90
+            : TenantAgingBucket.days91Plus;
+        reportRows.add(
+          TenantAgingReportRow(
+            installmentId: installmentId,
+            contractId: contractId,
+            tenantId: tenantId,
+            tenantName: tenantName,
+            propertyName:
+                installment['property_name']?.toString() ?? 'غير محدد',
+            unitNumber: installment['unit_number']?.toString() ?? 'غير محدد',
+            dueDate: dueDate,
+            daysOverdue: daysOverdue,
+            bucket: bucket,
+            obligationMinor: obligationMinor,
+            paidMinor: confirmedPaid,
+            balanceMinor: balance,
+          ),
+        );
+      }
+      reportRows.sort((a, b) {
+        final tenant = a.tenantName.toLowerCase().compareTo(
+          b.tenantName.toLowerCase(),
+        );
+        if (tenant != 0) return tenant;
+        final due = a.dueDate.compareTo(b.dueDate);
+        return due != 0 ? due : a.installmentId.compareTo(b.installmentId);
+      });
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return TenantAgingReport(
+        asOfDate: asOfDate,
+        currency: currency,
+        rows: reportRows,
+        exceptions: exceptions,
       );
     });
   }

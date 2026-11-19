@@ -9,6 +9,7 @@ import '../models/owner_statement_account_model.dart';
 import '../models/property_statement_report_model.dart';
 import '../models/tenant_statement_account_model.dart';
 import '../models/tenant_collection_report_model.dart';
+import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 
 class ReportsProvider with ChangeNotifier {
@@ -58,7 +59,10 @@ class ReportsProvider with ChangeNotifier {
     invoiceLedgerReconciliationLoader,
     Future<TenantCollectionReport> Function(String startDate, String endDate)?
     tenantCollectionReportLoader,
-    Future<List<Map<String, dynamic>>> Function()? propertyStatementPropertiesLoader,
+    Future<TenantAgingReport> Function(String asOfDate)?
+    tenantAgingReportLoader,
+    Future<List<Map<String, dynamic>>> Function()?
+    propertyStatementPropertiesLoader,
     Future<PropertyStatementReport> Function(
       int propertyId,
       String startDate,
@@ -78,6 +82,7 @@ class ReportsProvider with ChangeNotifier {
        _incomeExpenseReportLoader = incomeExpenseReportLoader,
        _invoiceLedgerReconciliationLoader = invoiceLedgerReconciliationLoader,
        _tenantCollectionReportLoader = tenantCollectionReportLoader,
+       _tenantAgingReportLoader = tenantAgingReportLoader,
        _propertyStatementPropertiesLoader = propertyStatementPropertiesLoader,
        _propertyStatementLoader = propertyStatementLoader;
 
@@ -138,6 +143,8 @@ class ReportsProvider with ChangeNotifier {
     String endDate,
   )?
   _tenantCollectionReportLoader;
+  final Future<TenantAgingReport> Function(String asOfDate)?
+  _tenantAgingReportLoader;
 
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _occupancyStats = [];
@@ -150,6 +157,7 @@ class ReportsProvider with ChangeNotifier {
   IncomeExpenseReport? _incomeExpenseReport;
   InvoiceLedgerReconciliationReport? _invoiceLedgerReconciliationReport;
   TenantCollectionReport? _tenantCollectionReport;
+  TenantAgingReport? _tenantAgingReport;
   List<TenantStatementAccount> _tenantStatementAccounts = [];
   List<OwnerStatementAccount> _ownerStatementAccounts = [];
   List<Map<String, dynamic>> _dueInstallments = [];
@@ -169,6 +177,7 @@ class ReportsProvider with ChangeNotifier {
   int _incomeExpenseGeneration = 0;
   int _invoiceLedgerReconciliationGeneration = 0;
   int _tenantCollectionGeneration = 0;
+  int _tenantAgingGeneration = 0;
   int _alertsGeneration = 0;
   int _propertyInquiryGeneration = 0;
   int _propertyStatementGeneration = 0;
@@ -197,6 +206,7 @@ class ReportsProvider with ChangeNotifier {
   String? _incomeExpenseErrorMessage;
   String? _invoiceLedgerReconciliationErrorMessage;
   String? _tenantCollectionErrorMessage;
+  String? _tenantAgingErrorMessage;
 
   bool _isLoading = false;
   bool _isStatementLoading = false;
@@ -212,6 +222,7 @@ class ReportsProvider with ChangeNotifier {
   bool _isIncomeExpenseReportLoading = false;
   bool _isInvoiceLedgerReconciliationLoading = false;
   bool _isTenantCollectionReportLoading = false;
+  bool _isTenantAgingReportLoading = false;
 
   List<Map<String, dynamic>> get searchResults => _searchResults;
   List<Map<String, dynamic>> get occupancyStats => _occupancyStats;
@@ -242,6 +253,9 @@ class ReportsProvider with ChangeNotifier {
   int get invoiceLedgerReconciliationGeneration =>
       _invoiceLedgerReconciliationGeneration;
   TenantCollectionReport? get tenantCollectionReport => _tenantCollectionReport;
+  TenantAgingReport? get tenantAgingReport => _tenantAgingReport;
+  bool get isTenantAgingReportLoading => _isTenantAgingReportLoading;
+  String? get tenantAgingErrorMessage => _tenantAgingErrorMessage;
   List<TenantStatementAccount> get tenantStatementAccounts =>
       List.unmodifiable(_tenantStatementAccounts);
   bool get isTenantStatementLoading => _isTenantStatementLoading;
@@ -293,7 +307,8 @@ class ReportsProvider with ChangeNotifier {
   String? get propertyInquiryErrorMessage => _propertyInquiryErrorMessage;
   List<Map<String, dynamic>> get propertyStatementProperties =>
       List.unmodifiable(_propertyStatementProperties);
-  PropertyStatementReport? get propertyStatementReport => _propertyStatementReport;
+  PropertyStatementReport? get propertyStatementReport =>
+      _propertyStatementReport;
   bool get isPropertyStatementLoading => _isPropertyStatementLoading;
   bool get propertyStatementPropertiesLoaded =>
       _propertyStatementPropertiesLoaded;
@@ -342,6 +357,7 @@ class ReportsProvider with ChangeNotifier {
     _incomeExpenseGeneration++;
     _invoiceLedgerReconciliationGeneration++;
     _tenantCollectionGeneration++;
+    _tenantAgingGeneration++;
     _propertyInquiryGeneration++;
     _searchResults = [];
     _occupancyStats = [];
@@ -354,6 +370,7 @@ class ReportsProvider with ChangeNotifier {
     _incomeExpenseReport = null;
     _invoiceLedgerReconciliationReport = null;
     _tenantCollectionReport = null;
+    _tenantAgingReport = null;
     _tenantStatementAccounts = [];
     _ownerStatementAccounts = [];
     _isTenantStatementLoading = false;
@@ -380,6 +397,8 @@ class ReportsProvider with ChangeNotifier {
     _invoiceLedgerReconciliationErrorMessage = null;
     _isTenantCollectionReportLoading = false;
     _tenantCollectionErrorMessage = null;
+    _isTenantAgingReportLoading = false;
+    _tenantAgingErrorMessage = null;
     _clearPropertyInquiry();
     _isLoading = false;
     _errorMessage = null;
@@ -404,8 +423,7 @@ class ReportsProvider with ChangeNotifier {
     } catch (error) {
       if (generation == _propertyStatementGeneration) {
         _propertyStatementProperties = [];
-        _propertyStatementErrorMessage =
-            'تعذر تحميل قائمة العقارات: $error';
+        _propertyStatementErrorMessage = 'تعذر تحميل قائمة العقارات: $error';
       }
     } finally {
       if (generation == _propertyStatementGeneration) {
@@ -1090,6 +1108,46 @@ class ReportsProvider with ChangeNotifier {
     _tenantCollectionReport = null;
     _isTenantCollectionReportLoading = false;
     _tenantCollectionErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  Future<void> loadTenantAgingReport(String asOfDate) async {
+    final generation = ++_tenantAgingGeneration;
+    _tenantAgingReport = null;
+    _tenantAgingErrorMessage = null;
+    _isTenantAgingReportLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _tenantAgingReportLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getTenantAgingReport(
+              asOfDate: asOfDate,
+            )
+          : await loader(asOfDate);
+      if (generation == _tenantAgingGeneration) {
+        _tenantAgingReport = report;
+        _tenantAgingErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _tenantAgingGeneration) {
+        _tenantAgingReport = null;
+        _tenantAgingErrorMessage =
+            'تعذر تحميل تقرير أعمار ديون المستأجرين: $error';
+      }
+    } finally {
+      if (generation == _tenantAgingGeneration) {
+        _isTenantAgingReportLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearTenantAgingReport({bool notify = true}) {
+    _tenantAgingGeneration++;
+    _tenantAgingReport = null;
+    _isTenantAgingReportLoading = false;
+    _tenantAgingErrorMessage = null;
     if (notify) notifyListeners();
   }
 
