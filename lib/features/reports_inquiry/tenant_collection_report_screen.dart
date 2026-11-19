@@ -177,7 +177,7 @@ class _TenantCollectionReportScreenState
                       ),
                       const SizedBox(height: 4),
                       const Text(
-                        'يعرض سندات القبض المرحلة مرة واحدة. لا يخصم الرد من صافي التحصيل إلا إذا ثبت ارتباطه بمصدر قبض مرحّل مطابق؛ الصرف غير المرتبط لا يعامل كاسترداد.',
+                        'يعرض سندات القبض المرحلة مرة واحدة، ويقارن سجل التخصيص التفصيلي بالسجلات التاريخية للقسط والفاتورة. لا يخصم الاسترداد إلا إذا طابق السند والمصدر وبقي ضمن سقف التخصيص الأصلي.',
                       ),
                       const SizedBox(height: 16),
                       Wrap(
@@ -307,6 +307,10 @@ class _TenantCollectionReportScreenState
             report.unverifiedRefundsMinor,
             report.currency,
           ),
+          _countMetric(
+            'سندات تخصيصها يحتاج مراجعة',
+            report.sourceMismatchVoucherCount,
+          ),
         ],
       ),
     ),
@@ -327,6 +331,18 @@ class _TenantCollectionReportScreenState
           ],
         ),
       );
+
+  Widget _countMetric(String label, int count) => SizedBox(
+    width: 205,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: Theme.of(context).textTheme.bodySmall),
+        const SizedBox(height: 2),
+        Text('$count', style: const TextStyle(fontWeight: FontWeight.bold)),
+      ],
+    ),
+  );
 
   Widget _table(TenantCollectionReport report) => Card(
     clipBehavior: Clip.antiAlias,
@@ -349,6 +365,7 @@ class _TenantCollectionReportScreenState
               DataColumn(label: Text('المبلغ الموقّع'), numeric: true),
               DataColumn(label: Text('سند القبض المصدر')),
               DataColumn(label: Text('حالة التخصيص')),
+              DataColumn(label: Text('اتساق مرجع التخصيص')),
             ],
             rows: [
               for (final row in report.rows)
@@ -401,6 +418,19 @@ class _TenantCollectionReportScreenState
                                   row.allocationStatus == 'مرتبط ومطابق'
                               ? Colors.green.shade700
                               : Colors.orange.shade800,
+                        ),
+                      ),
+                    ),
+                    DataCell(
+                      Text(
+                        row.sourceConsistencyStatus,
+                        style: TextStyle(
+                          color: row.sourceMismatchCount > 0
+                              ? Colors.red.shade700
+                              : row.sourceConsistencyStatus ==
+                                    'لا توجد تخصيصات للمقارنة'
+                              ? Colors.grey.shade700
+                              : Colors.green.shade700,
                         ),
                       ),
                     ),

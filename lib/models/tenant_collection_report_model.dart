@@ -8,6 +8,8 @@ class TenantCollectionReportRow {
     required this.isVerifiedRefund,
     required this.amountMinor,
     required this.allocationStatus,
+    this.sourceConsistencyStatus = 'غير محدد',
+    this.sourceMismatchCount = 0,
     required this.sourceReceiptVoucherIds,
     required this.linkedAllocationMinor,
   });
@@ -22,6 +24,8 @@ class TenantCollectionReportRow {
   /// Receipts are positive; source-linked refunds are negative.
   final int amountMinor;
   final String allocationStatus;
+  final String sourceConsistencyStatus;
+  final int sourceMismatchCount;
   final String sourceReceiptVoucherIds;
   final int linkedAllocationMinor;
 }
@@ -51,6 +55,8 @@ class TenantCollectionReport {
   int get netCollectedMinor => grossReceiptsMinor - linkedRefundsMinor;
   int get unverifiedRefundCount =>
       rows.where((row) => row.isRefund && !row.isVerifiedRefund).length;
+  int get sourceMismatchVoucherCount =>
+      rows.where((row) => row.sourceMismatchCount > 0).length;
   int get unallocatedReceiptsMinor => rows
       .where((row) => !row.isRefund && row.amountMinor > 0)
       .fold(

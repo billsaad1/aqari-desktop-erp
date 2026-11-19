@@ -101,6 +101,13 @@ void main() {
         'due_date': '2026-03-01',
         'status': 'Paid',
       });
+      final thirdInstallmentId = await db.insert('contract_installments', {
+        'contract_id': contractId,
+        'amount': 12.0,
+        'paid_amount': 12.0,
+        'due_date': '2026-04-01',
+        'status': 'Paid',
+      });
 
       Future<int> insertJournal({
         required String date,
@@ -188,6 +195,103 @@ void main() {
         'journal_entry_id': unallocatedJournalId,
         'description': 'قبض مرحل بلا تخصيص تفصيلي مثبت',
       });
+      final legacyOnlyJournalId = await insertJournal(
+        date: '2026-02-11',
+        debitAccount: cashAccountId,
+        creditAccount: tenantAccountId,
+        amount: 8.0,
+        isPosted: 1,
+      );
+      final legacyOnlyReceiptId = await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2026-02-11',
+        'amount': 8.0,
+        'tenant_id': tenantId,
+        'party_name': tenant['name'],
+        'journal_entry_id': legacyOnlyJournalId,
+        'description': 'تخصيص محفوظ في الجدول القديم دون التخصيص التفصيلي',
+      });
+      await db.insert('voucher_installment_allocations', {
+        'voucher_id': legacyOnlyReceiptId,
+        'installment_id': secondInstallmentId,
+        'amount': 8.0,
+      });
+      final invoiceId = await db.insert('tax_invoices', {
+        'contract_id': contractId,
+        'installment_id': secondInstallmentId,
+        'invoice_date': '2026-02-09',
+        'net_amount': 60.0,
+        'total_amount': 60.0,
+        'tax_amount': 0.0,
+        'tax_rate': 0.0,
+      });
+      final invoiceOnlyJournalId = await insertJournal(
+        date: '2026-02-11',
+        debitAccount: cashAccountId,
+        creditAccount: tenantAccountId,
+        amount: 12.0,
+        isPosted: 1,
+      );
+      final invoiceOnlyReceiptId = await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2026-02-11',
+        'amount': 12.0,
+        'tenant_id': tenantId,
+        'party_name': tenant['name'],
+        'journal_entry_id': invoiceOnlyJournalId,
+        'description': 'مرجع فاتورة قديم دون تخصيص تفصيلي',
+      });
+      await db.insert('voucher_invoice_allocations', {
+        'voucher_id': invoiceOnlyReceiptId,
+        'invoice_id': invoiceId,
+        'amount': 12.0,
+      });
+      final invoiceRentMismatchId = await db.insert('tax_invoices', {
+        'contract_id': contractId,
+        'installment_id': thirdInstallmentId,
+        'invoice_date': '2026-02-09',
+        'net_amount': 12.0,
+        'total_amount': 15.0,
+        'tax_amount': 3.0,
+        'tax_rate': 25.0,
+      });
+      final invoiceRentMismatchJournalId = await insertJournal(
+        date: '2026-02-11',
+        debitAccount: cashAccountId,
+        creditAccount: tenantAccountId,
+        amount: 15.0,
+        isPosted: 1,
+      );
+      final invoiceRentMismatchReceiptId = await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2026-02-11',
+        'amount': 15.0,
+        'tenant_id': tenantId,
+        'party_name': tenant['name'],
+        'journal_entry_id': invoiceRentMismatchJournalId,
+        'description': 'قسط تاريخي لا يطابق جزء الإيجار التفصيلي',
+      });
+      await db.insert('voucher_invoice_allocations', {
+        'voucher_id': invoiceRentMismatchReceiptId,
+        'invoice_id': invoiceRentMismatchId,
+        'amount': 15.0,
+      });
+      await db.insert('voucher_installment_allocations', {
+        'voucher_id': invoiceRentMismatchReceiptId,
+        'installment_id': thirdInstallmentId,
+        'amount': 10.0,
+      });
+      // Simulate a corrupt historical row predating the current write guard.
+      await db.execute('DROP TRIGGER collection_allocations_voucher_valid');
+      final invoiceRentMismatchAllocationId = await db
+          .insert('collection_allocations', {
+            'voucher_id': invoiceRentMismatchReceiptId,
+            'installment_id': thirdInstallmentId,
+            'invoice_id': invoiceRentMismatchId,
+            'amount_minor': 1500,
+            'rent_amount_minor': 1200,
+            'tax_amount_minor': 300,
+          });
       final endDateJournalId = await insertJournal(
         date: '2026-02-28T23:59:59',
         debitAccount: cashAccountId,
@@ -226,6 +330,30 @@ void main() {
         'collection_allocation_id': collectionAllocationId,
         'amount_minor': 2500,
         'rent_amount_minor': 2500,
+        'tax_amount_minor': 0,
+      });
+
+      final sourceMismatchRefundJournalId = await insertJournal(
+        date: '2026-02-12',
+        debitAccount: tenantAccountId,
+        creditAccount: cashAccountId,
+        amount: 5.0,
+        isPosted: 1,
+      );
+      final sourceMismatchRefundId = await db.insert('vouchers', {
+        'voucher_type': 'صرف مستأجر',
+        'voucher_date': '2026-02-12',
+        'amount': 5.0,
+        'tenant_id': tenantId,
+        'party_name': tenant['name'],
+        'journal_entry_id': sourceMismatchRefundJournalId,
+        'description': 'رد مربوط بمصدر تخصيص قسط مخالف تاريخيًا',
+      });
+      await db.insert('refund_allocations', {
+        'refund_voucher_id': sourceMismatchRefundId,
+        'collection_allocation_id': invoiceRentMismatchAllocationId,
+        'amount_minor': 500,
+        'rent_amount_minor': 500,
         'tax_amount_minor': 0,
       });
 
@@ -308,30 +436,252 @@ void main() {
       final rowsById = {for (final row in report.rows) row.voucherId: row};
       expect(rowsById.keys, containsAll([receiptId, unallocatedReceiptId]));
       expect(rowsById.keys, contains(endDateReceiptId));
-      expect(rowsById.keys, containsAll([verifiedRefundId, reviewRefundId]));
+      expect(rowsById.keys, contains(legacyOnlyReceiptId));
+      expect(rowsById.keys, contains(invoiceOnlyReceiptId));
+      expect(rowsById.keys, contains(invoiceRentMismatchReceiptId));
+      expect(
+        rowsById.keys,
+        containsAll([verifiedRefundId, sourceMismatchRefundId, reviewRefundId]),
+      );
       expect(rowsById, isNot(contains(unrelatedPayoutVoucherId)));
       expect(rowsById, isNot(contains(unpostedVoucherId)));
       expect(rowsById, isNot(contains(outsideVoucherId)));
-      expect(rowsById.values, hasLength(5));
+      expect(rowsById.values, hasLength(9));
       expect(rowsById[receiptId]?.allocationStatus, 'التخصيص مطابق');
       expect(rowsById[receiptId]?.linkedAllocationMinor, 10000);
+      expect(
+        rowsById[receiptId]?.sourceConsistencyStatus,
+        'سجلات التخصيص متطابقة',
+      );
       expect(
         rowsById[unallocatedReceiptId]?.allocationStatus,
         'لا يوجد تخصيص مثبت',
       );
+      expect(
+        rowsById[unallocatedReceiptId]?.sourceConsistencyStatus,
+        'لا توجد تخصيصات للمقارنة',
+      );
+      expect(
+        rowsById[legacyOnlyReceiptId]?.sourceMismatchCount,
+        greaterThan(0),
+      );
+      expect(
+        rowsById[legacyOnlyReceiptId]?.sourceConsistencyStatus,
+        'يوجد اختلاف في سجل أو رابط التخصيص',
+      );
+      expect(
+        rowsById[invoiceOnlyReceiptId]?.sourceMismatchCount,
+        greaterThan(0),
+      );
+      expect(
+        rowsById[invoiceOnlyReceiptId]?.sourceConsistencyStatus,
+        'يوجد اختلاف في سجل أو رابط التخصيص',
+      );
+      expect(
+        rowsById[invoiceRentMismatchReceiptId]?.allocationStatus,
+        'التخصيص مطابق',
+      );
+      expect(
+        rowsById[invoiceRentMismatchReceiptId]?.sourceMismatchCount,
+        greaterThan(0),
+      );
+      expect(
+        rowsById[invoiceRentMismatchReceiptId]?.sourceConsistencyStatus,
+        'يوجد اختلاف في سجل أو رابط التخصيص',
+      );
+      expect(rowsById[sourceMismatchRefundId]?.isVerifiedRefund, isFalse);
+      expect(
+        rowsById[sourceMismatchRefundId]?.allocationStatus,
+        'تخصيص مصدر القبض يحتاج مراجعة',
+      );
       expect(rowsById[verifiedRefundId]?.isVerifiedRefund, isTrue);
       expect(rowsById[verifiedRefundId]?.amountMinor, -2500);
+      expect(
+        rowsById[verifiedRefundId]?.sourceConsistencyStatus,
+        'المصدر متسق وتحت السقف',
+      );
       expect(rowsById[verifiedRefundId]?.sourceReceiptVoucherIds, '$receiptId');
       expect(rowsById[reviewRefundId]?.isVerifiedRefund, isFalse);
-      expect(rowsById[reviewRefundId]?.allocationStatus, 'يحتاج مراجعة');
-      expect(report.grossReceiptsMinor, 17500);
+      expect(
+        rowsById[reviewRefundId]?.allocationStatus,
+        'مجموع تخصيصات الاسترداد لا يطابق السند',
+      );
+      expect(report.grossReceiptsMinor, 21000);
       expect(report.linkedRefundsMinor, 2500);
-      expect(report.unverifiedRefundsMinor, 1000);
-      expect(report.netCollectedMinor, 15000);
-      expect(report.unallocatedReceiptsMinor, 7500);
-      expect(report.receiptCount, 3);
+      expect(report.unverifiedRefundsMinor, 1500);
+      expect(report.netCollectedMinor, 18500);
+      expect(report.unallocatedReceiptsMinor, 9500);
+      expect(report.receiptCount, 6);
       expect(report.linkedRefundCount, 1);
-      expect(report.unverifiedRefundCount, 1);
+      expect(report.unverifiedRefundCount, 2);
+      expect(report.sourceMismatchVoucherCount, 5);
+    },
+  );
+
+  test(
+    'does not verify refunds after cumulative source cap is exceeded',
+    () async {
+      final db = await helper.database;
+      await helper.insertTenantWithAccount({
+        'name': 'مستأجر تجاوز سقف الاسترداد',
+        'mobile': '777810002',
+      });
+      final tenant = (await db.query(
+        'tenants',
+        columns: ['id', 'name', 'account_id'],
+        where: 'name = ?',
+        whereArgs: ['مستأجر تجاوز سقف الاسترداد'],
+        limit: 1,
+      )).single;
+      final tenantId = (tenant['id'] as num).toInt();
+      final tenantAccountId = (tenant['account_id'] as num).toInt();
+      final cashAccountId =
+          ((await db.query(
+                    'accounts',
+                    columns: ['id'],
+                    where: 'code = ?',
+                    whereArgs: ['1101'],
+                    limit: 1,
+                  )).single['id']
+                  as num)
+              .toInt();
+      final ownerId = await db.insert('owners', {'name': 'مالك سقف الاسترداد'});
+      final propertyId = await db.insert('properties', {
+        'name': 'عقار سقف الاسترداد',
+        'owner_id': ownerId,
+      });
+      final unitId = await db.insert('units', {
+        'property_id': propertyId,
+        'unit_number': 'C-20',
+        'status': 'مؤجرة',
+      });
+      final contractId = await db.insert('contracts', {
+        'tenant_id': tenantId,
+        'unit_id': unitId,
+        'start_date': '2026-01-01',
+        'end_date': '2026-12-31',
+        'rent_amount': 100.0,
+        'status': 'Active',
+      });
+      final installmentId = await db.insert('contract_installments', {
+        'contract_id': contractId,
+        'amount': 100.0,
+        'paid_amount': 100.0,
+        'due_date': '2026-02-01',
+        'status': 'Paid',
+      });
+
+      Future<int> insertJournal({
+        required String date,
+        required int debitAccount,
+        required int creditAccount,
+        required double amount,
+      }) async {
+        final entryId = await db.insert('journal_entries', {
+          'entry_date': date,
+          'description': 'refund-cap fixture',
+          'is_posted': 1,
+        });
+        await db.insert('journal_lines', {
+          'journal_entry_id': entryId,
+          'account_id': debitAccount,
+          'debit': amount,
+          'credit': 0.0,
+        });
+        await db.insert('journal_lines', {
+          'journal_entry_id': entryId,
+          'account_id': creditAccount,
+          'debit': 0.0,
+          'credit': amount,
+        });
+        return entryId;
+      }
+
+      final receiptJournalId = await insertJournal(
+        date: '2026-02-10',
+        debitAccount: cashAccountId,
+        creditAccount: tenantAccountId,
+        amount: 100.0,
+      );
+      final receiptId = await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2026-02-10',
+        'amount': 100.0,
+        'tenant_id': tenantId,
+        'party_name': tenant['name'],
+        'journal_entry_id': receiptJournalId,
+        'description': 'المصدر الأصلي للاسترداد',
+      });
+      await db.insert('voucher_installment_allocations', {
+        'voucher_id': receiptId,
+        'installment_id': installmentId,
+        'amount': 100.0,
+      });
+      final sourceAllocationId = await db.insert('collection_allocations', {
+        'voucher_id': receiptId,
+        'installment_id': installmentId,
+        'invoice_id': null,
+        'amount_minor': 10000,
+        'rent_amount_minor': 10000,
+        'tax_amount_minor': 0,
+      });
+
+      Future<int> insertRefund({
+        required String date,
+        required double amount,
+      }) async {
+        final journalId = await insertJournal(
+          date: date,
+          debitAccount: tenantAccountId,
+          creditAccount: cashAccountId,
+          amount: amount,
+        );
+        final voucherId = await db.insert('vouchers', {
+          'voucher_type': 'صرف مستأجر',
+          'voucher_date': date,
+          'amount': amount,
+          'tenant_id': tenantId,
+          'party_name': tenant['name'],
+          'journal_entry_id': journalId,
+          'description': 'استرداد تاريخي للاختبار',
+        });
+        await db.insert('refund_allocations', {
+          'refund_voucher_id': voucherId,
+          'collection_allocation_id': sourceAllocationId,
+          'amount_minor': (amount * 100).round(),
+          'rent_amount_minor': (amount * 100).round(),
+          'tax_amount_minor': 0,
+        });
+        return voucherId;
+      }
+
+      final firstRefund = await insertRefund(date: '2026-02-11', amount: 40.0);
+      final secondRefund = await insertRefund(date: '2026-02-12', amount: 30.0);
+      // Simulate legacy rows written before the cumulative source-cap trigger.
+      await db.execute('DROP TRIGGER refund_allocations_source_cap');
+      final overCapRefund = await insertRefund(
+        date: '2026-02-13',
+        amount: 31.0,
+      );
+
+      final report = await helper.getTenantCollectionReport(
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      final rowsById = {for (final row in report.rows) row.voucherId: row};
+      for (final refundId in [firstRefund, secondRefund, overCapRefund]) {
+        expect(rowsById[refundId]?.isVerifiedRefund, isFalse);
+        expect(
+          rowsById[refundId]?.allocationStatus,
+          'مجموع الاستردادات يتجاوز سقف المصدر',
+        );
+      }
+      expect(report.grossReceiptsMinor, 10000);
+      expect(report.linkedRefundsMinor, 0);
+      expect(report.unverifiedRefundsMinor, 10100);
+      expect(report.netCollectedMinor, 10000);
+      expect(report.unverifiedRefundCount, 3);
+      expect(report.sourceMismatchVoucherCount, 3);
     },
   );
 

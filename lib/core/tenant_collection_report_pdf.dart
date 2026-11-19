@@ -28,6 +28,7 @@ class TenantCollectionReportPdf {
             PrintUtils.formatPdfAmount(row.amountMinor / 100),
             row.isRefund ? row.sourceReceiptVoucherIds : '—',
             row.allocationStatus,
+            row.sourceConsistencyStatus,
           ],
         )
         .toList(growable: false);
@@ -124,7 +125,7 @@ class TenantCollectionReportPdf {
           ),
           pw.SizedBox(height: 6),
           pw.Text(
-            'يشمل التقرير سندات القبض المرحلة فقط. لا يُخصم الاسترداد من صافي التحصيل إلا إذا ارتبط بمصدر قبض مرحّل للمستأجر نفسه وبمبلغ تخصيص مطابق. الصرف غير المرتبط ليس استردادًا في هذا التقرير.',
+            'يقارن التقرير التخصيصات التفصيلية بالسجلات التاريخية للفواتير والأقساط. لا يُخصم الاسترداد إلا إذا طابق سند الرد والمصدر المرحّل للمستأجر نفسه وبقي ضمن سقف المبلغ الأصلي بعد احتساب جميع الردود.',
             textDirection: pw.TextDirection.rtl,
             style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
           ),
@@ -150,6 +151,7 @@ class TenantCollectionReportPdf {
                 'المبلغ (موقّع)',
                 'سند القبض المصدر',
                 'حالة التخصيص',
+                'اتساق مرجع التخصيص',
               ],
               data: rows,
               headerStyle: pw.TextStyle(
@@ -173,6 +175,7 @@ class TenantCollectionReportPdf {
                 4: pw.FlexColumnWidth(1.2),
                 5: pw.FlexColumnWidth(1.2),
                 6: pw.FlexColumnWidth(1.8),
+                7: pw.FlexColumnWidth(2.2),
               },
               border: pw.TableBorder.all(
                 color: PrintUtils.softBorder,
@@ -183,7 +186,8 @@ class TenantCollectionReportPdf {
           pw.Text(
             'عدد سندات القبض: ${report.receiptCount}    '
             'الاستردادات الموثقة والمطابقة: ${report.linkedRefundCount}    '
-            'استردادات للمراجعة: ${report.unverifiedRefundCount}',
+            'استردادات للمراجعة: ${report.unverifiedRefundCount}    '
+            'سندات تخصيصها يحتاج مراجعة: ${report.sourceMismatchVoucherCount}',
             textDirection: pw.TextDirection.rtl,
             style: pw.TextStyle(
               fontSize: 8,
