@@ -13,7 +13,7 @@ install:
   - flutter doctor
   - flutter pub get
 
-test_script:
+before_build:
   - flutter analyze --no-pub --no-fatal-infos
   - flutter test --no-pub --reporter=expanded
 
