@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/permission_policy.dart';
 import '../core/tenant_notice_docx.dart';
+import '../core/tenant_notice_pdf.dart';
 import '../database/database_helper.dart';
 
 class TenantNoticesProvider with ChangeNotifier {
@@ -105,6 +106,35 @@ class TenantNoticesProvider with ChangeNotifier {
 
   Future<Map<String, dynamic>?> loadCompanyInfo() =>
       DatabaseHelper.instance.getCompanyInfo();
+
+  Future<Uint8List> buildPdf(int noticeId) async {
+    PermissionRuntime.require('notices', AppPermissionAction.print);
+    final userId = PermissionRuntime.userId;
+    final role = PermissionRuntime.role;
+    void requireCurrentPrintAuthorization() {
+      if (PermissionRuntime.userId != userId ||
+          PermissionRuntime.role != role) {
+        throw StateError('تغيرت الجلسة قبل إكمال تصدير الإشعار');
+      }
+      PermissionRuntime.require('notices', AppPermissionAction.print);
+    }
+
+    final notice = await DatabaseHelper.instance.getTenantNotice(noticeId);
+    requireCurrentPrintAuthorization();
+    if (notice == null) throw StateError('الإشعار غير موجود');
+    if (notice['status'] != 'Issued') {
+      throw StateError('يجب إصدار الإشعار قبل تصديره إلى PDF');
+    }
+
+    final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+    requireCurrentPrintAuthorization();
+    final bytes = await TenantNoticePdfBuilder.build(
+      notice: notice,
+      companyInfo: companyInfo,
+    );
+    requireCurrentPrintAuthorization();
+    return bytes;
+  }
 
   Future<Uint8List> buildWord(int noticeId) async {
     PermissionRuntime.require('notices', AppPermissionAction.print);
