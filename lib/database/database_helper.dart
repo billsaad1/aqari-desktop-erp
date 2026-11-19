@@ -10,6 +10,7 @@ import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
 import '../models/account_statement_report_model.dart';
 import '../models/income_expense_report_model.dart';
+import '../models/tenant_collection_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
 
@@ -6901,6 +6902,181 @@ class DatabaseHelper {
                 accountType: row['account_type']?.toString() ?? '',
                 debitMinor: (row['debit_minor'] as num).toInt(),
                 creditMinor: (row['credit_minor'] as num).toInt(),
+              ),
+            )
+            .toList(growable: false),
+      );
+    });
+  }
+
+  Future<TenantCollectionReport> getTenantCollectionReport({
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final year = parts[0]!;
+      final month = parts[1]!;
+      final day = parts[2]!;
+      if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+      }
+      final date = DateTime(year, month, day);
+      return date.year == year && date.month == month && date.day == day;
+    }
+
+    if (!isCalendarDate(startDate) || !isCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final endParts = endDate.split('-').map(int.parse).toList();
+    final exclusiveEndDate = DateTime.utc(
+      endParts[0],
+      endParts[1],
+      endParts[2] + 1,
+    ).toIso8601String().substring(0, 10);
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final rows = await txn.rawQuery(
+        '''
+        WITH receipt_allocations AS (
+          SELECT voucher_id, SUM(amount_minor) AS allocated_minor
+          FROM collection_allocations
+          GROUP BY voucher_id
+        ), report_rows AS (
+          SELECT
+            v.id AS voucher_id,
+            v.voucher_date AS voucher_date,
+            v.tenant_id AS tenant_id,
+            COALESCE(t.name, v.party_name, 'غير محدد') AS tenant_name,
+            0 AS is_refund,
+            CAST(ROUND(v.amount * 100) AS INTEGER) AS amount_minor,
+            COALESCE(ra.allocated_minor, 0) AS linked_allocation_minor,
+            '' AS source_receipt_voucher_ids,
+            CASE
+              WHEN v.amount <= 0 THEN 'مبلغ السند غير صالح'
+              WHEN COALESCE(ra.allocated_minor, 0) =
+                CAST(ROUND(v.amount * 100) AS INTEGER)
+                THEN 'التخصيص مطابق'
+              WHEN COALESCE(ra.allocated_minor, 0) = 0
+                THEN 'لا يوجد تخصيص مثبت'
+              WHEN COALESCE(ra.allocated_minor, 0) <
+                CAST(ROUND(v.amount * 100) AS INTEGER)
+                THEN 'التخصيص غير مكتمل'
+              ELSE 'التخصيص يتجاوز مبلغ السند'
+            END AS allocation_status,
+            0 AS is_verified_refund
+          FROM vouchers v
+          JOIN tenants t ON t.id = v.tenant_id
+          JOIN journal_entries je
+            ON je.id = v.journal_entry_id AND je.is_posted = 1
+          LEFT JOIN receipt_allocations ra ON ra.voucher_id = v.id
+          WHERE v.voucher_type = 'قبض مستأجر'
+            AND v.tenant_id IS NOT NULL
+            AND v.voucher_date >= ?
+            AND v.voucher_date < ?
+
+          UNION ALL
+
+          SELECT
+            v.id AS voucher_id,
+            v.voucher_date AS voucher_date,
+            v.tenant_id AS tenant_id,
+            COALESCE(t.name, v.party_name, 'غير محدد') AS tenant_name,
+            1 AS is_refund,
+            -ABS(CAST(ROUND(v.amount * 100) AS INTEGER)) AS amount_minor,
+            COALESCE(SUM(ra.amount_minor), 0) AS linked_allocation_minor,
+            COALESCE(GROUP_CONCAT(DISTINCT source.id), '')
+              AS source_receipt_voucher_ids,
+            CASE
+              WHEN v.amount > 0
+                AND COALESCE(SUM(ra.amount_minor), 0) =
+                  CAST(ROUND(v.amount * 100) AS INTEGER)
+                AND SUM(CASE
+                  WHEN source.voucher_type = 'قبض مستأجر'
+                    AND source.tenant_id = v.tenant_id
+                    AND source_entry.is_posted = 1 THEN 0
+                  ELSE 1
+                END) = 0
+                THEN 'مرتبط ومطابق'
+              ELSE 'يحتاج مراجعة'
+            END AS allocation_status,
+            CASE
+              WHEN v.amount > 0
+                AND COALESCE(SUM(ra.amount_minor), 0) =
+                  CAST(ROUND(v.amount * 100) AS INTEGER)
+                AND SUM(CASE
+                  WHEN source.voucher_type = 'قبض مستأجر'
+                    AND source.tenant_id = v.tenant_id
+                    AND source_entry.is_posted = 1 THEN 0
+                  ELSE 1
+                END) = 0 THEN 1
+              ELSE 0
+            END AS is_verified_refund
+          FROM vouchers v
+          JOIN tenants t ON t.id = v.tenant_id
+          JOIN journal_entries je
+            ON je.id = v.journal_entry_id AND je.is_posted = 1
+          JOIN refund_allocations ra ON ra.refund_voucher_id = v.id
+          JOIN collection_allocations ca
+            ON ca.id = ra.collection_allocation_id
+          JOIN vouchers source ON source.id = ca.voucher_id
+          LEFT JOIN journal_entries source_entry
+            ON source_entry.id = source.journal_entry_id
+          WHERE v.voucher_type = 'صرف مستأجر'
+            AND v.tenant_id IS NOT NULL
+            AND v.voucher_date >= ?
+            AND v.voucher_date < ?
+          GROUP BY v.id, v.voucher_date, v.tenant_id, t.name,
+                   v.party_name, v.amount
+        )
+        SELECT * FROM report_rows
+        ORDER BY voucher_date, voucher_id, is_refund
+        ''',
+        [startDate, exclusiveEndDate, startDate, exclusiveEndDate],
+      );
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return TenantCollectionReport(
+        startDate: startDate,
+        endDate: endDate,
+        currency: currency,
+        rows: rows
+            .map(
+              (row) => TenantCollectionReportRow(
+                voucherId: (row['voucher_id'] as num).toInt(),
+                voucherDate: row['voucher_date']?.toString() ?? '',
+                tenantId: (row['tenant_id'] as num).toInt(),
+                tenantName: row['tenant_name']?.toString() ?? 'غير محدد',
+                isRefund: (row['is_refund'] as num).toInt() == 1,
+                isVerifiedRefund:
+                    (row['is_verified_refund'] as num).toInt() == 1,
+                amountMinor: (row['amount_minor'] as num).toInt(),
+                allocationStatus:
+                    row['allocation_status']?.toString() ?? 'غير محدد',
+                sourceReceiptVoucherIds:
+                    row['source_receipt_voucher_ids']?.toString() ?? '',
+                linkedAllocationMinor: (row['linked_allocation_minor'] as num)
+                    .toInt(),
               ),
             )
             .toList(growable: false),
