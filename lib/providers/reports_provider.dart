@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/financial_close_readiness_report_model.dart';
 import '../models/financial_position_report_model.dart';
 import '../models/income_expense_report_model.dart';
 import '../models/invoice_ledger_reconciliation_report_model.dart';
@@ -38,6 +39,11 @@ class ReportsProvider with ChangeNotifier {
       String endDate,
     )?
     ownerStatementLoader,
+    Future<FinancialCloseReadinessReport> Function(
+      String startDate,
+      String endDate,
+    )?
+    financialCloseReadinessLoader,
     Future<FinancialPositionReport> Function(String asOfDate)?
     financialPositionReportLoader,
     Future<TrialBalanceReport> Function(String startDate, String endDate)?
@@ -58,6 +64,7 @@ class ReportsProvider with ChangeNotifier {
        _tenantStatementLoader = tenantStatementLoader,
        _ownerStatementAccountsLoader = ownerStatementAccountsLoader,
        _ownerStatementLoader = ownerStatementLoader,
+       _financialCloseReadinessLoader = financialCloseReadinessLoader,
        _financialPositionReportLoader = financialPositionReportLoader,
        _trialBalanceLoader = trialBalanceLoader,
        _incomeExpenseReportLoader = incomeExpenseReportLoader,
@@ -92,6 +99,11 @@ class ReportsProvider with ChangeNotifier {
     String endDate,
   )?
   _ownerStatementLoader;
+  final Future<FinancialCloseReadinessReport> Function(
+    String startDate,
+    String endDate,
+  )?
+  _financialCloseReadinessLoader;
   final Future<FinancialPositionReport> Function(String asOfDate)?
   _financialPositionReportLoader;
   final Future<TrialBalanceReport> Function(String startDate, String endDate)?
@@ -114,6 +126,7 @@ class ReportsProvider with ChangeNotifier {
   AccountStatementReport? _accountStatementReport;
   AccountStatementReport? _tenantStatementReport;
   AccountStatementReport? _ownerStatementReport;
+  FinancialCloseReadinessReport? _financialCloseReadinessReport;
   FinancialPositionReport? _financialPositionReport;
   TrialBalanceReport? _trialBalanceReport;
   IncomeExpenseReport? _incomeExpenseReport;
@@ -132,6 +145,7 @@ class ReportsProvider with ChangeNotifier {
   int _tenantAccountsGeneration = 0;
   int _ownerStatementGeneration = 0;
   int _ownerAccountsGeneration = 0;
+  int _financialCloseReadinessGeneration = 0;
   int _financialPositionReportGeneration = 0;
   int _trialBalanceGeneration = 0;
   int _incomeExpenseGeneration = 0;
@@ -153,6 +167,7 @@ class ReportsProvider with ChangeNotifier {
   String? _tenantAccountsErrorMessage;
   String? _ownerStatementErrorMessage;
   String? _ownerAccountsErrorMessage;
+  String? _financialCloseReadinessErrorMessage;
   String? _financialPositionReportErrorMessage;
   String? _trialBalanceErrorMessage;
   String? _incomeExpenseErrorMessage;
@@ -167,6 +182,7 @@ class ReportsProvider with ChangeNotifier {
   bool _isOwnerStatementLoading = false;
   bool _isOwnerAccountsLoading = false;
   bool _ownerStatementAccountsLoaded = false;
+  bool _isFinancialCloseReadinessLoading = false;
   bool _isFinancialPositionReportLoading = false;
   bool _isTrialBalanceLoading = false;
   bool _isIncomeExpenseReportLoading = false;
@@ -178,6 +194,14 @@ class ReportsProvider with ChangeNotifier {
   AccountStatementReport? get accountStatementReport => _accountStatementReport;
   AccountStatementReport? get tenantStatementReport => _tenantStatementReport;
   AccountStatementReport? get ownerStatementReport => _ownerStatementReport;
+  FinancialCloseReadinessReport? get financialCloseReadinessReport =>
+      _financialCloseReadinessReport;
+  int get financialCloseReadinessGeneration =>
+      _financialCloseReadinessGeneration;
+  bool get isFinancialCloseReadinessLoading =>
+      _isFinancialCloseReadinessLoading;
+  String? get financialCloseReadinessErrorMessage =>
+      _financialCloseReadinessErrorMessage;
   FinancialPositionReport? get financialPositionReport =>
       _financialPositionReport;
   int get financialPositionReportGeneration =>
@@ -281,6 +305,7 @@ class ReportsProvider with ChangeNotifier {
     _tenantAccountsGeneration++;
     _ownerStatementGeneration++;
     _ownerAccountsGeneration++;
+    _financialCloseReadinessGeneration++;
     _financialPositionReportGeneration++;
     _trialBalanceGeneration++;
     _incomeExpenseGeneration++;
@@ -292,6 +317,7 @@ class ReportsProvider with ChangeNotifier {
     _accountStatementReport = null;
     _tenantStatementReport = null;
     _ownerStatementReport = null;
+    _financialCloseReadinessReport = null;
     _financialPositionReport = null;
     _trialBalanceReport = null;
     _incomeExpenseReport = null;
@@ -305,6 +331,8 @@ class ReportsProvider with ChangeNotifier {
     _isOwnerStatementLoading = false;
     _isOwnerAccountsLoading = false;
     _ownerStatementAccountsLoaded = false;
+    _isFinancialCloseReadinessLoading = false;
+    _financialCloseReadinessErrorMessage = null;
     _isFinancialPositionReportLoading = false;
     _financialPositionReportErrorMessage = null;
     _isStatementLoading = false;
@@ -784,6 +812,50 @@ class ReportsProvider with ChangeNotifier {
     _financialPositionReport = null;
     _isFinancialPositionReportLoading = false;
     _financialPositionReportErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  Future<void> loadFinancialCloseReadinessReport(
+    String startDate,
+    String endDate,
+  ) async {
+    final generation = ++_financialCloseReadinessGeneration;
+    _financialCloseReadinessReport = null;
+    _financialCloseReadinessErrorMessage = null;
+    _isFinancialCloseReadinessLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _financialCloseReadinessLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getFinancialCloseReadinessReport(
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(startDate, endDate);
+      if (generation == _financialCloseReadinessGeneration) {
+        _financialCloseReadinessReport = report;
+        _financialCloseReadinessErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _financialCloseReadinessGeneration) {
+        _financialCloseReadinessReport = null;
+        _financialCloseReadinessErrorMessage =
+            'تعذر إعداد مراجعة جاهزية الإقفال: $error';
+      }
+    } finally {
+      if (generation == _financialCloseReadinessGeneration) {
+        _isFinancialCloseReadinessLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearFinancialCloseReadinessReport({bool notify = true}) {
+    _financialCloseReadinessGeneration++;
+    _financialCloseReadinessReport = null;
+    _isFinancialCloseReadinessLoading = false;
+    _financialCloseReadinessErrorMessage = null;
     if (notify) notifyListeners();
   }
 

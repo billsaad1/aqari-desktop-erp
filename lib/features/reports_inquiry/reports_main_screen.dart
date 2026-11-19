@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import 'financial_close_readiness_screen.dart';
 import 'smart_inquiry_screen.dart';
 import 'occupancy_report_screen.dart';
 import 'account_statement_screen.dart';
@@ -26,7 +27,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 11, vsync: this);
+    _tabController = TabController(length: 12, vsync: this);
   }
 
   @override
@@ -56,6 +57,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
             Tab(text: 'تحصيل المستأجرين'),
             Tab(text: 'مطابقة الفواتير والقيود'),
             Tab(text: 'قائمة المركز المالي'),
+            Tab(text: 'مراجعة جاهزية الإقفال'),
           ],
         ),
         Expanded(
@@ -73,6 +75,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
               TenantCollectionReportScreen(),
               InvoiceLedgerReconciliationScreen(),
               FinancialPositionScreen(),
+              FinancialCloseReadinessScreen(),
             ],
           ),
         ),
