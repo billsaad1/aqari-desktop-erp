@@ -369,6 +369,54 @@ void main() {
     });
   });
 
+  group('v22 to v23 upgrade', () {
+    test('rebuilds audit_logs, keeps rows and backfills the actor', () async {
+      final db = await helper.database;
+      await db.execute('DROP TABLE audit_logs');
+      await db.execute('''
+        CREATE TABLE audit_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER,
+          action TEXT NOT NULL,
+          details TEXT,
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+      ''');
+      await db.insert('audit_logs', {
+        'user_id': 1,
+        'action': 'PRE_MIGRATION_EVENT',
+        'details': jsonEncode({'legacy': true}),
+        'timestamp': '2026-01-01T00:00:00',
+      });
+      await db.execute('PRAGMA user_version = 22');
+      await helper.close();
+
+      final upgraded = await helper.database;
+      final rows = await upgraded.query(
+        'audit_logs',
+        where: "action = 'PRE_MIGRATION_EVENT'",
+      );
+      expect(rows, hasLength(1));
+      expect(rows.single['details'], jsonEncode({'legacy': true}));
+      expect(rows.single['actor_name'], isNotNull);
+
+      final definition =
+          (await upgraded.rawQuery(
+                "SELECT sql FROM sqlite_master WHERE name = 'audit_logs'",
+              )).single['sql']
+              as String;
+      expect(definition, isNot(contains('REFERENCES users')));
+      final triggers = (await upgraded.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_logs'",
+      )).map((row) => row['name']).toSet();
+      expect(
+        triggers,
+        containsAll(['audit_logs_no_update', 'audit_logs_no_delete']),
+      );
+    });
+  });
+
   group('the viewer never shows a raw action code', () {
     test('every action literal written by the database has a label', () {
       final source = File(
