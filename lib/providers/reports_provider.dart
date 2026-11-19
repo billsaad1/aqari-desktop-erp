@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 import '../models/account_statement_report_model.dart';
 import '../models/income_expense_report_model.dart';
+import '../models/invoice_ledger_reconciliation_report_model.dart';
 import '../models/owner_statement_account_model.dart';
 import '../models/tenant_statement_account_model.dart';
 import '../models/tenant_collection_report_model.dart';
@@ -40,6 +41,11 @@ class ReportsProvider with ChangeNotifier {
     trialBalanceLoader,
     Future<IncomeExpenseReport> Function(String startDate, String endDate)?
     incomeExpenseReportLoader,
+    Future<InvoiceLedgerReconciliationReport> Function(
+      String startDate,
+      String endDate,
+    )?
+    invoiceLedgerReconciliationLoader,
     Future<TenantCollectionReport> Function(String startDate, String endDate)?
     tenantCollectionReportLoader,
   }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
@@ -51,6 +57,7 @@ class ReportsProvider with ChangeNotifier {
        _ownerStatementLoader = ownerStatementLoader,
        _trialBalanceLoader = trialBalanceLoader,
        _incomeExpenseReportLoader = incomeExpenseReportLoader,
+       _invoiceLedgerReconciliationLoader = invoiceLedgerReconciliationLoader,
        _tenantCollectionReportLoader = tenantCollectionReportLoader;
 
   final Future<List<Map<String, dynamic>>> Function()?
@@ -85,6 +92,11 @@ class ReportsProvider with ChangeNotifier {
   _trialBalanceLoader;
   final Future<IncomeExpenseReport> Function(String startDate, String endDate)?
   _incomeExpenseReportLoader;
+  final Future<InvoiceLedgerReconciliationReport> Function(
+    String startDate,
+    String endDate,
+  )?
+  _invoiceLedgerReconciliationLoader;
   final Future<TenantCollectionReport> Function(
     String startDate,
     String endDate,
@@ -98,6 +110,7 @@ class ReportsProvider with ChangeNotifier {
   AccountStatementReport? _ownerStatementReport;
   TrialBalanceReport? _trialBalanceReport;
   IncomeExpenseReport? _incomeExpenseReport;
+  InvoiceLedgerReconciliationReport? _invoiceLedgerReconciliationReport;
   TenantCollectionReport? _tenantCollectionReport;
   List<TenantStatementAccount> _tenantStatementAccounts = [];
   List<OwnerStatementAccount> _ownerStatementAccounts = [];
@@ -114,6 +127,7 @@ class ReportsProvider with ChangeNotifier {
   int _ownerAccountsGeneration = 0;
   int _trialBalanceGeneration = 0;
   int _incomeExpenseGeneration = 0;
+  int _invoiceLedgerReconciliationGeneration = 0;
   int _tenantCollectionGeneration = 0;
   int _alertsGeneration = 0;
   int _propertyInquiryGeneration = 0;
@@ -133,6 +147,7 @@ class ReportsProvider with ChangeNotifier {
   String? _ownerAccountsErrorMessage;
   String? _trialBalanceErrorMessage;
   String? _incomeExpenseErrorMessage;
+  String? _invoiceLedgerReconciliationErrorMessage;
   String? _tenantCollectionErrorMessage;
 
   bool _isLoading = false;
@@ -145,6 +160,7 @@ class ReportsProvider with ChangeNotifier {
   bool _ownerStatementAccountsLoaded = false;
   bool _isTrialBalanceLoading = false;
   bool _isIncomeExpenseReportLoading = false;
+  bool _isInvoiceLedgerReconciliationLoading = false;
   bool _isTenantCollectionReportLoading = false;
 
   List<Map<String, dynamic>> get searchResults => _searchResults;
@@ -155,6 +171,10 @@ class ReportsProvider with ChangeNotifier {
   TrialBalanceReport? get trialBalanceReport => _trialBalanceReport;
   IncomeExpenseReport? get incomeExpenseReport => _incomeExpenseReport;
   int get incomeExpenseReportGeneration => _incomeExpenseGeneration;
+  InvoiceLedgerReconciliationReport? get invoiceLedgerReconciliationReport =>
+      _invoiceLedgerReconciliationReport;
+  int get invoiceLedgerReconciliationGeneration =>
+      _invoiceLedgerReconciliationGeneration;
   TenantCollectionReport? get tenantCollectionReport => _tenantCollectionReport;
   List<TenantStatementAccount> get tenantStatementAccounts =>
       List.unmodifiable(_tenantStatementAccounts);
@@ -170,6 +190,10 @@ class ReportsProvider with ChangeNotifier {
   String? get trialBalanceErrorMessage => _trialBalanceErrorMessage;
   bool get isIncomeExpenseReportLoading => _isIncomeExpenseReportLoading;
   String? get incomeExpenseErrorMessage => _incomeExpenseErrorMessage;
+  bool get isInvoiceLedgerReconciliationLoading =>
+      _isInvoiceLedgerReconciliationLoading;
+  String? get invoiceLedgerReconciliationErrorMessage =>
+      _invoiceLedgerReconciliationErrorMessage;
   bool get isTenantCollectionReportLoading => _isTenantCollectionReportLoading;
   String? get tenantCollectionErrorMessage => _tenantCollectionErrorMessage;
   String? get ownerStatementErrorMessage => _ownerStatementErrorMessage;
@@ -241,6 +265,7 @@ class ReportsProvider with ChangeNotifier {
     _ownerAccountsGeneration++;
     _trialBalanceGeneration++;
     _incomeExpenseGeneration++;
+    _invoiceLedgerReconciliationGeneration++;
     _tenantCollectionGeneration++;
     _propertyInquiryGeneration++;
     _searchResults = [];
@@ -250,6 +275,7 @@ class ReportsProvider with ChangeNotifier {
     _ownerStatementReport = null;
     _trialBalanceReport = null;
     _incomeExpenseReport = null;
+    _invoiceLedgerReconciliationReport = null;
     _tenantCollectionReport = null;
     _tenantStatementAccounts = [];
     _ownerStatementAccounts = [];
@@ -269,6 +295,8 @@ class ReportsProvider with ChangeNotifier {
     _trialBalanceErrorMessage = null;
     _isIncomeExpenseReportLoading = false;
     _incomeExpenseErrorMessage = null;
+    _isInvoiceLedgerReconciliationLoading = false;
+    _invoiceLedgerReconciliationErrorMessage = null;
     _isTenantCollectionReportLoading = false;
     _tenantCollectionErrorMessage = null;
     _clearPropertyInquiry();
@@ -735,6 +763,50 @@ class ReportsProvider with ChangeNotifier {
     _incomeExpenseReport = null;
     _isIncomeExpenseReportLoading = false;
     _incomeExpenseErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  Future<void> loadInvoiceLedgerReconciliationReport(
+    String startDate,
+    String endDate,
+  ) async {
+    final generation = ++_invoiceLedgerReconciliationGeneration;
+    _invoiceLedgerReconciliationReport = null;
+    _invoiceLedgerReconciliationErrorMessage = null;
+    _isInvoiceLedgerReconciliationLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _invoiceLedgerReconciliationLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getInvoiceLedgerReconciliationReport(
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(startDate, endDate);
+      if (generation == _invoiceLedgerReconciliationGeneration) {
+        _invoiceLedgerReconciliationReport = report;
+        _invoiceLedgerReconciliationErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _invoiceLedgerReconciliationGeneration) {
+        _invoiceLedgerReconciliationReport = null;
+        _invoiceLedgerReconciliationErrorMessage =
+            'تعذر تحميل تقرير مطابقة الفواتير: $error';
+      }
+    } finally {
+      if (generation == _invoiceLedgerReconciliationGeneration) {
+        _isInvoiceLedgerReconciliationLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearInvoiceLedgerReconciliationReport({bool notify = true}) {
+    _invoiceLedgerReconciliationGeneration++;
+    _invoiceLedgerReconciliationReport = null;
+    _isInvoiceLedgerReconciliationLoading = false;
+    _invoiceLedgerReconciliationErrorMessage = null;
     if (notify) notifyListeners();
   }
 
