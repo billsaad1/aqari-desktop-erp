@@ -9,6 +9,7 @@ import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/income_expense_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
 
@@ -6808,6 +6809,101 @@ class DatabaseHelper {
         endDate: endDate,
         currency: currency,
         rows: accountRows.map(TrialBalanceRow.fromMap).toList(growable: false),
+      );
+    });
+  }
+
+  Future<IncomeExpenseReport> getIncomeExpenseReport({
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final year = parts[0]!;
+      final month = parts[1]!;
+      final day = parts[2]!;
+      if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+      }
+      final date = DateTime(year, month, day);
+      return date.year == year && date.month == month && date.day == day;
+    }
+
+    if (!isCalendarDate(startDate) || !isCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final endParts = endDate.split('-').map(int.parse).toList();
+    final exclusiveEndDate = DateTime.utc(
+      endParts[0],
+      endParts[1],
+      endParts[2] + 1,
+    ).toIso8601String().substring(0, 10);
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final accountRows = await txn.rawQuery(
+        '''
+        SELECT
+          a.id AS account_id,
+          a.code AS account_code,
+          a.name AS account_name,
+          a.account_type AS account_type,
+          CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+            AS debit_minor,
+          CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+            AS credit_minor
+        FROM journal_lines jl
+        JOIN journal_entries je ON je.id = jl.journal_entry_id
+        JOIN accounts a ON a.id = jl.account_id
+        WHERE je.is_posted = 1
+          AND je.entry_date >= ?
+          AND je.entry_date < ?
+          AND a.account_type IN ('Revenue', 'Expense')
+        GROUP BY a.id, a.code, a.name, a.account_type
+        HAVING ROUND(COALESCE(SUM(jl.debit), 0) * 100) != 0
+            OR ROUND(COALESCE(SUM(jl.credit), 0) * 100) != 0
+        ORDER BY CASE a.account_type WHEN 'Revenue' THEN 0 ELSE 1 END,
+                 a.code COLLATE NOCASE, a.id
+        ''',
+        [startDate, exclusiveEndDate],
+      );
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return IncomeExpenseReport(
+        startDate: startDate,
+        endDate: endDate,
+        currency: currency,
+        rows: accountRows
+            .map(
+              (row) => IncomeExpenseAccountRow(
+                accountId: (row['account_id'] as num).toInt(),
+                accountCode: row['account_code']?.toString() ?? '',
+                accountName: row['account_name']?.toString() ?? '',
+                accountType: row['account_type']?.toString() ?? '',
+                debitMinor: (row['debit_minor'] as num).toInt(),
+                creditMinor: (row['credit_minor'] as num).toInt(),
+              ),
+            )
+            .toList(growable: false),
       );
     });
   }

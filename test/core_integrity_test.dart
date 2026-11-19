@@ -3934,6 +3934,13 @@ void main() {
         'credit': 0.0,
         'description': 'يجب استبعاده',
       });
+      await db.insert('journal_lines', {
+        'journal_entry_id': unpostedId,
+        'account_id': revenueId,
+        'debit': 0.0,
+        'credit': 9999.0,
+        'description': 'يجب استبعاد إيراد غير مرحل',
+      });
 
       final assetReport = await helper.getLedgerAccountStatement(
         accountId: assetId,
@@ -4071,6 +4078,32 @@ void main() {
       );
       await expectLater(
         helper.getTrialBalance(startDate: '2026-03-01', endDate: '2026-02-28'),
+        throwsArgumentError,
+      );
+      final incomeExpenseReport = await helper.getIncomeExpenseReport(
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      final reportedRevenue = incomeExpenseReport.rows.singleWhere(
+        (row) => row.accountId == revenueId,
+      );
+      final reportedExpense = incomeExpenseReport.rows.singleWhere(
+        (row) => row.accountId == expenseId,
+      );
+      expect(reportedRevenue.accountType, 'Revenue');
+      expect(reportedRevenue.debitMinor, 500);
+      expect(reportedRevenue.creditMinor, 2000);
+      expect(reportedRevenue.netMinor, 1500);
+      expect(reportedExpense.accountType, 'Expense');
+      expect(reportedExpense.debitMinor, 0);
+      expect(reportedExpense.creditMinor, 800);
+      expect(reportedExpense.netMinor, -800);
+      expect(incomeExpenseReport.startDate, '2026-02-01');
+      await expectLater(
+        helper.getIncomeExpenseReport(
+          startDate: '2026-02-30',
+          endDate: '2026-02-28',
+        ),
         throwsArgumentError,
       );
 
@@ -4280,9 +4313,19 @@ void main() {
           ),
           throwsStateError,
         );
-        await expectLater(helper.getTenantStatementAccounts(), throwsStateError);
+        await expectLater(
+          helper.getTenantStatementAccounts(),
+          throwsStateError,
+        );
         await expectLater(
           helper.getTrialBalance(
+            startDate: '2026-02-01',
+            endDate: '2026-02-28',
+          ),
+          throwsStateError,
+        );
+        await expectLater(
+          helper.getIncomeExpenseReport(
             startDate: '2026-02-01',
             endDate: '2026-02-28',
           ),
