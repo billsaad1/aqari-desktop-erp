@@ -3521,6 +3521,84 @@ class DatabaseHelper {
     if (rows.isEmpty) throw ArgumentError('مركز التكلفة المحدد غير موجود');
   }
 
+  /// Resolves the cost centre a leasing movement belongs to by following
+  /// installment -> contract -> unit -> property.
+  ///
+  /// Returns null when the chain has no assigned cost centre. Callers must
+  /// leave the journal line unattributed in that case rather than guess: a
+  /// historical movement with no proven source stays unallocated.
+  Future<int?> _installmentCostCenterTx(
+    DatabaseExecutor executor,
+    Object? installmentId,
+  ) async {
+    if (installmentId is! int || installmentId <= 0) return null;
+    final rows = await executor.rawQuery(
+      '''
+      SELECT p.cost_center_id AS cost_center_id
+      FROM contract_installments ci
+      JOIN contracts c ON c.id = ci.contract_id
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
+      WHERE ci.id = ?
+      LIMIT 1
+      ''',
+      [installmentId],
+    );
+    return rows.isEmpty ? null : (rows.first['cost_center_id'] as num?)?.toInt();
+  }
+
+  /// Same resolution as [_installmentCostCenterTx] but starting from a
+  /// contract, used when the movement is recorded per contract, not per
+  /// installment.
+  Future<int?> _contractCostCenterTx(
+    DatabaseExecutor executor,
+    Object? contractId,
+  ) async {
+    if (contractId is! int || contractId <= 0) return null;
+    final rows = await executor.rawQuery(
+      '''
+      SELECT p.cost_center_id AS cost_center_id
+      FROM contracts c
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
+      WHERE c.id = ?
+      LIMIT 1
+      ''',
+      [contractId],
+    );
+    return rows.isEmpty ? null : (rows.first['cost_center_id'] as num?)?.toInt();
+  }
+
+  /// Merges per-source amounts into one bucket per cost centre, keeping the
+  /// total exact to the cent. A null centre forms its own bucket so that
+  /// unattributed sources are never folded into a property's centre.
+  List<Map<String, Object?>> _groupMinorByCostCenter(
+    List<({int? costCenterId, int amountMinor})> parts,
+  ) {
+    final totals = <int?, int>{};
+    for (final part in parts) {
+      totals[part.costCenterId] =
+          (totals[part.costCenterId] ?? 0) + part.amountMinor;
+    }
+    final totalMinor = totals.values.fold<int>(0, (sum, value) => sum + value);
+    final sourceMinor = parts.fold<int>(
+      0,
+      (sum, part) => sum + part.amountMinor,
+    );
+    if (totalMinor != sourceMinor) {
+      throw StateError('تعذر توزيع المبلغ على مراكز التكلفة دون فقدان قروش');
+    }
+    return totals.entries
+        .where((entry) => entry.value != 0)
+        .map(
+          (entry) => <String, Object?>{
+            'cost_center_id': entry.key,
+            'amount_minor': entry.value,
+          },
+        )
+        .toList();
+  }
+
   // --- Owner & Property Operations ---
 
   Future<void> _requireOptionalLookup(
@@ -5234,15 +5312,41 @@ class DatabaseHelper {
             ? 'تحصيل دفعة مستأجر'
             : 'سداد فاتورة داخلية رقم $invoiceId',
       });
-      await txn.insert('journal_lines', {
-        'journal_entry_id': journalId,
-        'account_id': tenantAccountId,
-        'debit': 0.0,
-        'credit': amount,
-        'description': invoiceId == null
-            ? 'تحصيل دفعة مستأجر'
-            : 'سداد فاتورة داخلية رقم $invoiceId',
-      });
+      final receiptLineDescription = invoiceId == null
+          ? 'تحصيل دفعة مستأجر'
+          : 'سداد فاتورة داخلية رقم $invoiceId';
+      final receiptParts = <({int? costCenterId, int amountMinor})>[];
+      for (final installment in verifiedUpdates) {
+        receiptParts.add((
+          costCenterId: await _installmentCostCenterTx(txn, installment['id']),
+          amountMinor: InternalTax.toMinorUnits(
+            (installment['allocated_amount'] as num).toDouble(),
+          ),
+        ));
+      }
+      final principalMinor = receiptParts.fold<int>(
+        0,
+        (sum, part) => sum + part.amountMinor,
+      );
+      if (allocatedCents != principalMinor) {
+        receiptParts.add((
+          costCenterId: await _installmentCostCenterTx(
+            txn,
+            invoiceInstallmentId,
+          ),
+          amountMinor: allocatedCents - principalMinor,
+        ));
+      }
+      for (final bucket in _groupMinorByCostCenter(receiptParts)) {
+        await txn.insert('journal_lines', {
+          'journal_entry_id': journalId,
+          'account_id': tenantAccountId,
+          'debit': 0.0,
+          'credit': (bucket['amount_minor'] as int) / 100.0,
+          'cost_center_id': bucket['cost_center_id'],
+          'description': receiptLineDescription,
+        });
+      }
       await _updateBalanceTx(txn, cashAccountId, amount, 0.0);
       await _updateBalanceTx(txn, tenantAccountId, 0.0, amount);
 
@@ -5854,11 +5958,16 @@ class DatabaseHelper {
         'description': refundDescription,
         'is_posted': 1,
       });
+      final refundCostCenterId = await _installmentCostCenterTx(
+        txn,
+        source['installment_id'],
+      );
       await txn.insert('journal_lines', {
         'journal_entry_id': journalId,
         'account_id': tenantAccountId,
         'debit': amount,
         'credit': 0.0,
+        'cost_center_id': refundCostCenterId,
         'description': refundDescription,
       });
       await txn.insert('journal_lines', {
@@ -6263,6 +6372,7 @@ class DatabaseHelper {
       }
 
       final grossAmount = netAmount + calculatedTaxAmount;
+      final invoiceCostCenterId = await _contractCostCenterTx(txn, contractId);
       final journalId = await txn.insert('journal_entries', {
         'entry_date': invoiceDate,
         'description': 'إثبات فاتورة ضريبية إيجار',
@@ -6280,6 +6390,7 @@ class DatabaseHelper {
         'account_id': revenueAccountId,
         'debit': 0.0,
         'credit': netAmount,
+        'cost_center_id': invoiceCostCenterId,
         'description': 'إيراد إيجار',
       });
       if (calculatedTaxAmount > 0) {
