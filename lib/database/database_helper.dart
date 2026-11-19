@@ -7172,6 +7172,180 @@ class DatabaseHelper {
           SELECT voucher_id, SUM(amount_minor) AS allocated_minor
           FROM collection_allocations
           GROUP BY voucher_id
+        ), legacy_installment_totals AS (
+          SELECT
+            voucher_id,
+            installment_id,
+            SUM(CAST(ROUND(amount * 100) AS INTEGER)) AS amount_minor
+          FROM voucher_installment_allocations
+          GROUP BY voucher_id, installment_id
+        ), detailed_installment_totals AS (
+          SELECT
+            voucher_id,
+            installment_id,
+            SUM(rent_amount_minor) AS rent_amount_minor
+          FROM collection_allocations
+          GROUP BY voucher_id, installment_id
+        ), installment_mismatches AS (
+          SELECT legacy.voucher_id
+          FROM legacy_installment_totals legacy
+          LEFT JOIN detailed_installment_totals detailed
+            ON detailed.voucher_id = legacy.voucher_id
+            AND detailed.installment_id = legacy.installment_id
+          WHERE legacy.amount_minor != COALESCE(detailed.rent_amount_minor, 0)
+          UNION ALL
+          SELECT detailed.voucher_id
+          FROM detailed_installment_totals detailed
+          LEFT JOIN legacy_installment_totals legacy
+            ON legacy.voucher_id = detailed.voucher_id
+            AND legacy.installment_id = detailed.installment_id
+          WHERE detailed.rent_amount_minor > 0
+            AND legacy.voucher_id IS NULL
+        ), legacy_invoice_totals AS (
+          SELECT
+            voucher_id,
+            invoice_id,
+            SUM(CAST(ROUND(amount * 100) AS INTEGER)) AS amount_minor
+          FROM voucher_invoice_allocations
+          GROUP BY voucher_id, invoice_id
+        ), detailed_invoice_totals AS (
+          SELECT voucher_id, invoice_id, SUM(amount_minor) AS amount_minor
+          FROM collection_allocations
+          WHERE invoice_id IS NOT NULL
+          GROUP BY voucher_id, invoice_id
+        ), invoice_mismatches AS (
+          SELECT legacy.voucher_id
+          FROM legacy_invoice_totals legacy
+          LEFT JOIN detailed_invoice_totals detailed
+            ON detailed.voucher_id = legacy.voucher_id
+            AND detailed.invoice_id = legacy.invoice_id
+          WHERE legacy.amount_minor != COALESCE(detailed.amount_minor, 0)
+          UNION ALL
+          SELECT detailed.voucher_id
+          FROM detailed_invoice_totals detailed
+          LEFT JOIN legacy_invoice_totals legacy
+            ON legacy.voucher_id = detailed.voucher_id
+            AND legacy.invoice_id = detailed.invoice_id
+          WHERE legacy.voucher_id IS NULL
+        ), source_link_mismatches AS (
+          SELECT allocation.voucher_id
+          FROM collection_allocations allocation
+          JOIN vouchers receipt ON receipt.id = allocation.voucher_id
+          LEFT JOIN contract_installments installment
+            ON installment.id = allocation.installment_id
+          LEFT JOIN contracts contract ON contract.id = installment.contract_id
+          LEFT JOIN tax_invoices invoice ON invoice.id = allocation.invoice_id
+          WHERE receipt.tenant_id IS NULL
+             OR installment.id IS NULL
+             OR contract.id IS NULL
+             OR contract.tenant_id != receipt.tenant_id
+             OR allocation.amount_minor <= 0
+             OR allocation.amount_minor !=
+                allocation.rent_amount_minor + allocation.tax_amount_minor
+             OR (allocation.invoice_id IS NOT NULL AND (
+                  invoice.id IS NULL
+                  OR invoice.installment_id IS NOT allocation.installment_id
+                  OR invoice.contract_id IS NOT contract.id
+                ))
+             OR (allocation.invoice_id IS NULL AND EXISTS (
+                  SELECT 1
+                  FROM voucher_invoice_allocations invoice_allocation
+                  JOIN tax_invoices invoice_source
+                    ON invoice_source.id = invoice_allocation.invoice_id
+                  WHERE invoice_allocation.voucher_id = allocation.voucher_id
+                    AND invoice_source.installment_id = allocation.installment_id
+                ))
+          GROUP BY allocation.voucher_id, allocation.id
+        ), mismatch_rows AS (
+          SELECT voucher_id FROM installment_mismatches
+          UNION ALL
+          SELECT voucher_id FROM invoice_mismatches
+          UNION ALL
+          SELECT voucher_id FROM source_link_mismatches
+        ), source_issue_counts AS (
+          SELECT voucher_id, COUNT(*) AS source_mismatch_count
+          FROM mismatch_rows
+          GROUP BY voucher_id
+        ), refund_audit_base AS (
+          SELECT
+            refund.id AS voucher_id,
+            refund.voucher_date AS voucher_date,
+            refund.tenant_id AS tenant_id,
+            COALESCE(tenant.name, refund.party_name, 'غير محدد') AS tenant_name,
+            -ABS(CAST(ROUND(refund.amount * 100) AS INTEGER)) AS amount_minor,
+            COALESCE(SUM(allocation.amount_minor), 0)
+              AS linked_allocation_minor,
+            COALESCE(GROUP_CONCAT(DISTINCT source.id), '')
+              AS source_receipt_voucher_ids,
+            CASE
+              WHEN refund.amount <= 0 THEN 'مبلغ سند الاسترداد غير صالح'
+              WHEN COALESCE(SUM(allocation.amount_minor), 0) !=
+                CAST(ROUND(refund.amount * 100) AS INTEGER)
+                THEN 'مجموع تخصيصات الاسترداد لا يطابق السند'
+              WHEN SUM(CASE
+                WHEN allocation.amount_minor <= 0
+                  OR allocation.rent_amount_minor + allocation.tax_amount_minor !=
+                    allocation.amount_minor THEN 1
+                ELSE 0
+              END) > 0 THEN 'تقسيم مبلغ الاسترداد غير متسق'
+              WHEN SUM(CASE
+                WHEN source.voucher_type = 'قبض مستأجر'
+                  AND source.tenant_id = refund.tenant_id
+                  AND source_journal.is_posted = 1 THEN 0
+                ELSE 1
+              END) > 0 THEN 'مصدر القبض غير مرحل أو لمستأجر مختلف'
+              WHEN SUM(CASE
+                WHEN COALESCE(source_issues.source_mismatch_count, 0) > 0
+                  THEN 1 ELSE 0
+              END) > 0 THEN 'تخصيص مصدر القبض يحتاج مراجعة'
+              WHEN SUM(CASE
+                WHEN source_balance.remaining_minor < 0
+                  OR source_balance.remaining_rent_minor < 0
+                  OR source_balance.remaining_tax_minor < 0 THEN 1
+                ELSE 0
+              END) > 0 THEN 'مجموع الاستردادات يتجاوز سقف المصدر'
+              ELSE 'مرتبط ومطابق'
+            END AS allocation_status
+          FROM vouchers refund
+          LEFT JOIN tenants tenant ON tenant.id = refund.tenant_id
+          JOIN journal_entries refund_journal
+            ON refund_journal.id = refund.journal_entry_id
+            AND refund_journal.is_posted = 1
+          JOIN refund_allocations allocation
+            ON allocation.refund_voucher_id = refund.id
+          JOIN collection_allocations source_allocation
+            ON source_allocation.id = allocation.collection_allocation_id
+          JOIN collection_allocation_balances source_balance
+            ON source_balance.id = source_allocation.id
+          JOIN vouchers source ON source.id = source_allocation.voucher_id
+          LEFT JOIN journal_entries source_journal
+            ON source_journal.id = source.journal_entry_id
+          LEFT JOIN source_issue_counts source_issues
+            ON source_issues.voucher_id = source.id
+          WHERE refund.voucher_type = 'صرف مستأجر'
+            AND refund.tenant_id IS NOT NULL
+            AND refund.voucher_date >= ?
+            AND refund.voucher_date < ?
+          GROUP BY refund.id, refund.voucher_date, refund.tenant_id,
+                   tenant.name, refund.party_name, refund.amount
+        ), refund_audit AS (
+          SELECT
+            voucher_id,
+            voucher_date,
+            tenant_id,
+            tenant_name,
+            amount_minor,
+            linked_allocation_minor,
+            source_receipt_voucher_ids,
+            allocation_status,
+            CASE WHEN allocation_status = 'مرتبط ومطابق' THEN 1 ELSE 0
+              END AS is_verified_refund,
+            CASE WHEN allocation_status = 'مرتبط ومطابق' THEN 0 ELSE 1
+              END AS source_mismatch_count,
+            CASE WHEN allocation_status = 'مرتبط ومطابق'
+              THEN 'المصدر متسق وتحت السقف' ELSE allocation_status
+              END AS source_consistency_status
+          FROM refund_audit_base
         ), report_rows AS (
           SELECT
             v.id AS voucher_id,
@@ -7194,12 +7368,23 @@ class DatabaseHelper {
                 THEN 'التخصيص غير مكتمل'
               ELSE 'التخصيص يتجاوز مبلغ السند'
             END AS allocation_status,
+            CASE
+              WHEN COALESCE(source_issues.source_mismatch_count, 0) > 0
+                THEN 'يوجد اختلاف في سجل أو رابط التخصيص'
+              WHEN COALESCE(ra.allocated_minor, 0) = 0
+                THEN 'لا توجد تخصيصات للمقارنة'
+              ELSE 'سجلات التخصيص متطابقة'
+            END AS source_consistency_status,
+            COALESCE(source_issues.source_mismatch_count, 0)
+              AS source_mismatch_count,
             0 AS is_verified_refund
           FROM vouchers v
           JOIN tenants t ON t.id = v.tenant_id
           JOIN journal_entries je
             ON je.id = v.journal_entry_id AND je.is_posted = 1
           LEFT JOIN receipt_allocations ra ON ra.voucher_id = v.id
+          LEFT JOIN source_issue_counts source_issues
+            ON source_issues.voucher_id = v.id
           WHERE v.voucher_type = 'قبض مستأجر'
             AND v.tenant_id IS NOT NULL
             AND v.voucher_date >= ?
@@ -7208,56 +7393,19 @@ class DatabaseHelper {
           UNION ALL
 
           SELECT
-            v.id AS voucher_id,
-            v.voucher_date AS voucher_date,
-            v.tenant_id AS tenant_id,
-            COALESCE(t.name, v.party_name, 'غير محدد') AS tenant_name,
+            audit.voucher_id,
+            audit.voucher_date,
+            audit.tenant_id,
+            audit.tenant_name,
             1 AS is_refund,
-            -ABS(CAST(ROUND(v.amount * 100) AS INTEGER)) AS amount_minor,
-            COALESCE(SUM(ra.amount_minor), 0) AS linked_allocation_minor,
-            COALESCE(GROUP_CONCAT(DISTINCT source.id), '')
-              AS source_receipt_voucher_ids,
-            CASE
-              WHEN v.amount > 0
-                AND COALESCE(SUM(ra.amount_minor), 0) =
-                  CAST(ROUND(v.amount * 100) AS INTEGER)
-                AND SUM(CASE
-                  WHEN source.voucher_type = 'قبض مستأجر'
-                    AND source.tenant_id = v.tenant_id
-                    AND source_entry.is_posted = 1 THEN 0
-                  ELSE 1
-                END) = 0
-                THEN 'مرتبط ومطابق'
-              ELSE 'يحتاج مراجعة'
-            END AS allocation_status,
-            CASE
-              WHEN v.amount > 0
-                AND COALESCE(SUM(ra.amount_minor), 0) =
-                  CAST(ROUND(v.amount * 100) AS INTEGER)
-                AND SUM(CASE
-                  WHEN source.voucher_type = 'قبض مستأجر'
-                    AND source.tenant_id = v.tenant_id
-                    AND source_entry.is_posted = 1 THEN 0
-                  ELSE 1
-                END) = 0 THEN 1
-              ELSE 0
-            END AS is_verified_refund
-          FROM vouchers v
-          JOIN tenants t ON t.id = v.tenant_id
-          JOIN journal_entries je
-            ON je.id = v.journal_entry_id AND je.is_posted = 1
-          JOIN refund_allocations ra ON ra.refund_voucher_id = v.id
-          JOIN collection_allocations ca
-            ON ca.id = ra.collection_allocation_id
-          JOIN vouchers source ON source.id = ca.voucher_id
-          LEFT JOIN journal_entries source_entry
-            ON source_entry.id = source.journal_entry_id
-          WHERE v.voucher_type = 'صرف مستأجر'
-            AND v.tenant_id IS NOT NULL
-            AND v.voucher_date >= ?
-            AND v.voucher_date < ?
-          GROUP BY v.id, v.voucher_date, v.tenant_id, t.name,
-                   v.party_name, v.amount
+            audit.amount_minor,
+            audit.linked_allocation_minor,
+            audit.source_receipt_voucher_ids,
+            audit.allocation_status,
+            audit.source_consistency_status,
+            audit.source_mismatch_count,
+            audit.is_verified_refund
+          FROM refund_audit audit
         )
         SELECT * FROM report_rows
         ORDER BY voucher_date, voucher_id, is_refund
@@ -7294,6 +7442,10 @@ class DatabaseHelper {
                 amountMinor: (row['amount_minor'] as num).toInt(),
                 allocationStatus:
                     row['allocation_status']?.toString() ?? 'غير محدد',
+                sourceConsistencyStatus:
+                    row['source_consistency_status']?.toString() ?? 'غير محدد',
+                sourceMismatchCount: (row['source_mismatch_count'] as num)
+                    .toInt(),
                 sourceReceiptVoucherIds:
                     row['source_receipt_voucher_ids']?.toString() ?? '',
                 linkedAllocationMinor: (row['linked_allocation_minor'] as num)

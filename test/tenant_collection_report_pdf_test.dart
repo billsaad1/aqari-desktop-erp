@@ -22,6 +22,7 @@ void main() {
             isVerifiedRefund: false,
             amountMinor: 10000,
             allocationStatus: 'التخصيص مطابق',
+            sourceConsistencyStatus: 'سجلات التخصيص متطابقة',
             sourceReceiptVoucherIds: '',
             linkedAllocationMinor: 10000,
           ),
@@ -34,6 +35,7 @@ void main() {
             isVerifiedRefund: true,
             amountMinor: -2500,
             allocationStatus: 'مرتبط ومطابق',
+            sourceConsistencyStatus: 'المصدر متسق وتحت السقف',
             sourceReceiptVoucherIds: '100',
             linkedAllocationMinor: 2500,
           ),
@@ -45,7 +47,9 @@ void main() {
             isRefund: true,
             isVerifiedRefund: false,
             amountMinor: -1000,
-            allocationStatus: 'يحتاج مراجعة',
+            allocationStatus: 'مجموع تخصيصات الاسترداد لا يطابق السند',
+            sourceConsistencyStatus: 'مجموع تخصيصات الاسترداد لا يطابق السند',
+            sourceMismatchCount: 1,
             sourceReceiptVoucherIds: '100',
             linkedAllocationMinor: 500,
           ),
@@ -64,6 +68,7 @@ void main() {
       expect(report.linkedRefundsMinor, 2500);
       expect(report.unverifiedRefundsMinor, 1000);
       expect(report.netCollectedMinor, 7500);
+      expect(report.sourceMismatchVoucherCount, 1);
     },
   );
 }

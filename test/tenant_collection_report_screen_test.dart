@@ -32,6 +32,7 @@ void main() {
             isVerifiedRefund: false,
             amountMinor: 10000,
             allocationStatus: 'التخصيص مطابق',
+            sourceConsistencyStatus: 'سجلات التخصيص متطابقة',
             sourceReceiptVoucherIds: '',
             linkedAllocationMinor: 10000,
           ),
@@ -44,6 +45,7 @@ void main() {
             isVerifiedRefund: false,
             amountMinor: 5000,
             allocationStatus: 'لا يوجد تخصيص مثبت',
+            sourceConsistencyStatus: 'لا توجد تخصيصات للمقارنة',
             sourceReceiptVoucherIds: '',
             linkedAllocationMinor: 0,
           ),
@@ -56,6 +58,7 @@ void main() {
             isVerifiedRefund: true,
             amountMinor: -2500,
             allocationStatus: 'مرتبط ومطابق',
+            sourceConsistencyStatus: 'المصدر متسق وتحت السقف',
             sourceReceiptVoucherIds: '11',
             linkedAllocationMinor: 2500,
           ),
@@ -67,7 +70,9 @@ void main() {
             isRefund: true,
             isVerifiedRefund: false,
             amountMinor: -1000,
-            allocationStatus: 'يحتاج مراجعة',
+            allocationStatus: 'مجموع تخصيصات الاسترداد لا يطابق السند',
+            sourceConsistencyStatus: 'مجموع تخصيصات الاسترداد لا يطابق السند',
+            sourceMismatchCount: 1,
             sourceReceiptVoucherIds: '11',
             linkedAllocationMinor: 500,
           ),
@@ -143,12 +148,18 @@ void main() {
       expect(find.text('استرداد للمراجعة'), findsOneWidget);
       expect(find.text('لا يوجد تخصيص مثبت'), findsOneWidget);
       expect(find.text('مرتبط ومطابق'), findsOneWidget);
-      expect(find.text('يحتاج مراجعة'), findsOneWidget);
+      expect(
+        find.text('مجموع تخصيصات الاسترداد لا يطابق السند'),
+        findsNWidgets(2),
+      );
+      expect(find.text('اتساق مرجع التخصيص'), findsOneWidget);
+      expect(find.text('سندات تخصيصها يحتاج مراجعة'), findsOneWidget);
       expect(reports.tenantCollectionReport?.grossReceiptsMinor, 15000);
       expect(reports.tenantCollectionReport?.linkedRefundsMinor, 2500);
       expect(reports.tenantCollectionReport?.unverifiedRefundsMinor, 1000);
       expect(reports.tenantCollectionReport?.netCollectedMinor, 12500);
       expect(reports.tenantCollectionReport?.unallocatedReceiptsMinor, 5000);
+      expect(reports.tenantCollectionReport?.sourceMismatchVoucherCount, 1);
       expect(
         tester
             .widget<OutlinedButton>(
