@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:app/core/permission_policy.dart';
 import 'package:app/features/reports_inquiry/income_expense_report_screen.dart';
@@ -44,98 +45,153 @@ void main() {
     reports.dispose();
   });
 
-  testWidgets('shows ledger-based revenue, expense, and period net result', (
-    tester,
-  ) async {
-    PermissionRuntime.activate(
-      userId: 44,
-      role: 'DataEntry',
-      permissionRows: [
-        {
-          'screen_name': 'reports',
-          'can_view': 1,
-          'can_add': 0,
-          'can_edit': 0,
-          'can_delete': 0,
-          'can_print': 0,
-          'can_post': 0,
+  testWidgets(
+    'filters ledger activity by cost center and keeps unassigned rows visible',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      PermissionRuntime.activate(
+        userId: 44,
+        role: 'DataEntry',
+        permissionRows: [
+          {
+            'screen_name': 'reports',
+            'can_view': 1,
+            'can_add': 0,
+            'can_edit': 0,
+            'can_delete': 0,
+            'can_print': 0,
+            'can_post': 0,
+          },
+        ],
+      );
+      var loaderCalls = 0;
+      final reports = ReportsProvider(
+        incomeExpenseReportLoader: (startDate, endDate) async {
+          loaderCalls++;
+          return IncomeExpenseReport(
+            startDate: startDate,
+            endDate: endDate,
+            currency: 'SAR',
+            costCenters: const [
+              IncomeExpenseCostCenter(id: 10, code: 'CC-A', name: 'مركز أ'),
+              IncomeExpenseCostCenter(id: 20, code: 'CC-B', name: 'مركز ب'),
+            ],
+            rows: const [
+              IncomeExpenseAccountRow(
+                accountId: 1,
+                accountCode: '4101',
+                accountName: 'إيراد إيجار',
+                accountType: 'Revenue',
+                debitMinor: 500,
+                creditMinor: 8000,
+                costCenterId: 10,
+                costCenterCode: 'CC-A',
+                costCenterName: 'مركز أ',
+              ),
+              IncomeExpenseAccountRow(
+                accountId: 2,
+                accountCode: '5101',
+                accountName: 'مصروف صيانة',
+                accountType: 'Expense',
+                debitMinor: 2500,
+                creditMinor: 500,
+                costCenterId: 20,
+                costCenterCode: 'CC-B',
+                costCenterName: 'مركز ب',
+              ),
+              IncomeExpenseAccountRow(
+                accountId: 3,
+                accountCode: '4102',
+                accountName: 'إيراد غير مخصص',
+                accountType: 'Revenue',
+                debitMinor: 0,
+                creditMinor: 1000,
+              ),
+            ],
+          );
         },
-      ],
-    );
-    var loaderCalled = false;
-    final reports = ReportsProvider(
-      incomeExpenseReportLoader: (startDate, endDate) async {
-        loaderCalled = true;
-        return IncomeExpenseReport(
-          startDate: startDate,
-          endDate: endDate,
-          currency: 'SAR',
-          rows: const [
-            IncomeExpenseAccountRow(
-              accountId: 1,
-              accountCode: '4101',
-              accountName: 'إيراد إيجار',
-              accountType: 'Revenue',
-              debitMinor: 500,
-              creditMinor: 8000,
-            ),
-            IncomeExpenseAccountRow(
-              accountId: 2,
-              accountCode: '5101',
-              accountName: 'مصروف صيانة',
-              accountType: 'Expense',
-              debitMinor: 2500,
-              creditMinor: 500,
-            ),
-          ],
-        );
-      },
-    );
+      );
 
-    await tester.pumpWidget(
-      ChangeNotifierProvider<ReportsProvider>.value(
-        value: reports,
-        child: const MaterialApp(
-          home: Scaffold(body: IncomeExpenseReportScreen()),
+      await tester.pumpWidget(
+        ChangeNotifierProvider<ReportsProvider>.value(
+          value: reports,
+          child: const MaterialApp(
+            home: Scaffold(body: IncomeExpenseReportScreen()),
+          ),
         ),
-      ),
-    );
-    await tester.tap(find.text('عرض التقرير'));
-    await tester.pumpAndSettle();
+      );
+      await tester.tap(find.text('عرض التقرير'));
+      await tester.pumpAndSettle();
 
-    expect(loaderCalled, isTrue);
-    expect(find.text('إيراد إيجار'), findsOneWidget);
-    expect(find.text('مصروف صيانة'), findsOneWidget);
-    expect(find.text('صافي الإيرادات'), findsOneWidget);
-    expect(find.text('صافي المصروفات'), findsOneWidget);
-    expect(find.text('صافي نتيجة الفترة'), findsNWidgets(2));
-    expect(reports.incomeExpenseReport?.revenueNetMinor, 7500);
-    expect(reports.incomeExpenseReport?.expenseNetMinor, 2000);
-    expect(reports.incomeExpenseReport?.netResultMinor, 5500);
-    expect(
-      tester
-          .widget<OutlinedButton>(
-            find.widgetWithText(OutlinedButton, 'معاينة التقرير'),
-          )
-          .onPressed,
-      isNotNull,
-    );
+      expect(loaderCalls, 1);
+      expect(find.text('إيراد إيجار'), findsOneWidget);
+      expect(find.text('مصروف صيانة'), findsOneWidget);
+      expect(find.text('إيراد غير مخصص'), findsOneWidget);
+      expect(find.text('صافي الإيرادات'), findsOneWidget);
+      expect(find.text('صافي المصروفات'), findsOneWidget);
+      expect(find.text('صافي نتيجة الفترة'), findsNWidgets(2));
+      expect(reports.incomeExpenseReport?.revenueNetMinor, 8500);
+      expect(reports.incomeExpenseReport?.expenseNetMinor, 2000);
+      expect(reports.incomeExpenseReport?.netResultMinor, 6500);
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, 'معاينة التقرير'),
+            )
+            .onPressed,
+        isNotNull,
+      );
 
-    PermissionRuntime.activate(
-      userId: 44,
-      role: 'DataEntry',
-      permissionRows: const [],
-    );
-    await tester.pump();
-    expect(reports.incomeExpenseReport, isNull);
-    expect(
-      find.text('لا تملك صلاحية عرض التقارير والاستعلامات.'),
-      findsOneWidget,
-    );
+      await tester.tap(
+        find.byKey(const ValueKey('incomeExpenseCostCenterFilter')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CC-A - مركز أ').last);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .state<FormFieldState<String>>(
+              find.byKey(const ValueKey('incomeExpenseCostCenterFilter')),
+            )
+            .value,
+        'center:10',
+      );
+      expect(find.text('إيراد إيجار'), findsOneWidget);
+      expect(find.text('مصروف صيانة'), findsNothing);
+      expect(find.text('إيراد غير مخصص'), findsNothing);
+      expect(loaderCalls, 1, reason: 'client-side filtering must not re-query');
+      expect(reports.incomeExpenseReport?.netResultMinor, 6500);
 
-    await tester.pumpWidget(const SizedBox.shrink());
-    reports.dispose();
-  });
+      await tester.tap(
+        find.byKey(const ValueKey('incomeExpenseCostCenterFilter')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('غير مخصص').last);
+      await tester.pumpAndSettle();
+      expect(find.text('إيراد غير مخصص'), findsOneWidget);
+      expect(find.text('إيراد إيجار'), findsNothing);
+      expect(find.text('مصروف صيانة'), findsNothing);
+
+      PermissionRuntime.activate(
+        userId: 44,
+        role: 'DataEntry',
+        permissionRows: const [],
+      );
+      await tester.pump();
+      expect(reports.incomeExpenseReport, isNull);
+      expect(
+        find.text('لا تملك صلاحية عرض التقارير والاستعلامات.'),
+        findsOneWidget,
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      reports.dispose();
+    },
+  );
 
   test('ignores a stale report request after clearing', () async {
     final completer = Completer<IncomeExpenseReport>();
@@ -159,4 +215,104 @@ void main() {
     expect(reports.isIncomeExpenseReportLoading, isFalse);
     reports.dispose();
   });
+
+  testWidgets(
+    'discards a PDF preview when the same period is refreshed during generation',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      PermissionRuntime.activate(
+        userId: 44,
+        role: 'DataEntry',
+        permissionRows: [
+          {
+            'screen_name': 'reports',
+            'can_view': 1,
+            'can_add': 0,
+            'can_edit': 0,
+            'can_delete': 0,
+            'can_print': 0,
+            'can_post': 0,
+          },
+        ],
+      );
+
+      final firstResult = Completer<IncomeExpenseReport>();
+      final refreshedResult = Completer<IncomeExpenseReport>();
+      final pdfStarted = Completer<void>();
+      final pdfBytes = Completer<Uint8List>();
+      var loaderCalls = 0;
+      late String startDate;
+      late String endDate;
+
+      IncomeExpenseReport reportFor(int creditMinor) => IncomeExpenseReport(
+        startDate: startDate,
+        endDate: endDate,
+        currency: 'SAR',
+        rows: [
+          IncomeExpenseAccountRow(
+            accountId: 1,
+            accountCode: '4101',
+            accountName: 'إيراد إيجار',
+            accountType: 'Revenue',
+            debitMinor: 0,
+            creditMinor: creditMinor,
+          ),
+        ],
+      );
+
+      final reports = ReportsProvider(
+        incomeExpenseReportLoader: (start, end) {
+          loaderCalls++;
+          startDate = start;
+          endDate = end;
+          return loaderCalls == 1 ? firstResult.future : refreshedResult.future;
+        },
+      );
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<ReportsProvider>.value(
+          value: reports,
+          child: MaterialApp(
+            home: Scaffold(
+              body: IncomeExpenseReportScreen(
+                companyInfoLoader: () async => null,
+                pdfBuilder: (report, companyInfo, currency) {
+                  if (!pdfStarted.isCompleted) pdfStarted.complete();
+                  return pdfBytes.future;
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('عرض التقرير'));
+      await tester.pump();
+      firstResult.complete(reportFor(8000));
+      await tester.pumpAndSettle();
+      expect(reports.incomeExpenseReport?.rows.single.creditMinor, 8000);
+
+      await tester.tap(find.text('معاينة التقرير'));
+      await tester.pump();
+      expect(pdfStarted.isCompleted, isTrue);
+
+      await tester.tap(find.text('عرض التقرير'));
+      await tester.pump();
+      expect(loaderCalls, 2);
+      expect(reports.incomeExpenseReport, isNull);
+      refreshedResult.complete(reportFor(9000));
+      await tester.pumpAndSettle();
+      expect(reports.incomeExpenseReport?.rows.single.creditMinor, 9000);
+
+      pdfBytes.complete(Uint8List.fromList([1, 2, 3]));
+      await tester.pumpAndSettle();
+      expect(find.text('معاينة المستند'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      reports.dispose();
+    },
+  );
 }

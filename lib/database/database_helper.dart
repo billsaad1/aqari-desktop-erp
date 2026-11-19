@@ -6857,6 +6857,9 @@ class DatabaseHelper {
           a.code AS account_code,
           a.name AS account_name,
           a.account_type AS account_type,
+          jl.cost_center_id AS cost_center_id,
+          cc.code AS cost_center_code,
+          cc.name AS cost_center_name,
           CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
             AS debit_minor,
           CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
@@ -6864,17 +6867,25 @@ class DatabaseHelper {
         FROM journal_lines jl
         JOIN journal_entries je ON je.id = jl.journal_entry_id
         JOIN accounts a ON a.id = jl.account_id
+        LEFT JOIN cost_centers cc ON cc.id = jl.cost_center_id
         WHERE je.is_posted = 1
           AND je.entry_date >= ?
           AND je.entry_date < ?
           AND a.account_type IN ('Revenue', 'Expense')
-        GROUP BY a.id, a.code, a.name, a.account_type
+        GROUP BY a.id, a.code, a.name, a.account_type,
+                 jl.cost_center_id, cc.code, cc.name
         HAVING ROUND(COALESCE(SUM(jl.debit), 0) * 100) != 0
             OR ROUND(COALESCE(SUM(jl.credit), 0) * 100) != 0
-        ORDER BY CASE a.account_type WHEN 'Revenue' THEN 0 ELSE 1 END,
+        ORDER BY CASE WHEN jl.cost_center_id IS NULL THEN 0 ELSE 1 END,
+                 cc.code COLLATE NOCASE, jl.cost_center_id,
+                 CASE a.account_type WHEN 'Revenue' THEN 0 ELSE 1 END,
                  a.code COLLATE NOCASE, a.id
         ''',
         [startDate, exclusiveEndDate],
+      );
+      final costCenterRows = await txn.rawQuery(
+        'SELECT id, code, name FROM cost_centers '
+        'ORDER BY code COLLATE NOCASE, id',
       );
       final companyRows = await txn.query(
         'company_info',
@@ -6893,6 +6904,15 @@ class DatabaseHelper {
         startDate: startDate,
         endDate: endDate,
         currency: currency,
+        costCenters: costCenterRows
+            .map(
+              (row) => IncomeExpenseCostCenter(
+                id: (row['id'] as num).toInt(),
+                code: row['code']?.toString() ?? '',
+                name: row['name']?.toString() ?? '',
+              ),
+            )
+            .toList(growable: false),
         rows: accountRows
             .map(
               (row) => IncomeExpenseAccountRow(
@@ -6902,6 +6922,9 @@ class DatabaseHelper {
                 accountType: row['account_type']?.toString() ?? '',
                 debitMinor: (row['debit_minor'] as num).toInt(),
                 creditMinor: (row['credit_minor'] as num).toInt(),
+                costCenterId: (row['cost_center_id'] as num?)?.toInt(),
+                costCenterCode: row['cost_center_code']?.toString(),
+                costCenterName: row['cost_center_name']?.toString(),
               ),
             )
             .toList(growable: false),

@@ -4289,6 +4289,99 @@ void main() {
       await db.delete('owners', where: 'id = ?', whereArgs: [ownerId]);
       await helper.deleteAccount(ownerAccountId);
 
+      final revenueCenterId = await db.insert('cost_centers', {
+        'code': 'PH20-REV',
+        'name': 'مركز إيرادات الاختبار',
+      });
+      final expenseCenterId = await db.insert('cost_centers', {
+        'code': 'PH20-EXP',
+        'name': 'مركز مصروفات الاختبار',
+      });
+      final revenueCenterEntryId = await db.insert('journal_entries', {
+        'entry_date': '2026-02-15',
+        'description': 'إيراد بمركز تكلفة اختباري',
+        'is_posted': 1,
+      });
+      final expenseCenterEntryId = await db.insert('journal_entries', {
+        'entry_date': '2026-02-16',
+        'description': 'مصروف بمركز تكلفة اختباري',
+        'is_posted': 1,
+      });
+      try {
+        await db.insert('journal_lines', {
+          'journal_entry_id': revenueCenterEntryId,
+          'account_id': offsetId,
+          'debit': 12.34,
+          'credit': 0.0,
+        });
+        await db.insert('journal_lines', {
+          'journal_entry_id': revenueCenterEntryId,
+          'account_id': revenueId,
+          'debit': 0.0,
+          'credit': 12.34,
+          'cost_center_id': revenueCenterId,
+        });
+        await db.insert('journal_lines', {
+          'journal_entry_id': expenseCenterEntryId,
+          'account_id': expenseId,
+          'debit': 7.50,
+          'credit': 0.0,
+          'cost_center_id': expenseCenterId,
+        });
+        await db.insert('journal_lines', {
+          'journal_entry_id': expenseCenterEntryId,
+          'account_id': offsetId,
+          'debit': 0.0,
+          'credit': 7.50,
+        });
+
+        final byCostCenter = await helper.getIncomeExpenseReport(
+          startDate: '2026-02-01',
+          endDate: '2026-02-28',
+        );
+        final unassignedRevenue = byCostCenter.rows.singleWhere(
+          (row) => row.accountId == revenueId && row.costCenterId == null,
+        );
+        final assignedRevenue = byCostCenter.rows.singleWhere(
+          (row) =>
+              row.accountId == revenueId && row.costCenterId == revenueCenterId,
+        );
+        final assignedExpense = byCostCenter.rows.singleWhere(
+          (row) =>
+              row.accountId == expenseId && row.costCenterId == expenseCenterId,
+        );
+        expect(unassignedRevenue.debitMinor, 500);
+        expect(unassignedRevenue.creditMinor, 2000);
+        expect(assignedRevenue.creditMinor, 1234);
+        expect(assignedExpense.debitMinor, 750);
+        expect(assignedExpense.creditMinor, 0);
+        expect(
+          byCostCenter.costCenters.map((center) => center.id),
+          containsAll([revenueCenterId, expenseCenterId]),
+        );
+        expect(byCostCenter.revenueDebitMinor, 500);
+        expect(byCostCenter.revenueCreditMinor, 3234);
+        expect(byCostCenter.expenseDebitMinor, 750);
+        expect(byCostCenter.expenseCreditMinor, 800);
+        expect(byCostCenter.netResultMinor, 2784);
+      } finally {
+        await db.delete(
+          'journal_lines',
+          where: 'journal_entry_id IN (?, ?)',
+          whereArgs: [revenueCenterEntryId, expenseCenterEntryId],
+        );
+        await db.delete(
+          'journal_entries',
+          where: 'id IN (?, ?)',
+          whereArgs: [revenueCenterEntryId, expenseCenterEntryId],
+        );
+        await db.delete(
+          'cost_centers',
+          where: 'id IN (?, ?)',
+          whereArgs: [revenueCenterId, expenseCenterId],
+        );
+      }
+
       try {
         PermissionRuntime.activate(
           userId: 44,
