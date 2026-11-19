@@ -4168,6 +4168,65 @@ void main() {
       await helper.deleteAccount(tenantAccountId);
       await helper.deleteAccount(anotherTenantAccountId);
 
+      await helper.insertOwnerWithAccount({
+        'name': 'مالك كشف دفتر الأستاذ',
+        'commission_rate': 0,
+      });
+      final owner = (await db.query(
+        'owners',
+        where: 'name = ?',
+        whereArgs: ['مالك كشف دفتر الأستاذ'],
+        limit: 1,
+      )).single;
+      final ownerId = (owner['id'] as num).toInt();
+      final ownerAccountId = (owner['account_id'] as num).toInt();
+      final ownerAccounts = await helper.getOwnerStatementAccounts();
+      final ownerRow = ownerAccounts.singleWhere((row) => row['id'] == ownerId);
+      expect(ownerRow['is_reportable'], 1);
+      expect(ownerRow.keys, isNot(contains('identity_number')));
+      expect(ownerRow.keys, isNot(contains('iban')));
+      final ownerReport = await helper.getLedgerAccountStatement(
+        accountId: ownerAccountId,
+        expectedOwnerId: ownerId,
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(ownerReport.accountType, 'Liability');
+      expect(ownerReport.lines, isEmpty);
+
+      final duplicateOwnerId = await db.insert('owners', {
+        'name': 'مالك بربط حساب مشترك',
+        'account_id': ownerAccountId,
+      });
+      try {
+        final duplicateOwnerAccounts = await helper.getOwnerStatementAccounts();
+        for (final linkedOwnerId in [ownerId, duplicateOwnerId]) {
+          expect(
+            duplicateOwnerAccounts.singleWhere(
+              (row) => row['id'] == linkedOwnerId,
+            )['is_reportable'],
+            0,
+          );
+          await expectLater(
+            helper.getLedgerAccountStatement(
+              accountId: ownerAccountId,
+              expectedOwnerId: linkedOwnerId,
+              startDate: '2026-02-01',
+              endDate: '2026-02-28',
+            ),
+            throwsStateError,
+          );
+        }
+      } finally {
+        await db.delete(
+          'owners',
+          where: 'id = ?',
+          whereArgs: [duplicateOwnerId],
+        );
+      }
+      await db.delete('owners', where: 'id = ?', whereArgs: [ownerId]);
+      await helper.deleteAccount(ownerAccountId);
+
       try {
         PermissionRuntime.activate(
           userId: 44,
@@ -4196,6 +4255,7 @@ void main() {
           helper.getTenantStatementAccounts(),
           throwsStateError,
         );
+        await expectLater(helper.getOwnerStatementAccounts(), throwsStateError);
       } finally {
         PermissionRuntime.activate(
           userId: 1,

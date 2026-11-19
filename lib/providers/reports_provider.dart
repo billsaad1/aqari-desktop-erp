@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/owner_statement_account_model.dart';
 import '../models/tenant_statement_account_model.dart';
 
 class ReportsProvider with ChangeNotifier {
@@ -24,11 +25,21 @@ class ReportsProvider with ChangeNotifier {
       String endDate,
     )?
     tenantStatementLoader,
+    Future<List<Map<String, dynamic>>> Function()? ownerStatementAccountsLoader,
+    Future<AccountStatementReport> Function(
+      int ownerId,
+      int accountId,
+      String startDate,
+      String endDate,
+    )?
+    ownerStatementLoader,
   }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
        _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader,
        _accountStatementLoader = accountStatementLoader,
        _tenantStatementAccountsLoader = tenantStatementAccountsLoader,
-       _tenantStatementLoader = tenantStatementLoader;
+       _tenantStatementLoader = tenantStatementLoader,
+       _ownerStatementAccountsLoader = ownerStatementAccountsLoader,
+       _ownerStatementLoader = ownerStatementLoader;
 
   final Future<List<Map<String, dynamic>>> Function()?
   _propertyInquiryPropertiesLoader;
@@ -49,12 +60,23 @@ class ReportsProvider with ChangeNotifier {
     String endDate,
   )?
   _tenantStatementLoader;
+  final Future<List<Map<String, dynamic>>> Function()?
+  _ownerStatementAccountsLoader;
+  final Future<AccountStatementReport> Function(
+    int ownerId,
+    int accountId,
+    String startDate,
+    String endDate,
+  )?
+  _ownerStatementLoader;
 
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _occupancyStats = [];
   AccountStatementReport? _accountStatementReport;
   AccountStatementReport? _tenantStatementReport;
+  AccountStatementReport? _ownerStatementReport;
   List<TenantStatementAccount> _tenantStatementAccounts = [];
+  List<OwnerStatementAccount> _ownerStatementAccounts = [];
   List<Map<String, dynamic>> _dueInstallments = [];
   List<Map<String, dynamic>> _expiringContracts = [];
   List<Map<String, dynamic>> _propertyInquiryProperties = [];
@@ -64,6 +86,8 @@ class ReportsProvider with ChangeNotifier {
   int _statementGeneration = 0;
   int _tenantStatementGeneration = 0;
   int _tenantAccountsGeneration = 0;
+  int _ownerStatementGeneration = 0;
+  int _ownerAccountsGeneration = 0;
   int _alertsGeneration = 0;
   int _propertyInquiryGeneration = 0;
   int? _authorizedUserId;
@@ -78,22 +102,35 @@ class ReportsProvider with ChangeNotifier {
   String? _statementErrorMessage;
   String? _tenantStatementErrorMessage;
   String? _tenantAccountsErrorMessage;
+  String? _ownerStatementErrorMessage;
+  String? _ownerAccountsErrorMessage;
 
   bool _isLoading = false;
   bool _isStatementLoading = false;
   bool _isTenantStatementLoading = false;
   bool _isTenantAccountsLoading = false;
   bool _tenantStatementAccountsLoaded = false;
+  bool _isOwnerStatementLoading = false;
+  bool _isOwnerAccountsLoading = false;
+  bool _ownerStatementAccountsLoaded = false;
 
   List<Map<String, dynamic>> get searchResults => _searchResults;
   List<Map<String, dynamic>> get occupancyStats => _occupancyStats;
   AccountStatementReport? get accountStatementReport => _accountStatementReport;
   AccountStatementReport? get tenantStatementReport => _tenantStatementReport;
+  AccountStatementReport? get ownerStatementReport => _ownerStatementReport;
   List<TenantStatementAccount> get tenantStatementAccounts =>
       List.unmodifiable(_tenantStatementAccounts);
   bool get isTenantStatementLoading => _isTenantStatementLoading;
   bool get isTenantAccountsLoading => _isTenantAccountsLoading;
   bool get tenantStatementAccountsLoaded => _tenantStatementAccountsLoaded;
+  List<OwnerStatementAccount> get ownerStatementAccounts =>
+      List.unmodifiable(_ownerStatementAccounts);
+  bool get isOwnerStatementLoading => _isOwnerStatementLoading;
+  bool get isOwnerAccountsLoading => _isOwnerAccountsLoading;
+  bool get ownerStatementAccountsLoaded => _ownerStatementAccountsLoaded;
+  String? get ownerStatementErrorMessage => _ownerStatementErrorMessage;
+  String? get ownerAccountsErrorMessage => _ownerAccountsErrorMessage;
   String? get tenantStatementErrorMessage => _tenantStatementErrorMessage;
   String? get tenantAccountsErrorMessage => _tenantAccountsErrorMessage;
   List<Map<String, dynamic>> get accountStatement =>
@@ -129,10 +166,13 @@ class ReportsProvider with ChangeNotifier {
   String? get statementErrorMessage => _statementErrorMessage;
 
   /// Called by the app-level auth proxy to prevent report data from surviving
-  /// a session switch or loss/change of reports.view.
+  /// an authenticated-user switch or loss of reports.view. A restored grant
+  /// must not invalidate a fresh account-list request started by the screen.
   void syncAuthorization({required int? userId, required bool canViewReports}) {
-    if (_authorizedUserId != userId ||
-        (_hadReportsAccess != null && _hadReportsAccess != canViewReports)) {
+    final switchedAuthenticatedUser =
+        _authorizedUserId != null && _authorizedUserId != userId;
+    final lostReportsAccess = _hadReportsAccess == true && !canViewReports;
+    if (switchedAuthenticatedUser || lostReportsAccess) {
       clearReportResults(notify: false);
       clearSensitiveAlerts(notify: false);
     }
@@ -154,19 +194,28 @@ class ReportsProvider with ChangeNotifier {
     _statementGeneration++;
     _tenantStatementGeneration++;
     _tenantAccountsGeneration++;
+    _ownerStatementGeneration++;
+    _ownerAccountsGeneration++;
     _propertyInquiryGeneration++;
     _searchResults = [];
     _occupancyStats = [];
     _accountStatementReport = null;
     _tenantStatementReport = null;
+    _ownerStatementReport = null;
     _tenantStatementAccounts = [];
+    _ownerStatementAccounts = [];
     _isTenantStatementLoading = false;
     _isTenantAccountsLoading = false;
     _tenantStatementAccountsLoaded = false;
+    _isOwnerStatementLoading = false;
+    _isOwnerAccountsLoading = false;
+    _ownerStatementAccountsLoaded = false;
     _isStatementLoading = false;
     _statementErrorMessage = null;
     _tenantStatementErrorMessage = null;
     _tenantAccountsErrorMessage = null;
+    _ownerStatementErrorMessage = null;
+    _ownerAccountsErrorMessage = null;
     _clearPropertyInquiry();
     _isLoading = false;
     _errorMessage = null;
@@ -445,6 +494,111 @@ class ReportsProvider with ChangeNotifier {
     _tenantStatementAccountsLoaded = false;
     _tenantStatementErrorMessage = null;
     _tenantAccountsErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  Future<void> loadOwnerStatementAccounts() async {
+    final generation = ++_ownerAccountsGeneration;
+    _ownerStatementGeneration++;
+    _ownerStatementReport = null;
+    _isOwnerStatementLoading = false;
+    _ownerStatementErrorMessage = null;
+    _ownerAccountsErrorMessage = null;
+    _isOwnerAccountsLoading = true;
+    _ownerStatementAccountsLoaded = false;
+    _ownerStatementAccounts = [];
+    notifyListeners();
+
+    try {
+      final rows =
+          await (_ownerStatementAccountsLoader ??
+              DatabaseHelper.instance.getOwnerStatementAccounts)();
+      if (generation == _ownerAccountsGeneration) {
+        _ownerStatementAccounts = rows
+            .map(OwnerStatementAccount.fromMap)
+            .toList(growable: false);
+        _ownerStatementAccountsLoaded = true;
+      }
+    } catch (error) {
+      if (generation == _ownerAccountsGeneration) {
+        _ownerStatementAccounts = [];
+        _ownerAccountsErrorMessage = 'تعذر تحميل قائمة الملاك: $error';
+      }
+    } finally {
+      if (generation == _ownerAccountsGeneration) {
+        _isOwnerAccountsLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> loadOwnerStatement(
+    int ownerId,
+    String startDate,
+    String endDate,
+  ) async {
+    final selectedOwners = _ownerStatementAccounts.where(
+      (owner) => owner.ownerId == ownerId,
+    );
+    if (selectedOwners.isEmpty || !selectedOwners.single.isReportable) {
+      _ownerStatementReport = null;
+      _ownerStatementErrorMessage =
+          'المالك لا يرتبط بحساب التزامات تفصيلي صالح';
+      notifyListeners();
+      return;
+    }
+    final accountId = selectedOwners.single.accountId!;
+    final generation = ++_ownerStatementGeneration;
+    _ownerStatementReport = null;
+    _ownerStatementErrorMessage = null;
+    _isOwnerStatementLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _ownerStatementLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getLedgerAccountStatement(
+              accountId: accountId,
+              expectedOwnerId: ownerId,
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(ownerId, accountId, startDate, endDate);
+      if (generation == _ownerStatementGeneration) {
+        _ownerStatementReport = report;
+        _ownerStatementErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _ownerStatementGeneration) {
+        _ownerStatementReport = null;
+        _ownerStatementErrorMessage = 'تعذر تحميل كشف المالك: $error';
+      }
+    } finally {
+      if (generation == _ownerStatementGeneration) {
+        _isOwnerStatementLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearOwnerStatementReport({bool notify = true}) {
+    _ownerStatementGeneration++;
+    _ownerStatementReport = null;
+    _isOwnerStatementLoading = false;
+    _ownerStatementErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  void clearOwnerStatement({bool notify = true}) {
+    _ownerStatementGeneration++;
+    _ownerAccountsGeneration++;
+    _ownerStatementReport = null;
+    _ownerStatementAccounts = [];
+    _isOwnerStatementLoading = false;
+    _isOwnerAccountsLoading = false;
+    _ownerStatementAccountsLoaded = false;
+    _ownerStatementErrorMessage = null;
+    _ownerAccountsErrorMessage = null;
     if (notify) notifyListeners();
   }
 

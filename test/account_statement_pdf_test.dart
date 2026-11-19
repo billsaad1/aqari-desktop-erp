@@ -81,4 +81,33 @@ void main() {
       expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
     },
   );
+
+  test('owner statement PDF labels the linked party as the owner', () async {
+    final report = AccountStatementReport(
+      accountId: 210101,
+      accountCode: '210101',
+      accountName: 'حساب المالك الجاري',
+      accountType: 'Liability',
+      currency: 'SAR',
+      startDate: '2026-02-01',
+      endDate: '2026-02-28',
+      openingBalance: 250,
+      totalDebit: 15,
+      totalCredit: 40,
+      closingBalance: 275,
+      lines: const [],
+    );
+    final bytes = await AccountStatementPdf.build(
+      report: report,
+      companyInfo: null,
+      currency: 'ريال سعودي',
+      statementTitle: 'كشف حساب المالك',
+      partyName: 'مالك للاختبار',
+      partyLabel: 'المالك',
+      accountLabel: 'حساب الملاك الجاري',
+    );
+
+    expect(bytes, isNotEmpty);
+    expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+  });
 }
