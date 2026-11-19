@@ -369,6 +369,22 @@ void main() {
     });
   });
 
+  group('search matches the actor as well as the event', () {
+    test('finds a row by the snapshotted actor name', () async {
+      final db = await helper.database;
+      await db.insert('audit_logs', {
+        'user_id': null,
+        'actor_name': 'سالم الحارثي',
+        'action': 'ACTOR_SEARCH_PROBE',
+        'details': '{}',
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+
+      final byName = await helper.getAuditTrail(search: 'سالم');
+      expect(byName.map((row) => row['action']), contains('ACTOR_SEARCH_PROBE'));
+    });
+  });
+
   group('v22 to v23 upgrade', () {
     test('rebuilds audit_logs, keeps rows and backfills the actor', () async {
       final db = await helper.database;

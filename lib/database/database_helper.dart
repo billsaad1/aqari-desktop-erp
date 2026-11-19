@@ -5661,8 +5661,16 @@ class DatabaseHelper {
     }
     final term = search?.trim();
     if (term != null && term.isNotEmpty) {
-      where.add('(a.action LIKE ? OR a.details LIKE ?)');
-      args..add('%$term%')..add('%$term%');
+      where.add(
+        '(a.action LIKE ? OR a.details LIKE ? OR a.actor_name LIKE ? '
+        'OR u.full_name LIKE ? OR u.username LIKE ?)',
+      );
+      args
+        ..add('%$term%')
+        ..add('%$term%')
+        ..add('%$term%')
+        ..add('%$term%')
+        ..add('%$term%');
     }
     final clause = where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}';
     final db = await instance.database;
