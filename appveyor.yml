@@ -8,7 +8,23 @@ environment:
 install:
   - git clone https://github.com/flutter/flutter.git --depth 1 -b %FLUTTER_VERSION% C:\flutter_sdk
   - set PATH=C:\flutter_sdk\bin;%PATH%
-  - choco install innosetup --no-progress -y
+  - ps: |
+      $maxAttempts = 4
+      $installExitCode = 1
+      for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        Write-Host "Installing Inno Setup (attempt $attempt/$maxAttempts)..."
+        choco install innosetup --no-progress -y
+        $installExitCode = $LASTEXITCODE
+        if ($installExitCode -eq 0) {
+          break
+        }
+        if ($attempt -eq $maxAttempts) {
+          throw "Chocolatey failed to install Inno Setup after $maxAttempts attempts (exit code $installExitCode)."
+        }
+        $delaySeconds = [int][Math]::Min(60, 10 * [Math]::Pow(2, $attempt - 1))
+        Write-Warning "Chocolatey exited with $installExitCode. Retrying in $delaySeconds seconds."
+        Start-Sleep -Seconds $delaySeconds
+      }
   - flutter config --enable-windows-desktop
   - flutter doctor
   - flutter pub get
