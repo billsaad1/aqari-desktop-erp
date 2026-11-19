@@ -11,11 +11,13 @@ import 'package:app/core/internal_tax.dart';
 import 'package:app/core/lease_contract_terms.dart';
 import 'package:app/core/permission_policy.dart';
 import 'package:app/core/print_utils.dart';
+import 'package:app/core/property_unit_inquiry_pdf.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/database/database_integrity_migrations.dart';
 import 'package:app/models/company_info_model.dart';
 import 'package:app/features/general_accounting/chart_of_accounts_screen.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
+import 'package:app/features/reports_inquiry/property_unit_inquiry_screen.dart';
 import 'package:app/features/tenant_financial/tenant_payment_screen.dart';
 import 'package:app/features/tenants_leasing/tenants_screen.dart';
 import 'package:app/providers/auth_provider.dart';
@@ -4367,6 +4369,284 @@ void main() {
       );
     },
   );
+
+  group('property and unit read-only inquiry', () {
+    test(
+      'returns a limited projection, includes empty properties, and counts active contracts only',
+      () async {
+        final db = await DatabaseHelper.instance.database;
+        final suffix = DateTime.now().microsecondsSinceEpoch;
+        int? ownerId;
+        int? propertyId;
+        int? emptyPropertyId;
+        int? tenantId;
+
+        Future<int> countRows(String table) async =>
+            (await db.rawQuery(
+                  'SELECT COUNT(*) AS count FROM $table',
+                )).single['count']
+                as int;
+
+        try {
+          ownerId = await db.insert('owners', {'name': 'مالك استعلام $suffix'});
+          propertyId = await db.insert('properties', {
+            'name': 'عقار استعلام $suffix',
+            'owner_id': ownerId,
+          });
+          emptyPropertyId = await db.insert('properties', {
+            'name': 'عقار بلا وحدات $suffix',
+            'owner_id': ownerId,
+          });
+          tenantId = await db.insert('tenants', {
+            'name': 'مستأجر استعلام $suffix',
+          });
+          final occupiedUnitId = await db.insert('units', {
+            'property_id': propertyId,
+            'unit_number': 'A-1',
+            'status': 'مؤجرة',
+            'default_rent': 999999.0,
+          });
+          final vacantUnitId = await db.insert('units', {
+            'property_id': propertyId,
+            'unit_number': 'B-2',
+            'status': 'شاغرة',
+            'default_rent': 888888.0,
+          });
+          await db.insert('contracts', {
+            'tenant_id': tenantId,
+            'unit_id': occupiedUnitId,
+            'start_date': '2026-01-01',
+            'end_date': '2026-12-31',
+            'rent_amount': 999999.0,
+            'status': 'Active',
+          });
+          await db.insert('contracts', {
+            'tenant_id': tenantId,
+            'unit_id': vacantUnitId,
+            'start_date': '2025-01-01',
+            'end_date': '2025-12-31',
+            'rent_amount': 888888.0,
+            'status': 'Cancelled',
+          });
+
+          final financialTables = [
+            'accounts',
+            'contracts',
+            'journal_entries',
+            'journal_lines',
+            'vouchers',
+            'collection_allocations',
+            'refund_allocations',
+          ];
+          final countsBefore = {
+            for (final table in financialTables) table: await countRows(table),
+          };
+
+          final properties = await DatabaseHelper.instance
+              .getPropertyUnitInquiryProperties();
+          final selectedProperty = properties.singleWhere(
+            (row) => row['id'] == propertyId,
+          );
+          final noUnitProperty = properties.singleWhere(
+            (row) => row['id'] == emptyPropertyId,
+          );
+          expect(selectedProperty.keys.toSet(), {'id', 'name'});
+          expect(noUnitProperty['name'], 'عقار بلا وحدات $suffix');
+          expect(selectedProperty.keys, isNot(contains('owner_name')));
+
+          final units = await DatabaseHelper.instance
+              .getPropertyUnitInquiryUnits(propertyId);
+          expect(units, hasLength(2));
+          expect(units.map((row) => row['unit_number']).toList(), [
+            'A-1',
+            'B-2',
+          ]);
+          expect(units.first.keys.toSet(), {
+            'id',
+            'unit_number',
+            'status',
+            'active_contract_count',
+          });
+          expect(units.first['status'], 'مؤجرة');
+          expect(units.first['active_contract_count'], 1);
+          expect(units.last['status'], 'شاغرة');
+          expect(units.last['active_contract_count'], 0);
+          expect(
+            await DatabaseHelper.instance.getPropertyUnitInquiryUnits(
+              emptyPropertyId,
+            ),
+            isEmpty,
+          );
+          await expectLater(
+            DatabaseHelper.instance.getPropertyUnitInquiryUnits(0),
+            throwsArgumentError,
+          );
+          await expectLater(
+            DatabaseHelper.instance.getPropertyUnitInquiryUnits(2147483647),
+            throwsStateError,
+          );
+
+          for (final table in financialTables) {
+            expect(await countRows(table), countsBefore[table]);
+          }
+          expect(
+            (await db.query(
+              'units',
+              columns: ['status'],
+              where: 'property_id = ?',
+              whereArgs: [propertyId],
+              orderBy: 'unit_number',
+            )).map((row) => row['status']).toList(),
+            ['مؤجرة', 'شاغرة'],
+          );
+
+          PermissionRuntime.activate(
+            userId: 777,
+            role: 'DataEntry',
+            permissionRows: const [],
+          );
+          await expectLater(
+            DatabaseHelper.instance.getPropertyUnitInquiryProperties(),
+            throwsStateError,
+          );
+          await expectLater(
+            DatabaseHelper.instance.getPropertyUnitInquiryUnits(propertyId),
+            throwsStateError,
+          );
+          expect(
+            PermissionRuntime.allows('reports', AppPermissionAction.print),
+            isFalse,
+          );
+        } finally {
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          if (tenantId != null) {
+            await db.delete(
+              'contracts',
+              where: 'tenant_id = ?',
+              whereArgs: [tenantId],
+            );
+            await db.delete('tenants', where: 'id = ?', whereArgs: [tenantId]);
+          }
+          if (propertyId != null) {
+            await db.delete(
+              'units',
+              where: 'property_id = ?',
+              whereArgs: [propertyId],
+            );
+            await db.delete(
+              'properties',
+              where: 'id = ?',
+              whereArgs: [propertyId],
+            );
+          }
+          if (emptyPropertyId != null) {
+            await db.delete(
+              'properties',
+              where: 'id = ?',
+              whereArgs: [emptyPropertyId],
+            );
+          }
+          if (ownerId != null) {
+            await db.delete('owners', where: 'id = ?', whereArgs: [ownerId]);
+          }
+        }
+      },
+    );
+
+    test('authorization changes discard pending inquiry results', () async {
+      final pending = Completer<List<Map<String, dynamic>>>();
+      final provider = ReportsProvider(
+        propertyInquiryPropertiesLoader: () => pending.future,
+      );
+      try {
+        provider.syncAuthorization(userId: 31, canViewReports: true);
+        final load = provider.loadPropertyInquiryProperties();
+        expect(provider.isPropertyInquiryLoading, isTrue);
+        provider.syncAuthorization(userId: 32, canViewReports: false);
+        pending.complete([
+          {'id': 901, 'name': 'بيانات يجب إسقاطها'},
+        ]);
+        await load;
+        expect(provider.propertyInquiryProperties, isEmpty);
+        expect(provider.selectedInquiryPropertyId, isNull);
+        expect(provider.propertyInquiryAsOf, isNull);
+        expect(provider.isPropertyInquiryLoading, isFalse);
+      } finally {
+        provider.dispose();
+      }
+    });
+
+    test('builds an Arabic PDF with the current-state disclosure', () async {
+      final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+      final bytes = await PropertyUnitInquiryPdf.build(
+        companyInfo: companyInfo,
+        property: {'id': 1, 'name': 'عقار التقرير التجريبي'},
+        units: [
+          {
+            'id': 1,
+            'unit_number': '12-A',
+            'status': 'شاغرة',
+            'active_contract_count': 0,
+          },
+        ],
+        generatedAt: DateTime(2026, 11, 19, 10, 15),
+      );
+      expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+      expect(latin1.decode(bytes), contains('AqariPDFArabic'));
+      expect(bytes.length, greaterThan(1000));
+    });
+
+    testWidgets('screen selects a property and renders its current units', (
+      tester,
+    ) async {
+      final provider = ReportsProvider(
+        propertyInquiryPropertiesLoader: () async => [
+          {'id': 91, 'name': 'عقار اختبار الواجهة'},
+        ],
+        propertyInquiryUnitsLoader: (propertyId) async => [
+          {
+            'id': 92,
+            'unit_number': '12-A',
+            'status': 'شاغرة',
+            'active_contract_count': 0,
+          },
+        ],
+      );
+      try {
+        await tester.pumpWidget(
+          ChangeNotifierProvider<ReportsProvider>.value(
+            value: provider,
+            child: const MaterialApp(
+              home: Scaffold(body: PropertyUnitInquiryScreen()),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pumpAndSettle();
+
+        expect(find.text('استعلام العقار والوحدات'), findsOneWidget);
+        await tester.tap(find.byType(DropdownButtonFormField<int>));
+        await tester.pumpAndSettle();
+        expect(find.text('عقار اختبار الواجهة'), findsOneWidget);
+        await tester.tap(find.text('عقار اختبار الواجهة'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('12-A'), findsOneWidget);
+        expect(find.text('شاغرة'), findsOneWidget);
+        expect(find.text('0'), findsOneWidget);
+        expect(
+          find.textContaining('الحالة المعروضة تخص وقت الاستعلام فقط'),
+          findsOneWidget,
+        );
+      } finally {
+        provider.dispose();
+      }
+    });
+  });
 }
 
 class _TestAccountingProvider extends AccountingProvider {

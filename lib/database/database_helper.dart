@@ -6467,6 +6467,50 @@ class DatabaseHelper {
     ''');
   }
 
+  /// A deliberately limited, read-only projection for property/unit inquiry.
+  /// Do not add owner, tenant, lease, rent, balance, or sale-review fields here.
+  Future<List<Map<String, dynamic>>> getPropertyUnitInquiryProperties() async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT id, name
+      FROM properties
+      ORDER BY name COLLATE NOCASE, id
+    ''');
+  }
+
+  Future<List<Map<String, dynamic>>> getPropertyUnitInquiryUnits(
+    int propertyId,
+  ) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    if (propertyId <= 0) throw ArgumentError('العقار المحدد غير صالح');
+    final db = await instance.database;
+    final properties = await db.query(
+      'properties',
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [propertyId],
+      limit: 1,
+    );
+    if (properties.isEmpty) throw StateError('العقار المحدد غير موجود');
+
+    return db.rawQuery(
+      '''
+      SELECT
+        u.id,
+        u.unit_number,
+        u.status,
+        (SELECT COUNT(*) FROM contracts c
+          WHERE c.unit_id = u.id AND c.status = 'Active')
+          AS active_contract_count
+      FROM units u
+      WHERE u.property_id = ?
+      ORDER BY u.unit_number COLLATE NOCASE, u.id
+      ''',
+      [propertyId],
+    );
+  }
+
   Future<List<Map<String, dynamic>>> searchTenantsAndContracts(
     String query,
   ) async {
