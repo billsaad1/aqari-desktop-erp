@@ -154,6 +154,7 @@ class ReportsProvider with ChangeNotifier {
   AccountStatementReport? get ownerStatementReport => _ownerStatementReport;
   TrialBalanceReport? get trialBalanceReport => _trialBalanceReport;
   IncomeExpenseReport? get incomeExpenseReport => _incomeExpenseReport;
+  int get incomeExpenseReportGeneration => _incomeExpenseGeneration;
   TenantCollectionReport? get tenantCollectionReport => _tenantCollectionReport;
   List<TenantStatementAccount> get tenantStatementAccounts =>
       List.unmodifiable(_tenantStatementAccounts);

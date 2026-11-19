@@ -18,6 +18,7 @@ class IncomeExpenseReportPdf {
         .map(
           (row) => [
             row.accountType == 'Revenue' ? 'إيراد' : 'مصروف',
+            row.costCenterLabel,
             '${row.accountCode} - ${row.accountName}',
             PrintUtils.formatPdfAmount(row.debitMinor / 100),
             PrintUtils.formatPdfAmount(row.creditMinor / 100),
@@ -34,7 +35,7 @@ class IncomeExpenseReportPdf {
         pageTheme: PrintUtils.pageTheme(
           theme: theme,
           companyInfo: companyInfo,
-          pageFormat: PdfPageFormat.a4,
+          pageFormat: PdfPageFormat.a4.landscape,
           margin: const pw.EdgeInsets.fromLTRB(30, 26, 30, 30),
         ),
         header: (_) => PrintUtils.buildHeader(companyInfo, true),
@@ -77,6 +78,14 @@ class IncomeExpenseReportPdf {
                     report.endDate,
                     valueDirection: pw.TextDirection.ltr,
                     labelWidth: 60,
+                  ),
+                ),
+                pw.SizedBox(width: 16),
+                pw.Expanded(
+                  child: PrintUtils.buildLabelValue(
+                    'مركز التكلفة',
+                    report.costCenterFilterLabel,
+                    labelWidth: 65,
                   ),
                 ),
                 pw.SizedBox(width: 16),
@@ -129,13 +138,20 @@ class IncomeExpenseReportPdf {
           ),
           pw.SizedBox(height: 8),
           pw.Text(
-            'المصدر هو الحركات المرحلة على حسابات الإيرادات والمصروفات فقط؛ لا يمثل التقرير إجمالي الفواتير أو التحصيل غير المرحّل.',
+            'المصدر حركات دفتر الأستاذ المرحلة على حسابات الإيرادات والمصروفات، وفق مركز التكلفة المسجل على سطر القيد. يظهر السطر غير المسند ضمن «غير مخصص»؛ لا يمثل التقرير إجمالي الفواتير أو التحصيل غير المرحّل.',
             textDirection: pw.TextDirection.rtl,
             style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
           ),
           pw.SizedBox(height: 8),
           pw.TableHelper.fromTextArray(
-            headers: const ['النوع', 'الحساب', 'مدين', 'دائن', 'الصافي'],
+            headers: const [
+              'النوع',
+              'مركز التكلفة',
+              'الحساب',
+              'مدين',
+              'دائن',
+              'الصافي',
+            ],
             data: tableData,
             headerStyle: pw.TextStyle(
               fontSize: 9,
@@ -151,11 +167,12 @@ class IncomeExpenseReportPdf {
             tableDirection: pw.TextDirection.rtl,
             headerDirection: pw.TextDirection.rtl,
             columnWidths: const {
-              0: pw.FixedColumnWidth(56),
-              1: pw.FlexColumnWidth(2.4),
-              2: pw.FixedColumnWidth(74),
-              3: pw.FixedColumnWidth(74),
-              4: pw.FixedColumnWidth(78),
+              0: pw.FixedColumnWidth(48),
+              1: pw.FixedColumnWidth(86),
+              2: pw.FlexColumnWidth(2.4),
+              3: pw.FixedColumnWidth(68),
+              4: pw.FixedColumnWidth(68),
+              5: pw.FixedColumnWidth(72),
             },
             border: pw.TableBorder.all(
               color: PrintUtils.softBorder,
@@ -163,10 +180,11 @@ class IncomeExpenseReportPdf {
             ),
             cellAlignments: {
               0: pw.Alignment.center,
-              1: pw.Alignment.centerRight,
+              1: pw.Alignment.center,
               2: pw.Alignment.center,
               3: pw.Alignment.center,
               4: pw.Alignment.center,
+              5: pw.Alignment.center,
             },
           ),
           if (report.rows.isEmpty)

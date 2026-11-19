@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -11,7 +13,19 @@ import '../../models/income_expense_report_model.dart';
 import '../../providers/reports_provider.dart';
 
 class IncomeExpenseReportScreen extends StatefulWidget {
-  const IncomeExpenseReportScreen({super.key});
+  const IncomeExpenseReportScreen({
+    super.key,
+    this.companyInfoLoader,
+    this.pdfBuilder,
+  });
+
+  final Future<Map<String, dynamic>?> Function()? companyInfoLoader;
+  final Future<Uint8List> Function(
+    IncomeExpenseReport report,
+    Map<String, dynamic>? companyInfo,
+    String currency,
+  )?
+  pdfBuilder;
 
   @override
   State<IncomeExpenseReportScreen> createState() =>
@@ -28,6 +42,8 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
     text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
   );
 
+  String _selectedCostCenterKey = 'all';
+
   @override
   void initState() {
     super.initState();
@@ -39,6 +55,7 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
   void _onAuthorizationChanged() {
     if (!mounted) return;
     if (!PermissionRuntime.allows('reports', AppPermissionAction.view)) {
+      _selectedCostCenterKey = 'all';
       Provider.of<ReportsProvider>(
         context,
         listen: false,
@@ -68,6 +85,7 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
     if (selected != null && mounted) {
       setState(() {
         controller.text = DateFormat('yyyy-MM-dd').format(selected);
+        _selectedCostCenterKey = 'all';
       });
       Provider.of<ReportsProvider>(
         context,
@@ -85,43 +103,152 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
       ).showSnackBar(const SnackBar(content: Text('تحقق من صحة فترة التقرير')));
       return;
     }
-    await Provider.of<ReportsProvider>(
-      context,
-      listen: false,
-    ).loadIncomeExpenseReport(
+    final reports = Provider.of<ReportsProvider>(context, listen: false);
+    await reports.loadIncomeExpenseReport(
       _startDateController.text,
       _endDateController.text,
     );
+    if (!mounted) return;
+    final loadedReport = reports.incomeExpenseReport;
+    if (loadedReport != null &&
+        _selectedCostCenterKey != _effectiveFilterKey(loadedReport)) {
+      setState(() => _selectedCostCenterKey = 'all');
+    }
   }
+
+  List<IncomeExpenseCostCenter> _availableCostCenters(
+    IncomeExpenseReport? report,
+  ) {
+    final centers = <int, IncomeExpenseCostCenter>{
+      for (final center
+          in report?.costCenters ?? const <IncomeExpenseCostCenter>[])
+        center.id: center,
+    };
+    for (final row in report?.rows ?? const <IncomeExpenseAccountRow>[]) {
+      final id = row.costCenterId;
+      if (id == null || centers.containsKey(id)) continue;
+      final name = row.costCenterName?.trim() ?? '';
+      centers[id] = IncomeExpenseCostCenter(
+        id: id,
+        code: row.costCenterCode?.trim() ?? '',
+        name: name.isEmpty ? 'مركز غير معروف (#$id)' : name,
+      );
+    }
+    return centers.values.toList(growable: false);
+  }
+
+  String _effectiveFilterKey(IncomeExpenseReport report) {
+    final key = _selectedCostCenterKey;
+    if (key == 'all' || key == 'unassigned') return key;
+    if (!key.startsWith('center:')) return 'all';
+    final id = int.tryParse(key.substring('center:'.length));
+    return id != null &&
+            _availableCostCenters(report).any((center) => center.id == id)
+        ? key
+        : 'all';
+  }
+
+  String _filterLabel(IncomeExpenseReport report, String key) {
+    if (key == 'all') return 'كل مراكز التكلفة';
+    if (key == 'unassigned') return 'غير مخصص';
+    final id = int.tryParse(key.substring('center:'.length));
+    if (id == null) return 'كل مراكز التكلفة';
+    for (final center in _availableCostCenters(report)) {
+      if (center.id == id) return center.label;
+    }
+    return 'مركز غير معروف (#$id)';
+  }
+
+  IncomeExpenseReport _filteredReport(IncomeExpenseReport report) {
+    final key = _effectiveFilterKey(report);
+    final centerId = key.startsWith('center:')
+        ? int.tryParse(key.substring('center:'.length))
+        : null;
+    final filteredRows = report.rows
+        .where((row) {
+          if (key == 'all') return true;
+          if (key == 'unassigned') return row.costCenterId == null;
+          return centerId != null && row.costCenterId == centerId;
+        })
+        .toList(growable: false);
+    return report.withCostCenterFilter(
+      filteredRows: filteredRows,
+      filterKey: key,
+      filterLabel: _filterLabel(report, key),
+    );
+  }
+
+  List<DropdownMenuItem<String>> _costCenterFilterItems(
+    IncomeExpenseReport? report,
+  ) => [
+    const DropdownMenuItem(value: 'all', child: Text('كل مراكز التكلفة')),
+    const DropdownMenuItem(value: 'unassigned', child: Text('غير مخصص')),
+    for (final center in _availableCostCenters(report))
+      DropdownMenuItem(
+        value: 'center:${center.id}',
+        child: Text(center.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+  ];
 
   Future<void> _preview(IncomeExpenseReport report) async {
     if (!PermissionRuntime.allows('reports', AppPermissionAction.view)) return;
+    final reportsProvider = Provider.of<ReportsProvider>(
+      context,
+      listen: false,
+    );
+    final sourceReport = reportsProvider.incomeExpenseReport;
+    if (sourceReport == null ||
+        sourceReport.startDate != report.startDate ||
+        sourceReport.endDate != report.endDate) {
+      return;
+    }
+    final sourceGeneration = reportsProvider.incomeExpenseReportGeneration;
+    bool isCurrentSource() =>
+        reportsProvider.incomeExpenseReportGeneration == sourceGeneration &&
+        identical(reportsProvider.incomeExpenseReport, sourceReport);
+
+    final selectedFilterKey = report.costCenterFilterKey;
+    bool isCurrentSelection() =>
+        _selectedCostCenterKey == selectedFilterKey &&
+        report.startDate == _startDateController.text &&
+        report.endDate == _endDateController.text;
     try {
       final authorizationUserId = PermissionRuntime.userId;
       final authorizationRole = PermissionRuntime.role;
-      final companyInfo = await DatabaseHelper.instance.getCompanyInfo();
+      final companyInfoLoader =
+          widget.companyInfoLoader ?? DatabaseHelper.instance.getCompanyInfo;
+      final companyInfo = await companyInfoLoader();
       if (!mounted ||
+          !isCurrentSource() ||
           PermissionRuntime.userId != authorizationUserId ||
           PermissionRuntime.role != authorizationRole ||
+          !isCurrentSelection() ||
           !PermissionRuntime.allows('reports', AppPermissionAction.view)) {
         return;
       }
-      final bytes = await IncomeExpenseReportPdf.build(
-        report: report,
-        companyInfo: companyInfo,
-        currency: PrintUtils.currencyInArabic(report.currency),
-      );
+      final currency = PrintUtils.currencyInArabic(report.currency);
+      final pdfBuilder = widget.pdfBuilder;
+      final bytes = pdfBuilder == null
+          ? await IncomeExpenseReportPdf.build(
+              report: report,
+              companyInfo: companyInfo,
+              currency: currency,
+            )
+          : await pdfBuilder(report, companyInfo, currency);
       if (!mounted ||
+          !isCurrentSource() ||
           PermissionRuntime.userId != authorizationUserId ||
           PermissionRuntime.role != authorizationRole ||
+          !isCurrentSelection() ||
           !PermissionRuntime.allows('reports', AppPermissionAction.view)) {
         return;
       }
+      if (!mounted) return;
       await PdfDocumentPreviewDialog.show(
         context: context,
         bytes: bytes,
         fileName:
-            'حركة_الإيرادات_والمصروفات_${report.startDate}_${report.endDate}',
+            'حركة_الإيرادات_والمصروفات_${selectedFilterKey.replaceAll(':', '_')}_${report.startDate}_${report.endDate}',
         preferredIntent: PdfPreviewIntent.printDocument,
         permissionModule: 'reports',
       );
@@ -149,10 +276,12 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
           );
         }
         final report = reports.incomeExpenseReport;
-        final isCurrentReport =
+        final visibleReport =
             report != null &&
-            report.startDate == _startDateController.text &&
-            report.endDate == _endDateController.text;
+                report.startDate == _startDateController.text &&
+                report.endDate == _endDateController.text
+            ? _filteredReport(report)
+            : null;
 
         return Padding(
           padding: const EdgeInsets.all(20),
@@ -177,7 +306,7 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
                       ),
                       const SizedBox(height: 4),
                       const Text(
-                        'مصدر التقرير هو حركات دفتر الأستاذ المرحلة على حسابات الإيرادات والمصروفات فقط؛ لا تُجمع الفواتير أو التحصيلات مرة أخرى.',
+                        'المصدر حركات دفتر الأستاذ المرحلة فقط. يعرض التقرير مركز التكلفة المسجل على سطر القيد، ويُظهر الأسطر غير المسندة إلى مركز بصورة منفصلة.',
                       ),
                       const SizedBox(height: 16),
                       Wrap(
@@ -187,6 +316,31 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
                         children: [
                           _dateField('من تاريخ', _startDateController),
                           _dateField('إلى تاريخ', _endDateController),
+                          SizedBox(
+                            width: 260,
+                            child: DropdownButtonFormField<String>(
+                              key: const ValueKey(
+                                'incomeExpenseCostCenterFilter',
+                              ),
+                              isExpanded: true,
+                              initialValue:
+                                  visibleReport?.costCenterFilterKey ?? 'all',
+                              items: _costCenterFilterItems(visibleReport),
+                              onChanged: visibleReport == null
+                                  ? null
+                                  : (key) {
+                                      if (key == null) return;
+                                      setState(
+                                        () => _selectedCostCenterKey = key,
+                                      );
+                                    },
+                              decoration: const InputDecoration(
+                                labelText: 'مركز التكلفة',
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                              ),
+                            ),
+                          ),
                           FilledButton.icon(
                             onPressed: reports.isIncomeExpenseReportLoading
                                 ? null
@@ -203,8 +357,8 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
                             label: const Text('عرض التقرير'),
                           ),
                           OutlinedButton.icon(
-                            onPressed: isCurrentReport
-                                ? () => _preview(report)
+                            onPressed: visibleReport != null
+                                ? () => _preview(visibleReport)
                                 : null,
                             icon: const Icon(Icons.picture_as_pdf_outlined),
                             label: const Text('معاينة التقرير'),
@@ -221,17 +375,17 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
                   child: _errorBox(reports.incomeExpenseErrorMessage!),
                 ),
               const SizedBox(height: 12),
-              if (isCurrentReport) ...[
-                _summary(report),
+              if (visibleReport != null) ...[
+                _summary(visibleReport),
                 const SizedBox(height: 10),
                 Expanded(
-                  child: report.rows.isEmpty
+                  child: visibleReport.rows.isEmpty
                       ? const Center(
                           child: Text(
-                            'لا توجد حركات مرحلة على حسابات الإيرادات أو المصروفات في الفترة المحددة.',
+                            'لا توجد حركات مرحلة وفق مركز التكلفة والفترة المحددين.',
                           ),
                         )
-                      : _table(report),
+                      : _table(visibleReport),
                 ),
               ] else if (reports.isIncomeExpenseReportLoading) ...[
                 const Expanded(
@@ -331,6 +485,7 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
             ),
             columns: const [
               DataColumn(label: Text('النوع')),
+              DataColumn(label: Text('مركز التكلفة')),
               DataColumn(label: Text('رمز الحساب')),
               DataColumn(label: Text('اسم الحساب')),
               DataColumn(label: Text('مدين'), numeric: true),
@@ -344,6 +499,7 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
                     DataCell(
                       Text(row.accountType == 'Revenue' ? 'إيراد' : 'مصروف'),
                     ),
+                    DataCell(Text(row.costCenterLabel)),
                     DataCell(Text(row.accountCode)),
                     DataCell(Text(row.accountName)),
                     DataCell(Text(_amount(row.debitMinor))),
@@ -357,6 +513,7 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
                 ),
                 cells: [
                   const DataCell(Text('ملخص')),
+                  const DataCell(Text('')),
                   const DataCell(Text('')),
                   const DataCell(Text('صافي نتيجة الفترة')),
                   DataCell(

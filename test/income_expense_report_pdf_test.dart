@@ -10,6 +10,10 @@ void main() {
       startDate: '2026-02-01',
       endDate: '2026-02-28',
       currency: 'SAR',
+      costCenters: const [
+        IncomeExpenseCostCenter(id: 10, code: 'CC-01', name: 'مركز الإيرادات'),
+      ],
+      costCenterFilterLabel: 'كل مراكز التكلفة',
       rows: const [
         IncomeExpenseAccountRow(
           accountId: 10,
@@ -18,6 +22,9 @@ void main() {
           accountType: 'Revenue',
           debitMinor: 500,
           creditMinor: 8000,
+          costCenterId: 10,
+          costCenterCode: 'CC-01',
+          costCenterName: 'مركز الإيرادات',
         ),
         IncomeExpenseAccountRow(
           accountId: 20,
@@ -41,5 +48,6 @@ void main() {
     expect(report.revenueNetMinor, 7500);
     expect(report.expenseNetMinor, 2000);
     expect(report.netResultMinor, 5500);
+    expect(report.rows.first.costCenterLabel, 'CC-01 - مركز الإيرادات');
   });
 }
