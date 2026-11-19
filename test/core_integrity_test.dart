@@ -985,12 +985,6 @@ void main() {
             role: 'SuperAdmin',
             permissionRows: const [],
           );
-          final db = await DatabaseHelper.instance.database;
-          await db.delete(
-            'audit_logs',
-            where: 'user_id = ?',
-            whereArgs: [userId],
-          );
           await DatabaseHelper.instance.deleteUser(userId);
           auth.dispose();
         }
@@ -1030,12 +1024,6 @@ void main() {
           role: 'SuperAdmin',
           permissionRows: const [],
         );
-        final db = await DatabaseHelper.instance.database;
-        await db.delete(
-          'audit_logs',
-          where: 'user_id IN (?, ?)',
-          whereArgs: [firstId, secondId],
-        );
         await DatabaseHelper.instance.deleteUser(firstId);
         await DatabaseHelper.instance.deleteUser(secondId);
       }
@@ -1064,12 +1052,6 @@ void main() {
             userId: 1,
             role: 'SuperAdmin',
             permissionRows: const [],
-          );
-          final db = await DatabaseHelper.instance.database;
-          await db.delete(
-            'audit_logs',
-            where: 'user_id = ?',
-            whereArgs: [userId],
           );
           await DatabaseHelper.instance.deleteUser(userId);
         }
@@ -1128,12 +1110,6 @@ void main() {
             role: 'SuperAdmin',
             permissionRows: const [],
           );
-          final db = await DatabaseHelper.instance.database;
-          await db.delete(
-            'audit_logs',
-            where: 'user_id = ?',
-            whereArgs: [userId],
-          );
           await DatabaseHelper.instance.deleteUser(userId);
           auth.dispose();
         }
@@ -1164,12 +1140,6 @@ void main() {
           userId: 1,
           role: 'SuperAdmin',
           permissionRows: const [],
-        );
-        final db = await DatabaseHelper.instance.database;
-        await db.delete(
-          'audit_logs',
-          where: 'user_id = ?',
-          whereArgs: [userId],
         );
         await DatabaseHelper.instance.deleteUser(userId);
       }
@@ -1824,7 +1794,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        22,
+        DatabaseHelper.schemaVersion,
       );
       expect(
         (await restored.rawQuery(
@@ -1867,7 +1837,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        22,
+        DatabaseHelper.schemaVersion,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -3470,7 +3440,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        22,
+        DatabaseHelper.schemaVersion,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -4860,7 +4830,7 @@ void main() {
       final upgraded = await helper.database;
       expect(
         (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
-        22,
+        DatabaseHelper.schemaVersion,
       );
       final migratedHistoricalCancellation = (await upgraded.query(
         'contracts',

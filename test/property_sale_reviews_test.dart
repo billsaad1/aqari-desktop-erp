@@ -438,7 +438,10 @@ void main() {
       await helper.close();
 
       final upgraded = await helper.database;
-      expect(_count(await upgraded.rawQuery('PRAGMA user_version')), 22);
+      expect(
+        _count(await upgraded.rawQuery('PRAGMA user_version')),
+        DatabaseHelper.schemaVersion,
+      );
       final permission = (await upgraded.query(
         'user_permissions',
         where: "user_id = 1 AND screen_name = 'properties'",
