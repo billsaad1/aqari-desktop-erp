@@ -15,6 +15,7 @@ import '../reports_inquiry/reports_main_screen.dart';
 import '../sms_gateway/sms_main_screen.dart';
 import '../system_services/system_services_screen.dart';
 import '../system_settings/system_settings_screen.dart';
+import '../tenant_notices/tenant_notices_screen.dart';
 import '../tenant_financial/tenant_financial_main_screen.dart';
 import '../tenant_financial/voucher_history_screen.dart';
 import '../tenants_leasing/leasing_main_screen.dart';
@@ -87,7 +88,7 @@ class MainShellScreen extends StatelessWidget {
   }
 
   int? _firstAccessibleIndex(AuthProvider auth) {
-    for (var index = 0; index <= 10; index++) {
+    for (var index = 0; index <= 11; index++) {
       final module = AppPermissionCatalog.codeForNavigationIndex(index);
       if (module != null && auth.canAccessScreen(module)) return index;
     }
@@ -107,6 +108,7 @@ class MainShellScreen extends StatelessWidget {
       8 => 'الرسائل النصية',
       9 => 'خدمات البرنامج',
       10 => 'سجل السندات',
+      11 => 'إشعارات المستأجرين',
       _ => 'نظام إدارة العقارات',
     };
   }
@@ -124,6 +126,7 @@ class MainShellScreen extends StatelessWidget {
       8 => const SmsMainScreen(),
       9 => const SystemServicesScreen(),
       10 => const VoucherHistoryScreen(),
+      11 => const TenantNoticesScreen(),
       _ => const DashboardScreen(),
     };
   }
@@ -403,6 +406,14 @@ class AppSidebar extends StatelessWidget {
                         'الرسائل النصية',
                         Icons.mark_chat_unread_outlined,
                         8,
+                        navProvider,
+                      ),
+                    if (auth.canAccessScreen('notices'))
+                      _buildNavItem(
+                        context,
+                        'إشعارات المستأجرين',
+                        Icons.mark_email_unread_outlined,
+                        11,
                         navProvider,
                       ),
                     if (auth.canAccessScreen('system_services')) ...[

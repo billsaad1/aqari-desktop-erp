@@ -1790,7 +1790,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        19,
+        20,
       );
       expect(
         (await restored.rawQuery(
@@ -1833,7 +1833,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        19,
+        20,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -3435,7 +3435,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        19,
+        20,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -4099,7 +4099,7 @@ void main() {
       final upgraded = await helper.database;
       expect(
         (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
-        19,
+        20,
       );
       final migratedHistoricalCancellation = (await upgraded.query(
         'contracts',

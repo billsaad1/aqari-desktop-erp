@@ -13,7 +13,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 19;
+  static const int _schemaVersion = 20;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -514,6 +514,32 @@ class DatabaseHelper {
         'sent_at',
         'status',
       ],
+      'tenant_notices': [
+        'id',
+        'tenant_id',
+        'contract_id',
+        'recipient_name_snapshot',
+        'recipient_phone_snapshot',
+        'contract_snapshot_json',
+        'subject',
+        'body',
+        'notice_date',
+        'status',
+        'created_by',
+        'created_at',
+        'updated_by',
+        'updated_at',
+        'issued_by',
+        'issued_at',
+      ],
+      'tenant_notice_events': [
+        'id',
+        'notice_id',
+        'event_type',
+        'user_id',
+        'created_at',
+        'details',
+      ],
     };
     final missingSchema = <String>[];
     for (final entry in requiredColumns.entries) {
@@ -541,13 +567,17 @@ class DatabaseHelper {
       'refund_allocations_source_cap',
       'refund_allocations_no_update',
       'refund_allocations_no_delete',
+      'tenant_notices_issued_immutable',
+      'tenant_notices_no_delete',
+      'tenant_notice_events_no_update',
+      'tenant_notice_events_no_delete',
     ];
     final missingTriggers = requiredTriggers
         .where((trigger) => !triggers.contains(trigger))
         .toList();
     if (missingTriggers.isNotEmpty) {
       throw StateError(
-        'مخطط النسخة يفتقد حواجز سلامة الوحدات والاستردادات: ${missingTriggers.join('، ')}',
+        'مخطط النسخة يفتقد حواجز سلامة الوحدات والاستردادات والإشعارات: ${missingTriggers.join('، ')}',
       );
     }
     final views = (await db.rawQuery(
@@ -1000,6 +1030,9 @@ class DatabaseHelper {
       await _ensureColumn(db, 'contracts', 'cancellation_reason', 'TEXT');
       await _ensureColumn(db, 'contracts', 'cancelled_at', 'TEXT');
     }
+    if (oldVersion < 20) {
+      await _createTenantNoticeSchema(db);
+    }
   }
 
   Future<void> _ensureColumn(
@@ -1439,6 +1472,85 @@ class DatabaseHelper {
     ''');
   }
 
+  Future<void> _createTenantNoticeSchema(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS tenant_notices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL,
+        contract_id INTEGER,
+        recipient_name_snapshot TEXT NOT NULL CHECK (length(trim(recipient_name_snapshot)) > 0),
+        recipient_phone_snapshot TEXT,
+        contract_snapshot_json TEXT,
+        subject TEXT NOT NULL CHECK (length(trim(subject)) BETWEEN 1 AND 160),
+        body TEXT NOT NULL CHECK (length(trim(body)) BETWEEN 1 AND 10000),
+        notice_date TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft', 'Issued')),
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_by INTEGER,
+        updated_at TEXT NOT NULL,
+        issued_by INTEGER,
+        issued_at TEXT,
+        FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE RESTRICT,
+        FOREIGN KEY (contract_id) REFERENCES contracts (id) ON DELETE RESTRICT,
+        FOREIGN KEY (created_by) REFERENCES users (id),
+        FOREIGN KEY (updated_by) REFERENCES users (id),
+        FOREIGN KEY (issued_by) REFERENCES users (id),
+        CHECK ((status = 'Draft' AND issued_by IS NULL AND issued_at IS NULL)
+          OR (status = 'Issued' AND issued_at IS NOT NULL))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS tenant_notices_tenant_date_idx
+      ON tenant_notices(tenant_id, notice_date DESC, id DESC)
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS tenant_notice_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        notice_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        user_id INTEGER,
+        created_at TEXT NOT NULL,
+        details TEXT,
+        FOREIGN KEY (notice_id) REFERENCES tenant_notices (id) ON DELETE RESTRICT,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS tenant_notice_events_notice_idx
+      ON tenant_notice_events(notice_id, id)
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS tenant_notices_issued_immutable
+      BEFORE UPDATE ON tenant_notices
+      WHEN OLD.status = 'Issued'
+      BEGIN
+        SELECT RAISE(ABORT, 'issued tenant notices are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS tenant_notices_no_delete
+      BEFORE DELETE ON tenant_notices
+      BEGIN
+        SELECT RAISE(ABORT, 'tenant notices cannot be deleted');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS tenant_notice_events_no_update
+      BEFORE UPDATE ON tenant_notice_events
+      BEGIN
+        SELECT RAISE(ABORT, 'tenant notice events are immutable');
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS tenant_notice_events_no_delete
+      BEFORE DELETE ON tenant_notice_events
+      BEGIN
+        SELECT RAISE(ABORT, 'tenant notice events cannot be deleted');
+      END
+    ''');
+  }
+
   Future _createDB(Database db, int version) async {
     // 1. Company Info
     await db.execute('''
@@ -1796,6 +1908,7 @@ class DatabaseHelper {
     ''');
 
     await _createRefundSchema(db);
+    await _createTenantNoticeSchema(db);
     await _insertSeedData(db);
   }
 
@@ -6192,6 +6305,438 @@ class DatabaseHelper {
     ''',
       [todayStr, targetDateStr],
     );
+  }
+
+  // --- Tenant Notices ---
+
+  Future<List<Map<String, dynamic>>> getTenantNoticeRecipients() async {
+    PermissionRuntime.require('notices', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.query(
+      'tenants',
+      columns: ['id', 'name', 'mobile'],
+      orderBy: 'name COLLATE NOCASE, id',
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getTenantNoticeContracts(
+    int tenantId,
+  ) async {
+    PermissionRuntime.require('notices', AppPermissionAction.view);
+    if (tenantId <= 0) throw ArgumentError('معرف المستأجر غير صحيح');
+    final db = await instance.database;
+    return db.rawQuery(
+      '''
+      SELECT
+        c.id AS contract_id,
+        c.start_date,
+        c.end_date,
+        c.status AS contract_status,
+        p.name AS property_name,
+        u.unit_number
+      FROM contracts c
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
+      WHERE c.tenant_id = ?
+      ORDER BY c.start_date DESC, c.id DESC
+      ''',
+      [tenantId],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getTenantNotices() async {
+    PermissionRuntime.require('notices', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.query('tenant_notices', orderBy: 'id DESC');
+  }
+
+  Future<Map<String, dynamic>?> getTenantNotice(int noticeId) async {
+    PermissionRuntime.require('notices', AppPermissionAction.view);
+    if (noticeId <= 0) throw ArgumentError('معرف الإشعار غير صحيح');
+    final db = await instance.database;
+    final rows = await db.query(
+      'tenant_notices',
+      where: 'id = ?',
+      whereArgs: [noticeId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<List<Map<String, dynamic>>> getTenantNoticeEvents(int noticeId) async {
+    PermissionRuntime.require('notices', AppPermissionAction.view);
+    if (noticeId <= 0) throw ArgumentError('معرف الإشعار غير صحيح');
+    final db = await instance.database;
+    return db.query(
+      'tenant_notice_events',
+      where: 'notice_id = ?',
+      whereArgs: [noticeId],
+      orderBy: 'id ASC',
+    );
+  }
+
+  Future<int> createTenantNoticeDraft({
+    required int tenantId,
+    int? contractId,
+    required String subject,
+    required String body,
+    required String noticeDate,
+  }) async {
+    PermissionRuntime.require('notices', AppPermissionAction.add);
+    final values = _validatedNoticeContent(
+      subject: subject,
+      body: body,
+      noticeDate: noticeDate,
+    );
+    if (tenantId <= 0) throw ArgumentError('اختر مستأجرًا صحيحًا');
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final tenantRows = await txn.query(
+        'tenants',
+        columns: ['id', 'name', 'mobile'],
+        where: 'id = ?',
+        whereArgs: [tenantId],
+        limit: 1,
+      );
+      if (tenantRows.isEmpty) throw StateError('المستأجر المحدد غير موجود');
+      final tenant = tenantRows.first;
+      final contract = await _tenantNoticeContractSnapshot(
+        txn,
+        tenantId: tenantId,
+        contractId: contractId,
+      );
+      final now = DateTime.now().toIso8601String();
+      final userId = await _verifiedAuditUserId(txn);
+      final noticeId = await txn.insert('tenant_notices', {
+        'tenant_id': tenantId,
+        'contract_id': contractId,
+        'recipient_name_snapshot': tenant['name']?.toString().trim() ?? '',
+        'recipient_phone_snapshot': tenant['mobile']?.toString().trim() ?? '',
+        'contract_snapshot_json': contract == null
+            ? null
+            : jsonEncode(contract),
+        'subject': values['subject'],
+        'body': values['body'],
+        'notice_date': values['notice_date'],
+        'status': 'Draft',
+        'created_by': userId,
+        'created_at': now,
+        'updated_by': userId,
+        'updated_at': now,
+      });
+      await _recordTenantNoticeEvent(
+        txn,
+        noticeId: noticeId,
+        eventType: 'draft_created',
+        details: {'tenant_id': tenantId, 'contract_id': contractId},
+        userId: userId,
+        timestamp: now,
+      );
+      return noticeId;
+    });
+  }
+
+  Future<void> updateTenantNoticeDraft({
+    required int noticeId,
+    required int tenantId,
+    int? contractId,
+    required String subject,
+    required String body,
+    required String noticeDate,
+  }) async {
+    PermissionRuntime.require('notices', AppPermissionAction.edit);
+    if (noticeId <= 0 || tenantId <= 0) {
+      throw ArgumentError('معرف الإشعار أو المستأجر غير صحيح');
+    }
+    final values = _validatedNoticeContent(
+      subject: subject,
+      body: body,
+      noticeDate: noticeDate,
+    );
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'tenant_notices',
+        columns: ['status'],
+        where: 'id = ?',
+        whereArgs: [noticeId],
+        limit: 1,
+      );
+      if (existing.isEmpty) throw StateError('الإشعار غير موجود');
+      if (existing.first['status'] != 'Draft') {
+        throw StateError('لا يمكن تعديل إشعار سبق إصداره');
+      }
+      final tenantRows = await txn.query(
+        'tenants',
+        columns: ['id', 'name', 'mobile'],
+        where: 'id = ?',
+        whereArgs: [tenantId],
+        limit: 1,
+      );
+      if (tenantRows.isEmpty) throw StateError('المستأجر المحدد غير موجود');
+      final tenant = tenantRows.first;
+      final contract = await _tenantNoticeContractSnapshot(
+        txn,
+        tenantId: tenantId,
+        contractId: contractId,
+      );
+      final now = DateTime.now().toIso8601String();
+      final userId = await _verifiedAuditUserId(txn);
+      final updated = await txn.update(
+        'tenant_notices',
+        {
+          'tenant_id': tenantId,
+          'contract_id': contractId,
+          'recipient_name_snapshot': tenant['name']?.toString().trim() ?? '',
+          'recipient_phone_snapshot': tenant['mobile']?.toString().trim() ?? '',
+          'contract_snapshot_json': contract == null
+              ? null
+              : jsonEncode(contract),
+          'subject': values['subject'],
+          'body': values['body'],
+          'notice_date': values['notice_date'],
+          'updated_by': userId,
+          'updated_at': now,
+        },
+        where: "id = ? AND status = 'Draft'",
+        whereArgs: [noticeId],
+      );
+      if (updated != 1) throw StateError('تغيرت حالة الإشعار؛ أعد تحميله');
+      await _recordTenantNoticeEvent(
+        txn,
+        noticeId: noticeId,
+        eventType: 'draft_updated',
+        details: {'tenant_id': tenantId, 'contract_id': contractId},
+        userId: userId,
+        timestamp: now,
+      );
+    });
+  }
+
+  Future<void> issueTenantNotice(int noticeId) async {
+    PermissionRuntime.require('notices', AppPermissionAction.post);
+    if (noticeId <= 0) throw ArgumentError('معرف الإشعار غير صحيح');
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'tenant_notices',
+        where: 'id = ?',
+        whereArgs: [noticeId],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('الإشعار غير موجود');
+      if (rows.first['status'] != 'Draft') {
+        throw StateError('الإشعار صادر مسبقًا ولا يمكن إصداره مرة أخرى');
+      }
+      final now = DateTime.now().toIso8601String();
+      final userId = await _verifiedAuditUserId(txn);
+      final updated = await txn.update(
+        'tenant_notices',
+        {'status': 'Issued', 'issued_by': userId, 'issued_at': now},
+        where: "id = ? AND status = 'Draft'",
+        whereArgs: [noticeId],
+      );
+      if (updated != 1) throw StateError('تعذر إصدار الإشعار؛ أعد تحميله');
+      await _recordTenantNoticeEvent(
+        txn,
+        noticeId: noticeId,
+        eventType: 'issued',
+        details: const {},
+        userId: userId,
+        timestamp: now,
+      );
+    });
+  }
+
+  Future<void> recordTenantNoticeWordExport({
+    required int noticeId,
+    required String fileName,
+  }) async {
+    PermissionRuntime.require('notices', AppPermissionAction.print);
+    if (noticeId <= 0 || fileName.trim().isEmpty) {
+      throw ArgumentError('بيانات تصدير Word غير مكتملة');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'tenant_notices',
+        columns: ['status'],
+        where: 'id = ?',
+        whereArgs: [noticeId],
+        limit: 1,
+      );
+      if (rows.isEmpty || rows.first['status'] != 'Issued') {
+        throw StateError('يجب إصدار الإشعار قبل تصديره إلى Word');
+      }
+      final now = DateTime.now().toIso8601String();
+      await _recordTenantNoticeEvent(
+        txn,
+        noticeId: noticeId,
+        eventType: 'word_exported',
+        details: {
+          'file_name': fileName.trim().substring(
+            0,
+            fileName.trim().length.clamp(0, 200),
+          ),
+        },
+        userId: await _verifiedAuditUserId(txn),
+        timestamp: now,
+      );
+    });
+  }
+
+  Map<String, Object?> _validatedNoticeContent({
+    required String subject,
+    required String body,
+    required String noticeDate,
+  }) {
+    final normalizedSubject = subject.trim();
+    final normalizedBody = body.trim();
+    final normalizedNoticeDate = _normalizeStrictNoticeDate(noticeDate.trim());
+    if (normalizedSubject.isEmpty || normalizedSubject.length > 160) {
+      throw ArgumentError('موضوع الإشعار مطلوب وبحد أقصى 160 حرفًا');
+    }
+    if (normalizedBody.isEmpty || normalizedBody.length > 10000) {
+      throw ArgumentError('نص الإشعار مطلوب وبحد أقصى 10000 حرف');
+    }
+    if (normalizedNoticeDate == null) {
+      throw ArgumentError(
+        'تاريخ الإشعار يجب أن يكون يومًا صحيحًا بصيغة YYYY-MM-DD بين 2000 و2100',
+      );
+    }
+    return {
+      'subject': normalizedSubject,
+      'body': normalizedBody,
+      'notice_date': normalizedNoticeDate,
+    };
+  }
+
+  String? _normalizeStrictNoticeDate(String value) {
+    final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value);
+    if (match == null) return null;
+    final year = int.parse(match[1]!);
+    final month = int.parse(match[2]!);
+    final day = int.parse(match[3]!);
+    if (year < 2000 || year > 2100) return null;
+    final parsed = DateTime.utc(year, month, day);
+    if (parsed.year != year || parsed.month != month || parsed.day != day) {
+      return null;
+    }
+    return value;
+  }
+
+  Future<Map<String, Object?>?> _tenantNoticeContractSnapshot(
+    DatabaseExecutor txn, {
+    required int tenantId,
+    required int? contractId,
+  }) async {
+    if (contractId == null) return null;
+    if (contractId <= 0) throw ArgumentError('معرف العقد غير صحيح');
+    final rows = await txn.rawQuery(
+      '''
+      SELECT
+        c.id AS contract_id,
+        c.start_date,
+        c.end_date,
+        c.status AS contract_status,
+        c.party_snapshot AS contract_party_snapshot_json,
+        p.name AS property_name,
+        u.unit_number
+      FROM contracts c
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
+      WHERE c.id = ? AND c.tenant_id = ?
+      LIMIT 1
+      ''',
+      [contractId, tenantId],
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError('العقد المحدد لا يتبع المستأجر المختار');
+    }
+    final row = rows.first;
+    final rawPartySnapshot = row['contract_party_snapshot_json'];
+    var partySnapshot = <String, dynamic>{};
+    if (rawPartySnapshot is String && rawPartySnapshot.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawPartySnapshot);
+        if (decoded is Map) {
+          partySnapshot = decoded.map(
+            (key, value) => MapEntry(key.toString(), value),
+          );
+        }
+      } on FormatException {
+        partySnapshot = <String, dynamic>{};
+      }
+    }
+
+    Map<String, dynamic> snapshotSection(String key) {
+      final value = partySnapshot[key];
+      if (value is! Map) return const <String, dynamic>{};
+      return value.map((key, value) => MapEntry(key.toString(), value));
+    }
+
+    String? snapshotText(Object? value) {
+      final text = value?.toString().trim() ?? '';
+      return text.isEmpty ? null : text;
+    }
+
+    final tenantSnapshot = snapshotSection('tenant');
+    final ownerSnapshot = snapshotSection('owner');
+    final propertySnapshot = snapshotSection('property');
+    final unitSnapshot = snapshotSection('unit');
+    final snapshotPropertyName = snapshotText(propertySnapshot['name']);
+    final snapshotUnitNumber = snapshotText(unitSnapshot['unit_number']);
+    final hasPropertySnapshot = snapshotPropertyName != null;
+    final hasUnitSnapshot = snapshotUnitNumber != null;
+    final propertyUnitSnapshotSource = hasPropertySnapshot && hasUnitSnapshot
+        ? 'contract_party_snapshot'
+        : hasPropertySnapshot || hasUnitSnapshot
+        ? 'partial_contract_party_snapshot'
+        : 'current_master_data_at_notice_creation';
+    return {
+      'contract_id': row['contract_id'],
+      'start_date': row['start_date'],
+      'end_date': row['end_date'],
+      'contract_status': row['contract_status'],
+      'contract_tenant_name': snapshotText(tenantSnapshot['name']),
+      'contract_owner_name': snapshotText(ownerSnapshot['name']),
+      'property_name':
+          snapshotPropertyName ?? snapshotText(row['property_name']),
+      'unit_number': snapshotUnitNumber ?? snapshotText(row['unit_number']),
+      'party_snapshot_source': propertyUnitSnapshotSource,
+      'property_name_source': hasPropertySnapshot
+          ? 'contract_party_snapshot'
+          : 'current_master_data_at_notice_creation',
+      'unit_number_source': hasUnitSnapshot
+          ? 'contract_party_snapshot'
+          : 'current_master_data_at_notice_creation',
+      'contract_terms_source': 'current_contract_data_at_notice_creation',
+    };
+  }
+
+  Future<void> _recordTenantNoticeEvent(
+    DatabaseExecutor txn, {
+    required int noticeId,
+    required String eventType,
+    required Map<String, Object?> details,
+    required int? userId,
+    required String timestamp,
+  }) async {
+    final eventDetails = <String, Object?>{'notice_id': noticeId, ...details};
+    await txn.insert('tenant_notice_events', {
+      'notice_id': noticeId,
+      'event_type': eventType,
+      'user_id': userId,
+      'created_at': timestamp,
+      'details': jsonEncode(eventDetails),
+    });
+    await txn.insert('audit_logs', {
+      'user_id': userId,
+      'action': 'tenant_notice_$eventType',
+      'details': jsonEncode(eventDetails),
+      'timestamp': timestamp,
+    });
   }
 
   // --- SMS Operations ---

@@ -36,6 +36,7 @@ class AppPermissionCatalog {
     AppPermissionModule('lookups', 'البيانات الأساسية'),
     AppPermissionModule('properties', 'العقارات والملاك والوحدات'),
     AppPermissionModule('leasing', 'المستأجرون وعقود الإيجار'),
+    AppPermissionModule('notices', 'إشعارات المستأجرين'),
     AppPermissionModule('tenant_financial', 'العمليات المالية للمستأجرين'),
     AppPermissionModule('accounting', 'الحسابات العامة والقيود'),
     AppPermissionModule('reports', 'التقارير والاستعلامات'),
@@ -62,6 +63,7 @@ class AppPermissionCatalog {
     8 => 'sms',
     9 => 'system_services',
     10 => 'voucher_history',
+    11 => 'notices',
     _ => null,
   };
 
@@ -103,6 +105,12 @@ class AppPermissionCatalog {
         }.contains(action),
         'reports' || 'voucher_history' => action == AppPermissionAction.print,
         'sms' => action == AppPermissionAction.add,
+        'notices' => const {
+          AppPermissionAction.add,
+          AppPermissionAction.edit,
+          AppPermissionAction.print,
+          AppPermissionAction.post,
+        }.contains(action),
         _ => false,
       };
     }
@@ -116,6 +124,7 @@ class AppPermissionCatalog {
       'Accountant' => const {
         'dashboard',
         'leasing',
+        'notices',
         'tenant_financial',
         'accounting',
         'reports',

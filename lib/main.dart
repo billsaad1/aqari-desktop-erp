@@ -9,6 +9,7 @@ import 'providers/property_provider.dart';
 import 'providers/leasing_provider.dart';
 import 'providers/reports_provider.dart';
 import 'providers/sms_provider.dart';
+import 'providers/tenant_notices_provider.dart';
 import 'features/auth/login_screen.dart';
 import 'core/app_theme.dart';
 
@@ -45,6 +46,17 @@ void main() async {
             next.syncAuthorization(
               userId: auth.currentUser?.id,
               canViewSms: auth.canAccessScreen('sms'),
+            );
+            return next;
+          },
+        ),
+        ChangeNotifierProxyProvider<AuthProvider, TenantNoticesProvider>(
+          create: (_) => TenantNoticesProvider(),
+          update: (context, auth, provider) {
+            final next = provider ?? TenantNoticesProvider();
+            next.syncAuthorization(
+              userId: auth.currentUser?.id,
+              canViewNotices: auth.canAccessScreen('notices'),
             );
             return next;
           },
