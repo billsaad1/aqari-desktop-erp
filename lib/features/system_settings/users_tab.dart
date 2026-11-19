@@ -449,49 +449,56 @@ class _UsersTabState extends State<UsersTab> {
                               runSpacing: 4,
                               children: [
                                 for (final action in AppPermissionAction.values)
-                                  SizedBox(
-                                    width: 145,
-                                    child: CheckboxListTile(
-                                      dense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                      controlAffinity:
-                                          ListTileControlAffinity.leading,
-                                      title: Text(action.arabicLabel),
-                                      value:
-                                          values[module.code]![action] ?? false,
-                                      onChanged: isSuperAdmin || isSaving
-                                          ? null
-                                          : (value) {
-                                              setDialogState(() {
-                                                resetAll = false;
-                                                touchedModules.add(module.code);
-                                                final enabled = value ?? false;
-                                                values[module.code]![action] =
-                                                    enabled;
-                                                if (action ==
-                                                        AppPermissionAction
-                                                            .view &&
-                                                    !enabled) {
-                                                  for (final otherAction
-                                                      in AppPermissionAction
-                                                          .values) {
+                                  if (action !=
+                                          AppPermissionAction.reviewApprove ||
+                                      module.code == 'property_sales')
+                                    SizedBox(
+                                      width: 145,
+                                      child: CheckboxListTile(
+                                        dense: true,
+                                        contentPadding: EdgeInsets.zero,
+                                        controlAffinity:
+                                            ListTileControlAffinity.leading,
+                                        title: Text(action.arabicLabel),
+                                        value:
+                                            values[module.code]![action] ??
+                                            false,
+                                        onChanged: isSuperAdmin || isSaving
+                                            ? null
+                                            : (value) {
+                                                setDialogState(() {
+                                                  resetAll = false;
+                                                  touchedModules.add(
+                                                    module.code,
+                                                  );
+                                                  final enabled =
+                                                      value ?? false;
+                                                  values[module.code]![action] =
+                                                      enabled;
+                                                  if (action ==
+                                                          AppPermissionAction
+                                                              .view &&
+                                                      !enabled) {
+                                                    for (final otherAction
+                                                        in AppPermissionAction
+                                                            .values) {
+                                                      values[module
+                                                              .code]![otherAction] =
+                                                          false;
+                                                    }
+                                                  } else if (action !=
+                                                          AppPermissionAction
+                                                              .view &&
+                                                      enabled) {
                                                     values[module
-                                                            .code]![otherAction] =
-                                                        false;
+                                                            .code]![AppPermissionAction
+                                                            .view] =
+                                                        true;
                                                   }
-                                                } else if (action !=
-                                                        AppPermissionAction
-                                                            .view &&
-                                                    enabled) {
-                                                  values[module
-                                                          .code]![AppPermissionAction
-                                                          .view] =
-                                                      true;
-                                                }
-                                              });
-                                            },
+                                                });
+                                              },
+                                      ),
                                     ),
-                                  ),
                               ],
                             ),
                           ),

@@ -1,4 +1,4 @@
-enum AppPermissionAction { view, add, edit, delete, print, post }
+enum AppPermissionAction { view, add, edit, delete, print, post, reviewApprove }
 
 extension AppPermissionActionDetails on AppPermissionAction {
   String get databaseColumn => switch (this) {
@@ -8,6 +8,7 @@ extension AppPermissionActionDetails on AppPermissionAction {
     AppPermissionAction.delete => 'can_delete',
     AppPermissionAction.print => 'can_print',
     AppPermissionAction.post => 'can_post',
+    AppPermissionAction.reviewApprove => 'can_review_approve',
   };
 
   String get arabicLabel => switch (this) {
@@ -17,6 +18,7 @@ extension AppPermissionActionDetails on AppPermissionAction {
     AppPermissionAction.delete => 'الحذف',
     AppPermissionAction.print => 'الطباعة',
     AppPermissionAction.post => 'الترحيل',
+    AppPermissionAction.reviewApprove => 'مراجعة واعتماد طلب البيع',
   };
 }
 
@@ -35,6 +37,7 @@ class AppPermissionCatalog {
     AppPermissionModule('system_settings', 'إعدادات النظام والمستخدمون'),
     AppPermissionModule('lookups', 'البيانات الأساسية'),
     AppPermissionModule('properties', 'العقارات والملاك والوحدات'),
+    AppPermissionModule('property_sales', 'مراجعة بيع العقار والوحدة'),
     AppPermissionModule('leasing', 'المستأجرون وعقود الإيجار'),
     AppPermissionModule('notices', 'إشعارات المستأجرين'),
     AppPermissionModule('tenant_financial', 'العمليات المالية للمستأجرين'),
@@ -64,6 +67,7 @@ class AppPermissionCatalog {
     9 => 'system_services',
     10 => 'voucher_history',
     11 => 'notices',
+    12 => 'property_sales',
     _ => null,
   };
 
@@ -75,6 +79,9 @@ class AppPermissionCatalog {
     if (role == 'SuperAdmin') return true;
     if (!_roleAllowsView(role, module)) return false;
     if (action == AppPermissionAction.view) return true;
+    if (action == AppPermissionAction.reviewApprove) {
+      return role == 'Accountant' && module == 'property_sales';
+    }
 
     if (role == 'Admin') return true;
     if (role == 'DataEntry') {
@@ -82,17 +89,24 @@ class AppPermissionCatalog {
         AppPermissionAction.add || AppPermissionAction.edit => const {
           'lookups',
           'properties',
+          'property_sales',
           'leasing',
         }.contains(module),
         AppPermissionAction.print => module == 'leasing',
         AppPermissionAction.view ||
         AppPermissionAction.delete ||
-        AppPermissionAction.post => false,
+        AppPermissionAction.post ||
+        AppPermissionAction.reviewApprove => false,
       };
     }
     if (role == 'Accountant') {
       return switch (module) {
         'leasing' => const {
+          AppPermissionAction.add,
+          AppPermissionAction.edit,
+          AppPermissionAction.print,
+        }.contains(action),
+        'property_sales' => const {
           AppPermissionAction.add,
           AppPermissionAction.edit,
           AppPermissionAction.print,
@@ -125,6 +139,7 @@ class AppPermissionCatalog {
         'dashboard',
         'leasing',
         'notices',
+        'property_sales',
         'tenant_financial',
         'accounting',
         'reports',
@@ -135,6 +150,7 @@ class AppPermissionCatalog {
         'dashboard',
         'lookups',
         'properties',
+        'property_sales',
         'leasing',
       }.contains(module),
       _ => false,

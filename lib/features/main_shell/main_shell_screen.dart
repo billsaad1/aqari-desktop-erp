@@ -11,6 +11,7 @@ import '../dashboard/dashboard_screen.dart';
 import '../general_accounting/accounting_main_screen.dart';
 import '../master_data/lookups_screen.dart';
 import '../properties_owners/property_main_screen.dart';
+import '../property_sales/property_sale_reviews_screen.dart';
 import '../reports_inquiry/reports_main_screen.dart';
 import '../sms_gateway/sms_main_screen.dart';
 import '../system_services/system_services_screen.dart';
@@ -88,7 +89,7 @@ class MainShellScreen extends StatelessWidget {
   }
 
   int? _firstAccessibleIndex(AuthProvider auth) {
-    for (var index = 0; index <= 11; index++) {
+    for (var index = 0; index <= 12; index++) {
       final module = AppPermissionCatalog.codeForNavigationIndex(index);
       if (module != null && auth.canAccessScreen(module)) return index;
     }
@@ -109,6 +110,7 @@ class MainShellScreen extends StatelessWidget {
       9 => 'خدمات البرنامج',
       10 => 'سجل السندات',
       11 => 'إشعارات المستأجرين',
+      12 => 'مراجعة بيع العقار والوحدة',
       _ => 'نظام إدارة العقارات',
     };
   }
@@ -127,6 +129,7 @@ class MainShellScreen extends StatelessWidget {
       9 => const SystemServicesScreen(),
       10 => const VoucherHistoryScreen(),
       11 => const TenantNoticesScreen(),
+      12 => const PropertySaleReviewsScreen(),
       _ => const DashboardScreen(),
     };
   }
@@ -358,6 +361,14 @@ class AppSidebar extends StatelessWidget {
                         'العقارات والملاك',
                         Icons.location_city_rounded,
                         3,
+                        navProvider,
+                      ),
+                    if (auth.canAccessScreen('property_sales'))
+                      _buildNavItem(
+                        context,
+                        'مراجعة البيع',
+                        Icons.real_estate_agent_outlined,
+                        12,
                         navProvider,
                       ),
                     if (auth.canAccessScreen('leasing'))
