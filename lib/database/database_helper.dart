@@ -4003,7 +4003,7 @@ class DatabaseHelper {
   Future<List<Map<String, dynamic>>> getTenantStatementAccounts() async {
     PermissionRuntime.require('reports', AppPermissionAction.view);
     final db = await instance.database;
-    return db.rawQuery('''
+    final rows = await db.rawQuery('''
       SELECT
         t.id,
         t.name,
@@ -4023,6 +4023,35 @@ class DatabaseHelper {
       LEFT JOIN accounts a ON a.id = t.account_id
       ORDER BY t.name COLLATE NOCASE, t.id
     ''');
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    return rows;
+  }
+
+  Future<List<Map<String, dynamic>>> getOwnerStatementAccounts() async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    final db = await instance.database;
+    final rows = await db.rawQuery('''
+      SELECT
+        o.id,
+        o.name,
+        o.account_id,
+        a.code AS account_code,
+        a.name AS account_name,
+        CASE WHEN a.id IS NOT NULL
+          AND a.account_type = 'Liability'
+          AND a.parent_id IS NOT NULL
+          AND (SELECT COUNT(*) FROM owners linked
+               WHERE linked.account_id = a.id) = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM accounts child WHERE child.parent_id = a.id
+          )
+          THEN 1 ELSE 0 END AS is_reportable
+      FROM owners o
+      LEFT JOIN accounts a ON a.id = o.account_id
+      ORDER BY o.name COLLATE NOCASE, o.id
+    ''');
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    return rows;
   }
 
   Future<void> updateTenant(Map<String, dynamic> tenant) async {
@@ -6470,9 +6499,13 @@ class DatabaseHelper {
     required String startDate,
     required String endDate,
     int? expectedTenantId,
+    int? expectedOwnerId,
   }) async {
     PermissionRuntime.require('reports', AppPermissionAction.view);
     if (accountId <= 0) throw ArgumentError('معرف الحساب غير صحيح');
+    if (expectedTenantId != null && expectedOwnerId != null) {
+      throw ArgumentError('لا يمكن ربط كشف واحد بمستأجر ومالك معًا');
+    }
 
     bool isCalendarDate(String value) {
       if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
@@ -6518,6 +6551,20 @@ class DatabaseHelper {
             'حساب المستأجر غير مرتبط به حصريًا؛ راجع ارتباطات الحساب',
           );
         }
+      } else if (expectedOwnerId != null) {
+        final ownerRows = await txn.query(
+          'owners',
+          columns: ['id'],
+          where: 'account_id = ?',
+          whereArgs: [accountId],
+          limit: 2,
+        );
+        if (ownerRows.length != 1 ||
+            ownerRows.single['id'] != expectedOwnerId) {
+          throw StateError(
+            'حساب المالك غير مرتبط به حصريًا؛ راجع ارتباطات الحساب',
+          );
+        }
       }
       final accounts = await txn.rawQuery(
         '''
@@ -6541,6 +6588,9 @@ class DatabaseHelper {
       final accountType = account['account_type']?.toString() ?? '';
       if (expectedTenantId != null && accountType != 'Asset') {
         throw StateError('حساب ذمم المستأجر المحدد ليس من نوع الأصول');
+      }
+      if (expectedOwnerId != null && accountType != 'Liability') {
+        throw StateError('حساب المالك المحدد ليس من نوع الالتزامات');
       }
       final companyRows = await txn.query(
         'company_info',

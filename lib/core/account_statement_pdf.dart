@@ -13,6 +13,7 @@ class AccountStatementPdf {
     required String currency,
     String statementTitle = 'كشف حساب دفتر الأستاذ',
     String? partyName,
+    String partyLabel = 'المستأجر',
     String accountLabel = 'الحساب',
   }) async {
     final pdf = pw.Document();
@@ -73,7 +74,7 @@ class AccountStatementPdf {
               children: [
                 if (partyName != null)
                   PrintUtils.buildLabelValue(
-                    'المستأجر',
+                    partyLabel,
                     partyName,
                     labelWidth: 76,
                   ),
