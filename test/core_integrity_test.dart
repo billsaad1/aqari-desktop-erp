@@ -15,6 +15,7 @@ import 'package:app/core/property_unit_inquiry_pdf.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/database/database_integrity_migrations.dart';
 import 'package:app/models/company_info_model.dart';
+import 'package:app/models/account_statement_report_model.dart';
 import 'package:app/features/general_accounting/chart_of_accounts_screen.dart';
 import 'package:app/features/tenant_financial/voucher_history_screen.dart';
 import 'package:app/features/reports_inquiry/property_unit_inquiry_screen.dart';
@@ -386,6 +387,37 @@ void main() {
         await statement;
         expect(reports.accountStatement, isEmpty);
         expect(reports.accountOpeningBalance, 0);
+
+        final pendingReport = Completer<AccountStatementReport>();
+        final statementProvider = ReportsProvider(
+          accountStatementLoader: (_, _, _) => pendingReport.future,
+        );
+        final pendingStatement = statementProvider.loadAccountStatement(
+          1,
+          '2026-01-01',
+          '2026-12-31',
+        );
+        statementProvider.clearAccountStatement(notify: false);
+        pendingReport.complete(
+          AccountStatementReport(
+            accountId: 1,
+            accountCode: '1101',
+            accountName: 'كشف قديم',
+            accountType: 'Asset',
+            currency: 'YER',
+            startDate: '2026-01-01',
+            endDate: '2026-12-31',
+            openingBalance: 100,
+            totalDebit: 0,
+            totalCredit: 0,
+            closingBalance: 100,
+            lines: const [],
+          ),
+        );
+        await pendingStatement;
+        expect(statementProvider.accountStatementReport, isNull);
+        expect(statementProvider.isStatementLoading, isFalse);
+        statementProvider.dispose();
       } finally {
         reports.dispose();
       }
@@ -628,20 +660,20 @@ void main() {
             ))!.containsKey('balance'),
             isFalse,
           );
-          expect(
-            await DatabaseHelper.instance.getAccountOpeningBalance(
+          await expectLater(
+            DatabaseHelper.instance.getAccountOpeningBalance(
               accountId,
               '2000-01-01',
             ),
-            0,
+            throwsStateError,
           );
-          expect(
-            await DatabaseHelper.instance.getAccountStatement(
+          await expectLater(
+            DatabaseHelper.instance.getAccountStatement(
               accountId,
               '2000-01-01',
               '2100-01-01',
             ),
-            isEmpty,
+            throwsStateError,
           );
 
           PermissionRuntime.activate(
@@ -3674,6 +3706,409 @@ void main() {
       );
       expect(deletedEquity, isEmpty);
       expect((await db.query('journal_entries')).length, beforeEntries + 1);
+    },
+  );
+
+  test(
+    'ledger statement reports posted detail-account balances by period',
+    () async {
+      PermissionRuntime.activate(
+        userId: 1,
+        role: 'SuperAdmin',
+        permissionRows: const [],
+      );
+      final helper = DatabaseHelper.instance;
+      final db = await helper.database;
+      final assetParent = (await db.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['11'],
+        limit: 1,
+      )).single;
+      final revenueParent = (await db.query(
+        'accounts',
+        where: 'code = ?',
+        whereArgs: ['4'],
+        limit: 1,
+      )).single;
+      final liabilityParent = (await db.query(
+        'accounts',
+        where: 'account_type = ? AND parent_id IS NULL',
+        whereArgs: ['Liability'],
+        limit: 1,
+      )).single;
+      final equityParentId = await helper.insertAccount({
+        'name': 'جذر حقوق ملكية لاختبار كشف الأستاذ',
+        'account_type': 'Equity',
+      });
+      final expenseParent = (await db.query(
+        'accounts',
+        where: 'account_type = ? AND parent_id IS NULL',
+        whereArgs: ['Expense'],
+        limit: 1,
+      )).single;
+      final assetId = await helper.insertAccount({
+        'name': 'حساب أصول لكشف الأستاذ',
+        'parent_id': assetParent['id'],
+        'account_type': 'Asset',
+      });
+      final revenueId = await helper.insertAccount({
+        'name': 'حساب إيراد لكشف الأستاذ',
+        'parent_id': revenueParent['id'],
+        'account_type': 'Revenue',
+      });
+      final offsetId = await helper.insertAccount({
+        'name': 'حساب مقابل لاختبار كشف الأستاذ',
+        'parent_id': assetParent['id'],
+        'account_type': 'Asset',
+      });
+      final liabilityId = await helper.insertAccount({
+        'name': 'حساب التزام لكشف الأستاذ',
+        'parent_id': liabilityParent['id'],
+        'account_type': 'Liability',
+      });
+      final equityId = await helper.insertAccount({
+        'name': 'حساب حقوق ملكية لكشف الأستاذ',
+        'parent_id': equityParentId,
+        'account_type': 'Equity',
+      });
+      final expenseId = await helper.insertAccount({
+        'name': 'حساب مصروف لكشف الأستاذ',
+        'parent_id': expenseParent['id'],
+        'account_type': 'Expense',
+      });
+
+      Future<void> postEntry({
+        required String date,
+        required String description,
+        required int debitAccountId,
+        required double debit,
+        required int creditAccountId,
+        required double credit,
+      }) async {
+        await helper.insertJournalEntryWithLines(
+          {'entry_date': date, 'description': description},
+          [
+            {'account_id': debitAccountId, 'debit': debit, 'credit': 0.0},
+            {'account_id': creditAccountId, 'debit': 0.0, 'credit': credit},
+          ],
+        );
+      }
+
+      await postEntry(
+        date: '2026-01-31',
+        description: 'افتتاحي أصل',
+        debitAccountId: assetId,
+        debit: 100,
+        creditAccountId: offsetId,
+        credit: 100,
+      );
+      await postEntry(
+        date: '2026-02-01',
+        description: 'حركة أول الفترة',
+        debitAccountId: assetId,
+        debit: 30,
+        creditAccountId: offsetId,
+        credit: 30,
+      );
+      await postEntry(
+        date: '2026-02-28',
+        description: 'حركة آخر الفترة',
+        debitAccountId: offsetId,
+        debit: 10,
+        creditAccountId: assetId,
+        credit: 10,
+      );
+      await postEntry(
+        date: '2026-03-01',
+        description: 'حركة خارج الفترة',
+        debitAccountId: assetId,
+        debit: 500,
+        creditAccountId: offsetId,
+        credit: 500,
+      );
+      await postEntry(
+        date: '2026-01-31',
+        description: 'افتتاحي إيراد',
+        debitAccountId: offsetId,
+        debit: 80,
+        creditAccountId: revenueId,
+        credit: 80,
+      );
+      await postEntry(
+        date: '2026-02-01',
+        description: 'إيراد أول الفترة',
+        debitAccountId: offsetId,
+        debit: 20,
+        creditAccountId: revenueId,
+        credit: 20,
+      );
+      await postEntry(
+        date: '2026-02-28',
+        description: 'تخفيض إيراد',
+        debitAccountId: revenueId,
+        debit: 5,
+        creditAccountId: offsetId,
+        credit: 5,
+      );
+      await postEntry(
+        date: '2026-01-31',
+        description: 'افتتاحي التزام',
+        debitAccountId: offsetId,
+        debit: 70,
+        creditAccountId: liabilityId,
+        credit: 70,
+      );
+      await postEntry(
+        date: '2026-02-20',
+        description: 'سداد التزام',
+        debitAccountId: liabilityId,
+        debit: 12,
+        creditAccountId: offsetId,
+        credit: 12,
+      );
+      await postEntry(
+        date: '2026-01-31',
+        description: 'افتتاحي حقوق ملكية',
+        debitAccountId: offsetId,
+        debit: 80,
+        creditAccountId: equityId,
+        credit: 80,
+      );
+      await postEntry(
+        date: '2026-02-20',
+        description: 'تخفيض حقوق ملكية',
+        debitAccountId: equityId,
+        debit: 5,
+        creditAccountId: offsetId,
+        credit: 5,
+      );
+      await postEntry(
+        date: '2026-01-31',
+        description: 'افتتاحي مصروف',
+        debitAccountId: expenseId,
+        debit: 60,
+        creditAccountId: offsetId,
+        credit: 60,
+      );
+      await postEntry(
+        date: '2026-02-20',
+        description: 'عكس مصروف',
+        debitAccountId: offsetId,
+        debit: 8,
+        creditAccountId: expenseId,
+        credit: 8,
+      );
+
+      // Legacy/general-voucher paths may retain a time component. The report
+      // must include every posted movement on the selected end date.
+      final timestampEntryId = await db.insert('journal_entries', {
+        'entry_date': '2026-02-28T12:30:00',
+        'description': 'قيد بطابع زمني في آخر يوم',
+        'is_posted': 1,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': timestampEntryId,
+        'account_id': assetId,
+        'debit': 7.25,
+        'credit': 0.0,
+        'description': 'مدين بطابع زمني',
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': timestampEntryId,
+        'account_id': offsetId,
+        'debit': 0.0,
+        'credit': 7.25,
+        'description': 'دائن بطابع زمني',
+      });
+
+      final unpostedId = await db.insert('journal_entries', {
+        'entry_date': '2026-02-15',
+        'description': 'قيد اختباري غير مرحل',
+        'is_posted': 0,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': unpostedId,
+        'account_id': assetId,
+        'debit': 999.0,
+        'credit': 0.0,
+        'description': 'يجب استبعاده',
+      });
+
+      final assetReport = await helper.getLedgerAccountStatement(
+        accountId: assetId,
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(assetReport.accountName, 'حساب أصول لكشف الأستاذ');
+      expect(assetReport.accountType, 'Asset');
+      expect(
+        assetReport.currency,
+        (await helper.getCompanyInfo())?['default_currency'],
+      );
+      expect(assetReport.openingBalance, 100.0);
+      expect(assetReport.totalDebit, 37.25);
+      expect(assetReport.totalCredit, 10.0);
+      expect(assetReport.closingBalance, 127.25);
+      expect(assetReport.lines.map((line) => line.date), [
+        '2026-02-01',
+        '2026-02-28',
+        '2026-02-28T12:30:00',
+      ]);
+      expect(assetReport.lines.map((line) => line.runningBalance), [
+        130.0,
+        120.0,
+        127.25,
+      ]);
+      expect(
+        assetReport.lines.any((line) => line.description == 'يجب استبعاده'),
+        isFalse,
+      );
+
+      final companyRows = await db.query(
+        'company_info',
+        columns: ['id', 'default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final companyId = companyRows.single['id'] as int;
+      final configuredCurrency = companyRows.single['default_currency'];
+      await db.update(
+        'company_info',
+        {'default_currency': ''},
+        where: 'id = ?',
+        whereArgs: [companyId],
+      );
+      try {
+        final unspecifiedCurrencyReport = await helper
+            .getLedgerAccountStatement(
+              accountId: assetId,
+              startDate: '2026-02-01',
+              endDate: '2026-02-28',
+            );
+        expect(unspecifiedCurrencyReport.currency, 'غير محددة');
+      } finally {
+        await db.update(
+          'company_info',
+          {'default_currency': configuredCurrency},
+          where: 'id = ?',
+          whereArgs: [companyId],
+        );
+      }
+
+      final revenueReport = await helper.getLedgerAccountStatement(
+        accountId: revenueId,
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(revenueReport.openingBalance, 80.0);
+      expect(revenueReport.totalDebit, 5.0);
+      expect(revenueReport.totalCredit, 20.0);
+      expect(revenueReport.closingBalance, 95.0);
+      expect(revenueReport.lines.last.runningBalance, 95.0);
+
+      final liabilityReport = await helper.getLedgerAccountStatement(
+        accountId: liabilityId,
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(liabilityReport.openingBalance, 70.0);
+      expect(liabilityReport.totalDebit, 12.0);
+      expect(liabilityReport.closingBalance, 58.0);
+
+      final equityReport = await helper.getLedgerAccountStatement(
+        accountId: equityId,
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(equityReport.openingBalance, 80.0);
+      expect(equityReport.totalDebit, 5.0);
+      expect(equityReport.closingBalance, 75.0);
+
+      final expenseReport = await helper.getLedgerAccountStatement(
+        accountId: expenseId,
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(expenseReport.openingBalance, 60.0);
+      expect(expenseReport.totalCredit, 8.0);
+      expect(expenseReport.closingBalance, 52.0);
+
+      final openingOnly = await helper.getLedgerAccountStatement(
+        accountId: assetId,
+        startDate: '2026-02-15',
+        endDate: '2026-02-15',
+      );
+      expect(openingOnly.lines, isEmpty);
+      expect(openingOnly.openingBalance, 130.0);
+      expect(openingOnly.totalDebit, 0.0);
+      expect(openingOnly.totalCredit, 0.0);
+      expect(openingOnly.closingBalance, 130.0);
+
+      await expectLater(
+        helper.getLedgerAccountStatement(
+          accountId: assetParent['id'] as int,
+          startDate: '2026-02-01',
+          endDate: '2026-02-28',
+        ),
+        throwsStateError,
+      );
+      await expectLater(
+        helper.getLedgerAccountStatement(
+          accountId: 999999,
+          startDate: '2026-02-01',
+          endDate: '2026-02-28',
+        ),
+        throwsStateError,
+      );
+      await expectLater(
+        helper.getLedgerAccountStatement(
+          accountId: assetId,
+          startDate: '2026-02-30',
+          endDate: '2026-02-28',
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        helper.getLedgerAccountStatement(
+          accountId: assetId,
+          startDate: '2026-03-01',
+          endDate: '2026-02-28',
+        ),
+        throwsArgumentError,
+      );
+
+      try {
+        PermissionRuntime.activate(
+          userId: 44,
+          role: 'DataEntry',
+          permissionRows: [
+            {
+              'screen_name': 'reports',
+              'can_view': 0,
+              'can_add': 0,
+              'can_edit': 0,
+              'can_delete': 0,
+              'can_print': 0,
+              'can_post': 0,
+            },
+          ],
+        );
+        await expectLater(
+          helper.getLedgerAccountStatement(
+            accountId: assetId,
+            startDate: '2026-02-01',
+            endDate: '2026-02-28',
+          ),
+          throwsStateError,
+        );
+      } finally {
+        PermissionRuntime.activate(
+          userId: 1,
+          role: 'SuperAdmin',
+          permissionRows: const [],
+        );
+      }
     },
   );
 
