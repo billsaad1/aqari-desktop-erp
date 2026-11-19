@@ -58,6 +58,65 @@ void main() {
     return rows.single['id'] as int;
   }
 
+  /// Seeds an owner, property, unit, tenant and an active contract with two
+  /// installments — the minimum state the leasing writers require.
+  Future<({int tenantId, int contractId, List<Map<String, Object?>> installments})>
+  seedActiveContract({String suffix = ''}) async {
+    final db = await helper.database;
+    final ownerId = await db.insert('owners', {'name': 'مالك تدقيق$suffix'});
+    final propertyId = await db.insert('properties', {
+      'name': 'عقار تدقيق$suffix',
+      'owner_id': ownerId,
+    });
+    final unitId = await db.insert('units', {
+      'property_id': propertyId,
+      'unit_number': 'AUD-$suffix',
+      'default_rent': 100.0,
+      'default_rent_period': 'monthly',
+    });
+    await helper.insertTenantWithAccount({
+      'name': 'مستأجر تدقيق$suffix',
+      'mobile': '7770000$suffix',
+    });
+    final tenantId =
+        (await db.query(
+              'tenants',
+              where: 'name = ?',
+              whereArgs: ['مستأجر تدقيق$suffix'],
+            )).single['id']
+            as int;
+
+    final contractId = await helper.insertContractWithInstallments({
+      'tenant_id': tenantId,
+      'unit_id': unitId,
+      'start_date': '2026-11-10',
+      'end_date': '2027-11-10',
+      'rent_amount': 200.0,
+      'payment_method': 'شهري',
+      'status': 'Active',
+    }, [
+      {
+        'amount': 100.0,
+        'paid_amount': 0.0,
+        'due_date': '2026-11-10',
+        'status': 'Unpaid',
+      },
+      {
+        'amount': 100.0,
+        'paid_amount': 0.0,
+        'due_date': '2026-12-10',
+        'status': 'Unpaid',
+      },
+    ]);
+
+    final installments = await helper.getInstallmentsForContract(contractId);
+    return (
+      tenantId: tenantId,
+      contractId: contractId,
+      installments: installments,
+    );
+  }
+
   group('audit trail is append-only', () {
     test('update and delete are rejected by database triggers', () async {
       final db = await helper.database;
@@ -210,6 +269,169 @@ void main() {
         action: 'GENERAL_VOUCHER_POSTED',
       );
       expect(after.length, before.length);
+    });
+
+    test('creating a contract records the contract and its rent', () async {
+      final seeded = await seedActiveContract(suffix: 'C');
+
+      final rows = await helper.getAuditTrail(
+        action: 'CONTRACT_CREATED',
+        entityType: 'contract',
+        entityId: seeded.contractId,
+      );
+      expect(rows, hasLength(1));
+      expect(rows.single['amount_minor'], 20000);
+      final details = jsonDecode(rows.single['details'] as String);
+      expect(details['installment_count'], 2);
+      expect(details['tenant_id'], seeded.tenantId);
+    });
+
+    test('cancelling a contract records the reason in the same row', () async {
+      final seeded = await seedActiveContract(suffix: 'X');
+
+      await helper.cancelContract(seeded.contractId, reason: 'إخلال بالدفع');
+
+      final rows = await helper.getAuditTrail(
+        action: 'contract_cancelled',
+        entityType: 'contract',
+        entityId: seeded.contractId,
+      );
+      expect(rows, hasLength(1));
+      final details = jsonDecode(rows.single['details'] as String);
+      expect(details['reason'], 'إخلال بالدفع');
+    });
+
+    test('a tenant receipt records the collected amount', () async {
+      final seeded = await seedActiveContract(suffix: 'R');
+      final cashId = await seededAccount('1101');
+
+      final receiptId = await helper.insertTenantReceiptVoucher(
+        tenantId: seeded.tenantId,
+        amount: 100.0,
+        voucherDate: '2026-11-10',
+        cashAccountId: cashId,
+        installmentsToUpdate: [
+          {
+            'id': seeded.installments.first['id'],
+            'paid_amount': 100.0,
+            'status': 'Paid',
+          },
+        ],
+      );
+
+      final rows = await helper.getAuditTrail(
+        action: 'TENANT_RECEIPT_POSTED',
+        entityType: 'voucher',
+        entityId: receiptId,
+      );
+      expect(rows, hasLength(1));
+      expect(rows.single['amount_minor'], 10000);
+    });
+
+    test('a tenant refund records the refunded amount', () async {
+      final seeded = await seedActiveContract(suffix: 'F');
+      final cashId = await seededAccount('1101');
+
+      final receiptId = await helper.insertTenantReceiptVoucher(
+        tenantId: seeded.tenantId,
+        amount: 100.0,
+        voucherDate: '2026-11-10',
+        cashAccountId: cashId,
+        installmentsToUpdate: [
+          {
+            'id': seeded.installments.first['id'],
+            'paid_amount': 100.0,
+            'status': 'Paid',
+          },
+        ],
+      );
+      final db = await helper.database;
+      final allocationId =
+          (await db.query(
+                'collection_allocations',
+                columns: ['id'],
+                where: 'voucher_id = ?',
+                whereArgs: [receiptId],
+                limit: 1,
+              )).single['id']
+              as int;
+
+      final refundId = await helper.insertTenantRefundVoucher(
+        tenantId: seeded.tenantId,
+        amount: 40.0,
+        voucherDate: '2026-11-11',
+        cashAccountId: cashId,
+        collectionAllocationId: allocationId,
+        description: 'استرداد جزئي',
+      );
+
+      final rows = await helper.getAuditTrail(
+        action: 'TENANT_REFUND_POSTED',
+        entityType: 'voucher',
+        entityId: refundId,
+      );
+      expect(rows, hasLength(1));
+      expect(rows.single['amount_minor'], 4000);
+    });
+
+    test('issuing a tax invoice records the gross amount', () async {
+      await helper.updateCompanyInfo({'name_ar': 'منشأة تدقيق', 'tax_rate': 15.0});
+      final seeded = await seedActiveContract(suffix: 'I');
+      final revenueId = await seededAccount('4101');
+      final taxId = await seededAccount('2103');
+
+      final invoiceId = await helper.insertTaxInvoice(
+        contractId: seeded.contractId,
+        tenantId: seeded.tenantId,
+        installmentId: seeded.installments.first['id'] as int,
+        invoiceDate: '2026-11-10',
+        netAmount: 100.0,
+        taxAmount: 15.0,
+        revenueAccountId: revenueId,
+        taxAccountId: taxId,
+      );
+
+      final rows = await helper.getAuditTrail(
+        action: 'TAX_INVOICE_ISSUED',
+        entityType: 'tax_invoice',
+        entityId: invoiceId,
+      );
+      expect(rows, hasLength(1));
+      expect(rows.single['amount_minor'], 11500);
+      final details = jsonDecode(rows.single['details'] as String);
+      expect(details['net_amount_minor'], 10000);
+      expect(details['tax_amount_minor'], 1500);
+    });
+
+    test('a rejected tax invoice leaves neither an invoice nor an audit row',
+        () async {
+      await helper.updateCompanyInfo({'name_ar': 'منشأة تدقيق', 'tax_rate': 15.0});
+      final seeded = await seedActiveContract(suffix: 'J');
+      final revenueId = await seededAccount('4101');
+      final taxId = await seededAccount('2103');
+      final db = await helper.database;
+      final invoicesBefore = (await db.query('tax_invoices')).length;
+
+      await expectLater(
+        helper.insertTaxInvoice(
+          contractId: seeded.contractId,
+          tenantId: seeded.tenantId,
+          installmentId: seeded.installments.first['id'] as int,
+          invoiceDate: '2026-11-10',
+          netAmount: -1,
+          taxAmount: 15.0,
+          revenueAccountId: revenueId,
+          taxAccountId: taxId,
+        ),
+        throwsArgumentError,
+      );
+
+      expect((await db.query('tax_invoices')).length, invoicesBefore);
+      final rows = await helper.getAuditTrail(action: 'TAX_INVOICE_ISSUED');
+      expect(
+        rows.where((row) => row['entity_id'] == seeded.contractId),
+        isEmpty,
+      );
     });
   });
 

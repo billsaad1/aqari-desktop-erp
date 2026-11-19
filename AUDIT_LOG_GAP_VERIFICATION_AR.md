@@ -126,10 +126,41 @@ CREATE TABLE audit_logs (
 
 شاشة العرض كانت تُحدث `RenderFlex overflowed by 64/76 pixels` في القائمتين المنسدلتين على عرض نافذة ضيق. أُصلح بـ`isExpanded: true` و`overflow: TextOverflow.ellipsis`. لولا اختبار الواجهة الحقيقي لمرّ الخلل إلى المستخدم، لأن `flutter analyze` لا يرصد تجاوزات التخطيط.
 
+### تحقق الأحداث السبعة: الدالة والاختبار
+
+كل حدث مطلوب مسجَّل الآن عبر `_recordAuditTx(txn, …)` داخل `db.transaction`
+نفسه، أي أن السجل يُكتب في المعاملة التي تكتب القيد/السند/العقد. إذا فشل أي
+جزء، تُلغى المعاملة كاملة ولا يبقى سجل يتيم ولا حركة بلا سجل.
+
+| الحدث | رمز التدقيق | الدالة | السطر | الاختبار |
+|---|---|---|---|---|
+| إنشاء وترحيل قيد اليومية | `JOURNAL_ENTRY_POSTED` | `insertJournalEntryWithLines` | 3310 → 3394 | `posting a journal entry records one audit row` |
+| سند عام | `GENERAL_VOUCHER_POSTED` | `insertGeneralVoucher` | 3412 → 3552 | `posting a general voucher records the voucher and amount` |
+| إنشاء العقد | `CONTRACT_CREATED` | `insertContractWithInstallments` | 4364 → 4482 | `creating a contract records the contract and its rent` |
+| سند القبض | `TENANT_RECEIPT_POSTED` | `insertTenantReceiptVoucher` | 5195 → 5491 | `a tenant receipt records the collected amount` |
+| الاسترداد | `TENANT_REFUND_POSTED` | `insertTenantRefundVoucher` | 6110 → 6266 | `a tenant refund records the refunded amount` |
+| إصدار الفاتورة الضريبية | `TAX_INVOICE_ISSUED` | `insertTaxInvoice` | 6455 → 6671 | `issuing a tax invoice records the gross amount` |
+| إلغاء العقد | `contract_cancelled` | `cancelContract` | 6689 → 6758 | `cancelling a contract records the reason in the same row` |
+
+تحقق آلي من وقوع كل استدعاء داخل إغلاق المعاملة (بدل الاعتماد على قراءة
+بالعين) طُبّق على الأسطر أعلاه: كل دالة تحتوي `db.transaction`، وسطر
+`_recordAuditTx` يقع بعد بداية المعاملة وقبل نهايتها، ويُمرّر `txn` لا `db`.
+
+اختباران إضافيان يثبتان الذرّية من الجهة المعاكسة:
+
+- `a failed posting leaves no audit row behind` — سند بمبلغ سالب يرمي
+  `ArgumentError` ولا يزيد عدد السجلات.
+- `a rejected tax invoice leaves neither an invoice nor an audit row` — فاتورة
+  صافية سالبة لا تُنشئ فاتورة ولا سجلًا.
+
+**تحقق من أن الاختبارات ليست زائفة:** عُطّل استدعاء `TENANT_RECEIPT_POSTED`
+مؤقتًا في الكود، فسقط اختبار القبض فورًا بفارق عدد السجلات؛ ثم أُعيد الملف
+إلى حالته (تأكيد بـ`git diff` فارغ). فالاختبار يقيس السلوك فعلًا، لا وجود نص.
+
 ### حالة التحقق النهائية
 
 - `flutter analyze`: **0 error، 0 warning**، و132 `info` كلها من نمط قائم مسبقًا (`deprecated_member_use` للاستيراد القديم وأمثاله).
-- `flutter test`: **144 اختبارًا، كلها ناجحة** (121 قائمة + 18 لسجل التدقيق + 5 لشاشة العرض).
+- `flutter test`: **150 اختبارًا، كلها ناجحة** (121 قائمة + 24 لسجل التدقيق + 5 لشاشة العرض).
 - الاختبارات الجديدة تثبت: رفض `UPDATE`/`DELETE` على الجدول، بقاء السجل بعد حذف المستخدم، تسجيل كل عملية مالية مرة واحدة، عدم ترك أثر عند فشل الترحيل، رفض القراءة بلا صلاحية، ورفض التواريخ غير الصحيحة، وأن كل كاتب تدقيق يسجّل نوع الكيان ومعرّفه ولقطة اسم الفاعل.
 - **ملاحظة على بيئة التحليل:** `flutter analyze` في هذه الحاوية يعيد كتابة `analysis_options.yaml` (يضيف `analyzer.exclude`) و`pubspec.lock` (يرفع `clock`/`stack_trace` ويضيف `listen`) من تلقاء نفسه. أُعيد الملفان إلى حالتهما في الفرع كي لا يدخل تغيير غير مقصود إلى الشريحة. من يشغّل التحليل محليًا سيرى نفس التغيير غير المتعقَّب.
 
