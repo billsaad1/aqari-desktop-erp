@@ -9,6 +9,7 @@ import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/financial_close_readiness_report_model.dart';
 import '../models/financial_position_report_model.dart';
 import '../models/income_expense_report_model.dart';
 import '../models/invoice_ledger_reconciliation_report_model.dart';
@@ -6802,6 +6803,114 @@ class DatabaseHelper {
                 creditMinor: (row['credit_minor'] as num).toInt(),
               ),
             )
+            .toList(growable: false),
+      );
+    });
+  }
+
+  Future<FinancialCloseReadinessReport> getFinancialCloseReadinessReport({
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final year = parts[0]!;
+      final month = parts[1]!;
+      final day = parts[2]!;
+      if (year <= 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return false;
+      }
+      final date = DateTime.utc(year, month, day);
+      return date.year == year && date.month == month && date.day == day;
+    }
+
+    if (!isCalendarDate(startDate) || !isCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final endParts = endDate.split('-').map(int.parse).toList();
+    final exclusiveEndDate = DateTime.utc(
+      endParts[0],
+      endParts[1],
+      endParts[2],
+    ).add(const Duration(days: 1)).toIso8601String().substring(0, 10);
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final unpostedRows = await txn.rawQuery(
+        '''
+        SELECT
+          je.id AS journal_entry_id,
+          je.entry_date AS entry_date,
+          COALESCE(je.description, '') AS description,
+          CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+            AS debit_minor,
+          CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+            AS credit_minor,
+          COUNT(jl.id) AS line_count
+        FROM journal_entries je
+        LEFT JOIN journal_lines jl ON jl.journal_entry_id = je.id
+        WHERE COALESCE(je.is_posted, 0) != 1
+          AND je.entry_date >= ? AND je.entry_date < ?
+        GROUP BY je.id, je.entry_date, je.description
+        ORDER BY je.entry_date, je.id
+        ''',
+        [startDate, exclusiveEndDate],
+      );
+      final unbalancedRows = await txn.rawQuery(
+        '''
+        SELECT
+          je.id AS journal_entry_id,
+          je.entry_date AS entry_date,
+          COALESCE(je.description, '') AS description,
+          CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+            AS debit_minor,
+          CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+            AS credit_minor,
+          COUNT(jl.id) AS line_count
+        FROM journal_entries je
+        LEFT JOIN journal_lines jl ON jl.journal_entry_id = je.id
+        WHERE je.is_posted = 1
+          AND je.entry_date >= ? AND je.entry_date < ?
+        GROUP BY je.id, je.entry_date, je.description
+        HAVING COUNT(jl.id) = 0
+          OR CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+             != CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+        ORDER BY je.entry_date, je.id
+        ''',
+        [startDate, exclusiveEndDate],
+      );
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['default_currency'],
+        orderBy: 'id ASC',
+        limit: 1,
+      );
+      final configuredCurrency = companyRows.isEmpty
+          ? null
+          : companyRows.first['default_currency']?.toString().trim();
+      final currency = configuredCurrency == null || configuredCurrency.isEmpty
+          ? 'غير محددة'
+          : configuredCurrency;
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return FinancialCloseReadinessReport(
+        startDate: startDate,
+        endDate: endDate,
+        currency: currency,
+        unpostedEntries: unpostedRows
+            .map(
+              (row) => FinancialCloseEntryIssue.fromMap(row, isPosted: false),
+            )
+            .toList(growable: false),
+        unbalancedPostedEntries: unbalancedRows
+            .map((row) => FinancialCloseEntryIssue.fromMap(row, isPosted: true))
             .toList(growable: false),
       );
     });
