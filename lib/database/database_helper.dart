@@ -13,7 +13,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 18;
+  static const int _schemaVersion = 19;
   static const Set<String> _lookupTables = {
     'cities',
     'nationalities',
@@ -403,6 +403,8 @@ class DatabaseHelper {
         'purpose',
         'electricity_reading',
         'status',
+        'cancellation_reason',
+        'cancelled_at',
       ],
       'contract_installments': [
         'id',
@@ -993,6 +995,10 @@ class DatabaseHelper {
     if (oldVersion < 18) {
       await _ensureColumn(db, 'vouchers', 'period_from_date', 'TEXT');
       await _ensureColumn(db, 'vouchers', 'period_to_date', 'TEXT');
+    }
+    if (oldVersion < 19) {
+      await _ensureColumn(db, 'contracts', 'cancellation_reason', 'TEXT');
+      await _ensureColumn(db, 'contracts', 'cancelled_at', 'TEXT');
     }
   }
 
@@ -1642,6 +1648,8 @@ class DatabaseHelper {
         purpose TEXT,
         electricity_reading TEXT,
         status TEXT DEFAULT 'Active',
+        cancellation_reason TEXT,
+        cancelled_at TEXT,
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (unit_id) REFERENCES units (id)
       )
@@ -5863,8 +5871,15 @@ class DatabaseHelper {
     });
   }
 
-  Future<void> cancelContract(int contractId) async {
+  Future<void> cancelContract(int contractId, {required String reason}) async {
     PermissionRuntime.require('leasing', AppPermissionAction.edit);
+    final normalizedReason = reason.trim();
+    if (normalizedReason.isEmpty) {
+      throw ArgumentError('سبب الإلغاء الموثق مطلوب');
+    }
+    if (normalizedReason.length > 500) {
+      throw ArgumentError('سبب الإلغاء يتجاوز الحد المسموح (500 حرف)');
+    }
     final db = await instance.database;
     await db.transaction((txn) async {
       final contractResult = await txn.query(
@@ -5903,6 +5918,7 @@ class DatabaseHelper {
         );
       }
       final unitId = contractResult.first['unit_id'] as int;
+      final cancelledAt = DateTime.now().toIso8601String();
 
       // Retain the original schedule for audit and mark it cancelled.
       await txn.update(
@@ -5914,10 +5930,24 @@ class DatabaseHelper {
 
       await txn.update(
         'contracts',
-        {'status': 'Cancelled'},
+        {
+          'status': 'Cancelled',
+          'cancellation_reason': normalizedReason,
+          'cancelled_at': cancelledAt,
+        },
         where: 'id = ?',
         whereArgs: [contractId],
       );
+      await txn.insert('audit_logs', {
+        'user_id': await _verifiedAuditUserId(txn),
+        'action': 'contract_cancelled',
+        'details': jsonEncode({
+          'contract_id': contractId,
+          'unit_id': unitId,
+          'reason': normalizedReason,
+        }),
+        'timestamp': cancelledAt,
+      });
 
       final otherActiveContracts = await txn.rawQuery(
         "SELECT COUNT(*) AS count FROM contracts WHERE unit_id = ? AND status = 'Active'",

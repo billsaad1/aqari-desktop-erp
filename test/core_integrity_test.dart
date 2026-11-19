@@ -1501,6 +1501,8 @@ void main() {
           'unit_rent_amount',
           'unit_rent_period',
           'party_snapshot',
+          'cancellation_reason',
+          'cancelled_at',
         ]),
       );
       expect(
@@ -1788,7 +1790,7 @@ void main() {
       final restored = await DatabaseHelper.instance.database;
       expect(
         (await restored.rawQuery('PRAGMA user_version')).single.values.single,
-        18,
+        19,
       );
       expect(
         (await restored.rawQuery(
@@ -1831,7 +1833,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        18,
+        19,
       );
 
       final ownerId = await db.insert('owners', {'name': 'مالك الدورية'});
@@ -2930,7 +2932,10 @@ void main() {
       );
 
       await expectLater(
-        DatabaseHelper.instance.cancelContract(contractId),
+        DatabaseHelper.instance.cancelContract(
+          contractId,
+          reason: 'محاولة إلغاء بعد التحصيل',
+        ),
         throwsStateError,
       );
       final protectedContract = (await db.query(
@@ -3189,7 +3194,24 @@ void main() {
       throwsStateError,
     );
 
-    await DatabaseHelper.instance.cancelContract(contractId);
+    await expectLater(
+      DatabaseHelper.instance.cancelContract(contractId, reason: '  '),
+      throwsArgumentError,
+    );
+    expect(
+      (await db.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [contractId],
+      )).single['status'],
+      'Active',
+    );
+
+    const cancellationReason = 'إنهاء العقد باتفاق الطرفين';
+    await DatabaseHelper.instance.cancelContract(
+      contractId,
+      reason: cancellationReason,
+    );
 
     final retainedInstallments = await db.query(
       'contract_installments',
@@ -3213,7 +3235,23 @@ void main() {
     expect(retainedInstallments.single['id'], installment['id']);
     expect(retainedInstallments.single['status'], 'Cancelled');
     expect(cancelledContract['status'], 'Cancelled');
+    expect(cancelledContract['cancellation_reason'], cancellationReason);
+    expect(cancelledContract['cancelled_at'], isNotEmpty);
     expect(releasedUnit['status'], 'شاغرة');
+    final cancellationAudits = await db.query(
+      'audit_logs',
+      where: 'action = ?',
+      whereArgs: ['contract_cancelled'],
+    );
+    final cancellationAudit = cancellationAudits.singleWhere((row) {
+      final details = jsonDecode(row['details'] as String);
+      return (details as Map<String, dynamic>)['contract_id'] == contractId;
+    });
+    final cancellationDetails =
+        jsonDecode(cancellationAudit['details'] as String)
+            as Map<String, dynamic>;
+    expect(cancellationDetails['reason'], cancellationReason);
+    expect(cancellationAudit['timestamp'], cancelledContract['cancelled_at']);
     await expectLater(
       DatabaseHelper.instance.deleteUnit(unitId),
       throwsStateError,
@@ -3397,7 +3435,7 @@ void main() {
       final db = await DatabaseHelper.instance.database;
       expect(
         (await db.rawQuery('PRAGMA user_version')).single.values.single,
-        18,
+        19,
       );
       expect(
         (await db.rawQuery('PRAGMA integrity_check')).single.values.single,
@@ -3891,6 +3929,18 @@ void main() {
         'end_date': '2025-12-31',
         'rent_amount': 10.0,
       });
+      final historicalCancelledUnitId = await db.insert('units', {
+        'property_id': legacyPropertyId,
+        'unit_number': 'MIG-CANCELLED',
+      });
+      final historicalCancelledContractId = await db.insert('contracts', {
+        'tenant_id': legacyTenantId,
+        'unit_id': historicalCancelledUnitId,
+        'start_date': '2024-01-01',
+        'end_date': '2024-12-31',
+        'rent_amount': 1.0,
+        'status': 'Cancelled',
+      });
       final legacyInstallmentId = await db.insert('contract_installments', {
         'contract_id': legacyContractId,
         'amount': 10.0,
@@ -4017,6 +4067,8 @@ void main() {
       ''');
       await db.execute('PRAGMA foreign_keys = ON');
       await db.execute('ALTER TABLE company_info DROP COLUMN tax_rate');
+      await db.execute('ALTER TABLE contracts DROP COLUMN cancelled_at');
+      await db.execute('ALTER TABLE contracts DROP COLUMN cancellation_reason');
       final companyId = await db.insert('company_info', {
         'name_ar': 'منشأة قديمة بلا نسبة محفوظة',
       });
@@ -4047,8 +4099,16 @@ void main() {
       final upgraded = await helper.database;
       expect(
         (await upgraded.rawQuery('PRAGMA user_version')).single.values.single,
-        18,
+        19,
       );
+      final migratedHistoricalCancellation = (await upgraded.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [historicalCancelledContractId],
+      )).single;
+      expect(migratedHistoricalCancellation['status'], 'Cancelled');
+      expect(migratedHistoricalCancellation['cancellation_reason'], isNull);
+      expect(migratedHistoricalCancellation['cancelled_at'], isNull);
       final migratedVoucherColumns = (await upgraded.rawQuery(
         "PRAGMA table_info('vouchers')",
       )).map((row) => row['name']).toSet();
