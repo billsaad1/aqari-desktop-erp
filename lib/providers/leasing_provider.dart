@@ -93,8 +93,8 @@ class LeasingProvider with ChangeNotifier {
     return contractId;
   }
 
-  Future<void> cancelContract(int contractId) async {
-    await DatabaseHelper.instance.cancelContract(contractId);
+  Future<void> cancelContract(int contractId, {required String reason}) async {
+    await DatabaseHelper.instance.cancelContract(contractId, reason: reason);
     await loadInitialData();
   }
 }

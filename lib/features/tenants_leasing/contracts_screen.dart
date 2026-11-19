@@ -894,6 +894,13 @@ class _ContractsScreenState extends State<ContractsScreen> {
                 ),
                 Text('طريقة الدفع: ${contract['payment_method']}'),
                 Text('الإجمالي: ${contract['rent_amount']} ريال'),
+                if (contract['status'] == 'Cancelled') ...[
+                  Text(
+                    'سبب الإلغاء: ${contract['cancellation_reason']?.toString().trim().isNotEmpty == true ? contract['cancellation_reason'] : 'غير موثق في النظام'}',
+                  ),
+                  if (contract['cancelled_at']?.toString().isNotEmpty == true)
+                    Text('تاريخ الإلغاء: ${contract['cancelled_at']}'),
+                ],
                 const Divider(),
                 const Text(
                   'الأقساط:',
@@ -1149,32 +1156,75 @@ class _ContractsScreenState extends State<ContractsScreen> {
       context,
       listen: false,
     );
-    bool confirm =
-        await showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('تأكيد الإلغاء'),
-            content: const Text(
-              'هل أنت متأكد من إلغاء هذا العقد؟ إذا كان هناك دفعات مسددة سيرفض النظام الإلغاء.',
+    final reasonController = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        var showReasonError = false;
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: const Text('تأكيد إلغاء العقد'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'سجّل سبب الإلغاء ليبقى موثقًا في سجل العقد. لن يحذف النظام العقد أو أقساطه. إذا وُجد قبض أو فاتورة فسيُرفض الإلغاء المباشر وتلزم تسوية منفصلة.',
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: reasonController,
+                    maxLines: 3,
+                    maxLength: 500,
+                    decoration: InputDecoration(
+                      labelText: 'سبب الإلغاء (مطلوب)',
+                      errorText: showReasonError ? 'سبب الإلغاء مطلوب' : null,
+                      border: const OutlineInputBorder(),
+                    ),
+                    onChanged: (_) {
+                      if (showReasonError) {
+                        setDialogState(() => showReasonError = false);
+                      }
+                    },
+                  ),
+                ],
+              ),
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.pop(context, false),
+                onPressed: () => Navigator.pop(dialogContext),
                 child: const Text('تراجع'),
               ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
+              ElevatedButton.icon(
+                onPressed: () {
+                  final normalizedReason = reasonController.text.trim();
+                  if (normalizedReason.isEmpty) {
+                    setDialogState(() => showReasonError = true);
+                    return;
+                  }
+                  Navigator.pop(dialogContext, normalizedReason);
+                },
+                icon: const Icon(Icons.cancel),
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                child: const Text('نعم، إلغاء'),
+                label: const Text('حفظ السبب وإلغاء العقد'),
               ),
             ],
           ),
-        ) ??
-        false;
-
-    if (!mounted || !confirm) return;
+        );
+      },
+    );
+    reasonController.dispose();
+    final normalizedReason = reason?.trim();
+    if (!mounted || normalizedReason == null || normalizedReason.isEmpty) {
+      return;
+    }
     try {
-      await leasingProvider.cancelContract(contractId);
+      await leasingProvider.cancelContract(
+        contractId,
+        reason: normalizedReason,
+      );
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
