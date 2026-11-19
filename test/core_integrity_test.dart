@@ -4045,6 +4045,35 @@ void main() {
       expect(openingOnly.totalCredit, 0.0);
       expect(openingOnly.closingBalance, 130.0);
 
+      final trialBalance = await helper.getTrialBalance(
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      final trialAsset = trialBalance.rows.singleWhere(
+        (row) => row.accountId == assetId,
+      );
+      expect(trialBalance.startDate, '2026-02-01');
+      expect(trialBalance.endDate, '2026-02-28');
+      expect(trialAsset.openingDebitMinor, 10000);
+      expect(trialAsset.periodDebitMinor, 3725);
+      expect(trialAsset.periodCreditMinor, 1000);
+      expect(trialAsset.closingDebitMinor, 12725);
+      expect(
+        trialBalance.rows.any((row) => row.accountId == assetParent['id']),
+        isFalse,
+      );
+      expect(trialBalance.periodIsBalanced, isTrue);
+      expect(trialBalance.openingIsBalanced, isTrue);
+      expect(trialBalance.closingIsBalanced, isTrue);
+      await expectLater(
+        helper.getTrialBalance(startDate: '2026-02-30', endDate: '2026-02-28'),
+        throwsArgumentError,
+      );
+      await expectLater(
+        helper.getTrialBalance(startDate: '2026-03-01', endDate: '2026-02-28'),
+        throwsArgumentError,
+      );
+
       await expectLater(
         helper.getLedgerAccountStatement(
           accountId: assetParent['id'] as int,
@@ -4251,8 +4280,12 @@ void main() {
           ),
           throwsStateError,
         );
+        await expectLater(helper.getTenantStatementAccounts(), throwsStateError);
         await expectLater(
-          helper.getTenantStatementAccounts(),
+          helper.getTrialBalance(
+            startDate: '2026-02-01',
+            endDate: '2026-02-28',
+          ),
           throwsStateError,
         );
         await expectLater(helper.getOwnerStatementAccounts(), throwsStateError);

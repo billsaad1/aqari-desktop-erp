@@ -3,6 +3,7 @@ import '../database/database_helper.dart';
 import '../models/account_statement_report_model.dart';
 import '../models/owner_statement_account_model.dart';
 import '../models/tenant_statement_account_model.dart';
+import '../models/trial_balance_report_model.dart';
 
 class ReportsProvider with ChangeNotifier {
   ReportsProvider({
@@ -33,13 +34,16 @@ class ReportsProvider with ChangeNotifier {
       String endDate,
     )?
     ownerStatementLoader,
+    Future<TrialBalanceReport> Function(String startDate, String endDate)?
+    trialBalanceLoader,
   }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
        _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader,
        _accountStatementLoader = accountStatementLoader,
        _tenantStatementAccountsLoader = tenantStatementAccountsLoader,
        _tenantStatementLoader = tenantStatementLoader,
        _ownerStatementAccountsLoader = ownerStatementAccountsLoader,
-       _ownerStatementLoader = ownerStatementLoader;
+       _ownerStatementLoader = ownerStatementLoader,
+       _trialBalanceLoader = trialBalanceLoader;
 
   final Future<List<Map<String, dynamic>>> Function()?
   _propertyInquiryPropertiesLoader;
@@ -69,12 +73,15 @@ class ReportsProvider with ChangeNotifier {
     String endDate,
   )?
   _ownerStatementLoader;
+  final Future<TrialBalanceReport> Function(String startDate, String endDate)?
+  _trialBalanceLoader;
 
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _occupancyStats = [];
   AccountStatementReport? _accountStatementReport;
   AccountStatementReport? _tenantStatementReport;
   AccountStatementReport? _ownerStatementReport;
+  TrialBalanceReport? _trialBalanceReport;
   List<TenantStatementAccount> _tenantStatementAccounts = [];
   List<OwnerStatementAccount> _ownerStatementAccounts = [];
   List<Map<String, dynamic>> _dueInstallments = [];
@@ -88,6 +95,7 @@ class ReportsProvider with ChangeNotifier {
   int _tenantAccountsGeneration = 0;
   int _ownerStatementGeneration = 0;
   int _ownerAccountsGeneration = 0;
+  int _trialBalanceGeneration = 0;
   int _alertsGeneration = 0;
   int _propertyInquiryGeneration = 0;
   int? _authorizedUserId;
@@ -104,6 +112,7 @@ class ReportsProvider with ChangeNotifier {
   String? _tenantAccountsErrorMessage;
   String? _ownerStatementErrorMessage;
   String? _ownerAccountsErrorMessage;
+  String? _trialBalanceErrorMessage;
 
   bool _isLoading = false;
   bool _isStatementLoading = false;
@@ -113,12 +122,14 @@ class ReportsProvider with ChangeNotifier {
   bool _isOwnerStatementLoading = false;
   bool _isOwnerAccountsLoading = false;
   bool _ownerStatementAccountsLoaded = false;
+  bool _isTrialBalanceLoading = false;
 
   List<Map<String, dynamic>> get searchResults => _searchResults;
   List<Map<String, dynamic>> get occupancyStats => _occupancyStats;
   AccountStatementReport? get accountStatementReport => _accountStatementReport;
   AccountStatementReport? get tenantStatementReport => _tenantStatementReport;
   AccountStatementReport? get ownerStatementReport => _ownerStatementReport;
+  TrialBalanceReport? get trialBalanceReport => _trialBalanceReport;
   List<TenantStatementAccount> get tenantStatementAccounts =>
       List.unmodifiable(_tenantStatementAccounts);
   bool get isTenantStatementLoading => _isTenantStatementLoading;
@@ -129,6 +140,8 @@ class ReportsProvider with ChangeNotifier {
   bool get isOwnerStatementLoading => _isOwnerStatementLoading;
   bool get isOwnerAccountsLoading => _isOwnerAccountsLoading;
   bool get ownerStatementAccountsLoaded => _ownerStatementAccountsLoaded;
+  bool get isTrialBalanceLoading => _isTrialBalanceLoading;
+  String? get trialBalanceErrorMessage => _trialBalanceErrorMessage;
   String? get ownerStatementErrorMessage => _ownerStatementErrorMessage;
   String? get ownerAccountsErrorMessage => _ownerAccountsErrorMessage;
   String? get tenantStatementErrorMessage => _tenantStatementErrorMessage;
@@ -196,12 +209,14 @@ class ReportsProvider with ChangeNotifier {
     _tenantAccountsGeneration++;
     _ownerStatementGeneration++;
     _ownerAccountsGeneration++;
+    _trialBalanceGeneration++;
     _propertyInquiryGeneration++;
     _searchResults = [];
     _occupancyStats = [];
     _accountStatementReport = null;
     _tenantStatementReport = null;
     _ownerStatementReport = null;
+    _trialBalanceReport = null;
     _tenantStatementAccounts = [];
     _ownerStatementAccounts = [];
     _isTenantStatementLoading = false;
@@ -216,6 +231,8 @@ class ReportsProvider with ChangeNotifier {
     _tenantAccountsErrorMessage = null;
     _ownerStatementErrorMessage = null;
     _ownerAccountsErrorMessage = null;
+    _isTrialBalanceLoading = false;
+    _trialBalanceErrorMessage = null;
     _clearPropertyInquiry();
     _isLoading = false;
     _errorMessage = null;
@@ -599,6 +616,46 @@ class ReportsProvider with ChangeNotifier {
     _ownerStatementAccountsLoaded = false;
     _ownerStatementErrorMessage = null;
     _ownerAccountsErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  Future<void> loadTrialBalance(String startDate, String endDate) async {
+    final generation = ++_trialBalanceGeneration;
+    _trialBalanceReport = null;
+    _trialBalanceErrorMessage = null;
+    _isTrialBalanceLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _trialBalanceLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getTrialBalance(
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(startDate, endDate);
+      if (generation == _trialBalanceGeneration) {
+        _trialBalanceReport = report;
+        _trialBalanceErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _trialBalanceGeneration) {
+        _trialBalanceReport = null;
+        _trialBalanceErrorMessage = 'تعذر تحميل ميزان المراجعة: $error';
+      }
+    } finally {
+      if (generation == _trialBalanceGeneration) {
+        _isTrialBalanceLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearTrialBalance({bool notify = true}) {
+    _trialBalanceGeneration++;
+    _trialBalanceReport = null;
+    _isTrialBalanceLoading = false;
+    _trialBalanceErrorMessage = null;
     if (notify) notifyListeners();
   }
 
