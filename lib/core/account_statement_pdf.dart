@@ -11,6 +11,9 @@ class AccountStatementPdf {
     required AccountStatementReport report,
     required Map<String, dynamic>? companyInfo,
     required String currency,
+    String statementTitle = 'كشف حساب دفتر الأستاذ',
+    String? partyName,
+    String accountLabel = 'الحساب',
   }) async {
     final pdf = pw.Document();
     final theme = await PrintUtils.loadArabicTheme();
@@ -47,7 +50,7 @@ class AccountStatementPdf {
         build: (_) => [
           pw.Center(
             child: pw.Text(
-              'كشف حساب دفتر الأستاذ',
+              statementTitle,
               textDirection: pw.TextDirection.rtl,
               textAlign: pw.TextAlign.center,
               style: pw.TextStyle(
@@ -68,8 +71,14 @@ class AccountStatementPdf {
             child: pw.Column(
               crossAxisAlignment: pw.CrossAxisAlignment.stretch,
               children: [
+                if (partyName != null)
+                  PrintUtils.buildLabelValue(
+                    'المستأجر',
+                    partyName,
+                    labelWidth: 76,
+                  ),
                 PrintUtils.buildLabelValue(
-                  'الحساب',
+                  accountLabel,
                   '${report.accountCode} - ${report.accountName}',
                   labelWidth: 76,
                 ),

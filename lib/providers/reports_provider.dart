@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/tenant_statement_account_model.dart';
 
 class ReportsProvider with ChangeNotifier {
   ReportsProvider({
@@ -14,9 +15,20 @@ class ReportsProvider with ChangeNotifier {
       String endDate,
     )?
     accountStatementLoader,
+    Future<List<Map<String, dynamic>>> Function()?
+    tenantStatementAccountsLoader,
+    Future<AccountStatementReport> Function(
+      int tenantId,
+      int accountId,
+      String startDate,
+      String endDate,
+    )?
+    tenantStatementLoader,
   }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
        _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader,
-       _accountStatementLoader = accountStatementLoader;
+       _accountStatementLoader = accountStatementLoader,
+       _tenantStatementAccountsLoader = tenantStatementAccountsLoader,
+       _tenantStatementLoader = tenantStatementLoader;
 
   final Future<List<Map<String, dynamic>>> Function()?
   _propertyInquiryPropertiesLoader;
@@ -28,10 +40,21 @@ class ReportsProvider with ChangeNotifier {
     String endDate,
   )?
   _accountStatementLoader;
+  final Future<List<Map<String, dynamic>>> Function()?
+  _tenantStatementAccountsLoader;
+  final Future<AccountStatementReport> Function(
+    int tenantId,
+    int accountId,
+    String startDate,
+    String endDate,
+  )?
+  _tenantStatementLoader;
 
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _occupancyStats = [];
   AccountStatementReport? _accountStatementReport;
+  AccountStatementReport? _tenantStatementReport;
+  List<TenantStatementAccount> _tenantStatementAccounts = [];
   List<Map<String, dynamic>> _dueInstallments = [];
   List<Map<String, dynamic>> _expiringContracts = [];
   List<Map<String, dynamic>> _propertyInquiryProperties = [];
@@ -39,6 +62,8 @@ class ReportsProvider with ChangeNotifier {
   int _searchGeneration = 0;
   int _occupancyGeneration = 0;
   int _statementGeneration = 0;
+  int _tenantStatementGeneration = 0;
+  int _tenantAccountsGeneration = 0;
   int _alertsGeneration = 0;
   int _propertyInquiryGeneration = 0;
   int? _authorizedUserId;
@@ -51,13 +76,26 @@ class ReportsProvider with ChangeNotifier {
   String? _propertyInquiryErrorMessage;
   String? _errorMessage;
   String? _statementErrorMessage;
+  String? _tenantStatementErrorMessage;
+  String? _tenantAccountsErrorMessage;
 
   bool _isLoading = false;
   bool _isStatementLoading = false;
+  bool _isTenantStatementLoading = false;
+  bool _isTenantAccountsLoading = false;
+  bool _tenantStatementAccountsLoaded = false;
 
   List<Map<String, dynamic>> get searchResults => _searchResults;
   List<Map<String, dynamic>> get occupancyStats => _occupancyStats;
   AccountStatementReport? get accountStatementReport => _accountStatementReport;
+  AccountStatementReport? get tenantStatementReport => _tenantStatementReport;
+  List<TenantStatementAccount> get tenantStatementAccounts =>
+      List.unmodifiable(_tenantStatementAccounts);
+  bool get isTenantStatementLoading => _isTenantStatementLoading;
+  bool get isTenantAccountsLoading => _isTenantAccountsLoading;
+  bool get tenantStatementAccountsLoaded => _tenantStatementAccountsLoaded;
+  String? get tenantStatementErrorMessage => _tenantStatementErrorMessage;
+  String? get tenantAccountsErrorMessage => _tenantAccountsErrorMessage;
   List<Map<String, dynamic>> get accountStatement =>
       _accountStatementReport?.lines
           .map(
@@ -114,12 +152,21 @@ class ReportsProvider with ChangeNotifier {
     _searchGeneration++;
     _occupancyGeneration++;
     _statementGeneration++;
+    _tenantStatementGeneration++;
+    _tenantAccountsGeneration++;
     _propertyInquiryGeneration++;
     _searchResults = [];
     _occupancyStats = [];
     _accountStatementReport = null;
+    _tenantStatementReport = null;
+    _tenantStatementAccounts = [];
+    _isTenantStatementLoading = false;
+    _isTenantAccountsLoading = false;
+    _tenantStatementAccountsLoaded = false;
     _isStatementLoading = false;
     _statementErrorMessage = null;
+    _tenantStatementErrorMessage = null;
+    _tenantAccountsErrorMessage = null;
     _clearPropertyInquiry();
     _isLoading = false;
     _errorMessage = null;
@@ -294,6 +341,110 @@ class ReportsProvider with ChangeNotifier {
     _accountStatementReport = null;
     _isStatementLoading = false;
     _statementErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  Future<void> loadTenantStatementAccounts() async {
+    final generation = ++_tenantAccountsGeneration;
+    _tenantStatementGeneration++;
+    _tenantStatementReport = null;
+    _isTenantStatementLoading = false;
+    _tenantStatementErrorMessage = null;
+    _tenantAccountsErrorMessage = null;
+    _isTenantAccountsLoading = true;
+    _tenantStatementAccountsLoaded = false;
+    _tenantStatementAccounts = [];
+    notifyListeners();
+
+    try {
+      final rows =
+          await (_tenantStatementAccountsLoader ??
+              DatabaseHelper.instance.getTenantStatementAccounts)();
+      if (generation == _tenantAccountsGeneration) {
+        _tenantStatementAccounts = rows
+            .map(TenantStatementAccount.fromMap)
+            .toList(growable: false);
+        _tenantStatementAccountsLoaded = true;
+      }
+    } catch (error) {
+      if (generation == _tenantAccountsGeneration) {
+        _tenantStatementAccounts = [];
+        _tenantAccountsErrorMessage = 'تعذر تحميل قائمة المستأجرين: $error';
+      }
+    } finally {
+      if (generation == _tenantAccountsGeneration) {
+        _isTenantAccountsLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> loadTenantStatement(
+    int tenantId,
+    String startDate,
+    String endDate,
+  ) async {
+    final selectedTenants = _tenantStatementAccounts.where(
+      (tenant) => tenant.tenantId == tenantId,
+    );
+    if (selectedTenants.isEmpty || !selectedTenants.single.isReportable) {
+      _tenantStatementReport = null;
+      _tenantStatementErrorMessage = 'المستأجر لا يرتبط بحساب ذمم تفصيلي صالح';
+      notifyListeners();
+      return;
+    }
+    final accountId = selectedTenants.single.accountId!;
+    final generation = ++_tenantStatementGeneration;
+    _tenantStatementReport = null;
+    _tenantStatementErrorMessage = null;
+    _isTenantStatementLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _tenantStatementLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getLedgerAccountStatement(
+              accountId: accountId,
+              expectedTenantId: tenantId,
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(tenantId, accountId, startDate, endDate);
+      if (generation == _tenantStatementGeneration) {
+        _tenantStatementReport = report;
+        _tenantStatementErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _tenantStatementGeneration) {
+        _tenantStatementReport = null;
+        _tenantStatementErrorMessage = 'تعذر تحميل كشف المستأجر: $error';
+      }
+    } finally {
+      if (generation == _tenantStatementGeneration) {
+        _isTenantStatementLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearTenantStatementReport({bool notify = true}) {
+    _tenantStatementGeneration++;
+    _tenantStatementReport = null;
+    _isTenantStatementLoading = false;
+    _tenantStatementErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  void clearTenantStatement({bool notify = true}) {
+    _tenantStatementGeneration++;
+    _tenantAccountsGeneration++;
+    _tenantStatementReport = null;
+    _tenantStatementAccounts = [];
+    _isTenantStatementLoading = false;
+    _isTenantAccountsLoading = false;
+    _tenantStatementAccountsLoaded = false;
+    _tenantStatementErrorMessage = null;
+    _tenantAccountsErrorMessage = null;
     if (notify) notifyListeners();
   }
 

@@ -4,6 +4,7 @@ import 'smart_inquiry_screen.dart';
 import 'occupancy_report_screen.dart';
 import 'account_statement_screen.dart';
 import 'property_unit_inquiry_screen.dart';
+import 'tenant_statement_screen.dart';
 
 class ReportsMainScreen extends StatefulWidget {
   const ReportsMainScreen({super.key});
@@ -19,7 +20,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
   }
 
   @override
@@ -41,6 +42,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
             Tab(text: 'تقرير الإشغال والشواغر'),
             Tab(text: 'استعلام العقار والوحدات'),
             Tab(text: 'التقارير المحاسبية (كشف الحساب)'),
+            Tab(text: 'كشف حساب المستأجر'),
           ],
         ),
         Expanded(
@@ -51,6 +53,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
               OccupancyReportScreen(),
               PropertyUnitInquiryScreen(),
               AccountStatementScreen(),
+              TenantStatementScreen(),
             ],
           ),
         ),

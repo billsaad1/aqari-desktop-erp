@@ -4000,6 +4000,31 @@ class DatabaseHelper {
     );
   }
 
+  Future<List<Map<String, dynamic>>> getTenantStatementAccounts() async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT
+        t.id,
+        t.name,
+        t.account_id,
+        a.code AS account_code,
+        a.name AS account_name,
+        CASE WHEN a.id IS NOT NULL
+          AND a.account_type = 'Asset'
+          AND a.parent_id IS NOT NULL
+          AND (SELECT COUNT(*) FROM tenants linked
+               WHERE linked.account_id = a.id) = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM accounts child WHERE child.parent_id = a.id
+          )
+          THEN 1 ELSE 0 END AS is_reportable
+      FROM tenants t
+      LEFT JOIN accounts a ON a.id = t.account_id
+      ORDER BY t.name COLLATE NOCASE, t.id
+    ''');
+  }
+
   Future<void> updateTenant(Map<String, dynamic> tenant) async {
     PermissionRuntime.require('leasing', AppPermissionAction.edit);
     final tenantId = tenant['id'];
@@ -6444,6 +6469,7 @@ class DatabaseHelper {
     required int accountId,
     required String startDate,
     required String endDate,
+    int? expectedTenantId,
   }) async {
     PermissionRuntime.require('reports', AppPermissionAction.view);
     if (accountId <= 0) throw ArgumentError('معرف الحساب غير صحيح');
@@ -6478,6 +6504,21 @@ class DatabaseHelper {
     final db = await instance.database;
     return db.transaction((txn) async {
       PermissionRuntime.require('reports', AppPermissionAction.view);
+      if (expectedTenantId != null) {
+        final tenantRows = await txn.query(
+          'tenants',
+          columns: ['id'],
+          where: 'account_id = ?',
+          whereArgs: [accountId],
+          limit: 2,
+        );
+        if (tenantRows.length != 1 ||
+            tenantRows.single['id'] != expectedTenantId) {
+          throw StateError(
+            'حساب المستأجر غير مرتبط به حصريًا؛ راجع ارتباطات الحساب',
+          );
+        }
+      }
       final accounts = await txn.rawQuery(
         '''
         SELECT a.id, a.code, a.name, a.account_type
@@ -6498,6 +6539,9 @@ class DatabaseHelper {
       }
       final account = accounts.single;
       final accountType = account['account_type']?.toString() ?? '';
+      if (expectedTenantId != null && accountType != 'Asset') {
+        throw StateError('حساب ذمم المستأجر المحدد ليس من نوع الأصول');
+      }
       final companyRows = await txn.query(
         'company_info',
         columns: ['default_currency'],
