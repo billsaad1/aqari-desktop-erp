@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 import '../models/account_statement_report_model.dart';
+import '../models/income_expense_report_model.dart';
 import '../models/owner_statement_account_model.dart';
 import '../models/tenant_statement_account_model.dart';
 import '../models/trial_balance_report_model.dart';
@@ -36,6 +37,8 @@ class ReportsProvider with ChangeNotifier {
     ownerStatementLoader,
     Future<TrialBalanceReport> Function(String startDate, String endDate)?
     trialBalanceLoader,
+    Future<IncomeExpenseReport> Function(String startDate, String endDate)?
+    incomeExpenseReportLoader,
   }) : _propertyInquiryPropertiesLoader = propertyInquiryPropertiesLoader,
        _propertyInquiryUnitsLoader = propertyInquiryUnitsLoader,
        _accountStatementLoader = accountStatementLoader,
@@ -43,7 +46,8 @@ class ReportsProvider with ChangeNotifier {
        _tenantStatementLoader = tenantStatementLoader,
        _ownerStatementAccountsLoader = ownerStatementAccountsLoader,
        _ownerStatementLoader = ownerStatementLoader,
-       _trialBalanceLoader = trialBalanceLoader;
+       _trialBalanceLoader = trialBalanceLoader,
+       _incomeExpenseReportLoader = incomeExpenseReportLoader;
 
   final Future<List<Map<String, dynamic>>> Function()?
   _propertyInquiryPropertiesLoader;
@@ -75,6 +79,8 @@ class ReportsProvider with ChangeNotifier {
   _ownerStatementLoader;
   final Future<TrialBalanceReport> Function(String startDate, String endDate)?
   _trialBalanceLoader;
+  final Future<IncomeExpenseReport> Function(String startDate, String endDate)?
+  _incomeExpenseReportLoader;
 
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _occupancyStats = [];
@@ -82,6 +88,7 @@ class ReportsProvider with ChangeNotifier {
   AccountStatementReport? _tenantStatementReport;
   AccountStatementReport? _ownerStatementReport;
   TrialBalanceReport? _trialBalanceReport;
+  IncomeExpenseReport? _incomeExpenseReport;
   List<TenantStatementAccount> _tenantStatementAccounts = [];
   List<OwnerStatementAccount> _ownerStatementAccounts = [];
   List<Map<String, dynamic>> _dueInstallments = [];
@@ -96,6 +103,7 @@ class ReportsProvider with ChangeNotifier {
   int _ownerStatementGeneration = 0;
   int _ownerAccountsGeneration = 0;
   int _trialBalanceGeneration = 0;
+  int _incomeExpenseGeneration = 0;
   int _alertsGeneration = 0;
   int _propertyInquiryGeneration = 0;
   int? _authorizedUserId;
@@ -113,6 +121,7 @@ class ReportsProvider with ChangeNotifier {
   String? _ownerStatementErrorMessage;
   String? _ownerAccountsErrorMessage;
   String? _trialBalanceErrorMessage;
+  String? _incomeExpenseErrorMessage;
 
   bool _isLoading = false;
   bool _isStatementLoading = false;
@@ -123,6 +132,7 @@ class ReportsProvider with ChangeNotifier {
   bool _isOwnerAccountsLoading = false;
   bool _ownerStatementAccountsLoaded = false;
   bool _isTrialBalanceLoading = false;
+  bool _isIncomeExpenseReportLoading = false;
 
   List<Map<String, dynamic>> get searchResults => _searchResults;
   List<Map<String, dynamic>> get occupancyStats => _occupancyStats;
@@ -130,6 +140,7 @@ class ReportsProvider with ChangeNotifier {
   AccountStatementReport? get tenantStatementReport => _tenantStatementReport;
   AccountStatementReport? get ownerStatementReport => _ownerStatementReport;
   TrialBalanceReport? get trialBalanceReport => _trialBalanceReport;
+  IncomeExpenseReport? get incomeExpenseReport => _incomeExpenseReport;
   List<TenantStatementAccount> get tenantStatementAccounts =>
       List.unmodifiable(_tenantStatementAccounts);
   bool get isTenantStatementLoading => _isTenantStatementLoading;
@@ -142,6 +153,8 @@ class ReportsProvider with ChangeNotifier {
   bool get ownerStatementAccountsLoaded => _ownerStatementAccountsLoaded;
   bool get isTrialBalanceLoading => _isTrialBalanceLoading;
   String? get trialBalanceErrorMessage => _trialBalanceErrorMessage;
+  bool get isIncomeExpenseReportLoading => _isIncomeExpenseReportLoading;
+  String? get incomeExpenseErrorMessage => _incomeExpenseErrorMessage;
   String? get ownerStatementErrorMessage => _ownerStatementErrorMessage;
   String? get ownerAccountsErrorMessage => _ownerAccountsErrorMessage;
   String? get tenantStatementErrorMessage => _tenantStatementErrorMessage;
@@ -210,6 +223,7 @@ class ReportsProvider with ChangeNotifier {
     _ownerStatementGeneration++;
     _ownerAccountsGeneration++;
     _trialBalanceGeneration++;
+    _incomeExpenseGeneration++;
     _propertyInquiryGeneration++;
     _searchResults = [];
     _occupancyStats = [];
@@ -217,6 +231,7 @@ class ReportsProvider with ChangeNotifier {
     _tenantStatementReport = null;
     _ownerStatementReport = null;
     _trialBalanceReport = null;
+    _incomeExpenseReport = null;
     _tenantStatementAccounts = [];
     _ownerStatementAccounts = [];
     _isTenantStatementLoading = false;
@@ -233,6 +248,8 @@ class ReportsProvider with ChangeNotifier {
     _ownerAccountsErrorMessage = null;
     _isTrialBalanceLoading = false;
     _trialBalanceErrorMessage = null;
+    _isIncomeExpenseReportLoading = false;
+    _incomeExpenseErrorMessage = null;
     _clearPropertyInquiry();
     _isLoading = false;
     _errorMessage = null;
@@ -656,6 +673,47 @@ class ReportsProvider with ChangeNotifier {
     _trialBalanceReport = null;
     _isTrialBalanceLoading = false;
     _trialBalanceErrorMessage = null;
+    if (notify) notifyListeners();
+  }
+
+  Future<void> loadIncomeExpenseReport(String startDate, String endDate) async {
+    final generation = ++_incomeExpenseGeneration;
+    _incomeExpenseReport = null;
+    _incomeExpenseErrorMessage = null;
+    _isIncomeExpenseReportLoading = true;
+    notifyListeners();
+
+    try {
+      final loader = _incomeExpenseReportLoader;
+      final report = loader == null
+          ? await DatabaseHelper.instance.getIncomeExpenseReport(
+              startDate: startDate,
+              endDate: endDate,
+            )
+          : await loader(startDate, endDate);
+      if (generation == _incomeExpenseGeneration) {
+        _incomeExpenseReport = report;
+        _incomeExpenseErrorMessage = null;
+      }
+    } catch (error) {
+      if (generation == _incomeExpenseGeneration) {
+        _incomeExpenseReport = null;
+        _incomeExpenseErrorMessage =
+            'تعذر تحميل تقرير الإيرادات والمصروفات: $error';
+      }
+    } finally {
+      if (generation == _incomeExpenseGeneration) {
+        _isIncomeExpenseReportLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearIncomeExpenseReport({bool notify = true}) {
+    _incomeExpenseGeneration++;
+    _incomeExpenseReport = null;
+    _isIncomeExpenseReportLoading = false;
+    _incomeExpenseErrorMessage = null;
     if (notify) notifyListeners();
   }
 

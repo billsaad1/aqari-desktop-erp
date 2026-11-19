@@ -7,6 +7,7 @@ import 'property_unit_inquiry_screen.dart';
 import 'owner_statement_screen.dart';
 import 'tenant_statement_screen.dart';
 import 'trial_balance_screen.dart';
+import 'income_expense_report_screen.dart';
 
 class ReportsMainScreen extends StatefulWidget {
   const ReportsMainScreen({super.key});
@@ -22,7 +23,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 7, vsync: this);
+    _tabController = TabController(length: 8, vsync: this);
   }
 
   @override
@@ -48,6 +49,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
             Tab(text: 'كشف حساب المستأجر'),
             Tab(text: 'كشف حساب المالك'),
             Tab(text: 'ميزان المراجعة'),
+            Tab(text: 'حركة الإيرادات والمصروفات'),
           ],
         ),
         Expanded(
@@ -61,6 +63,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
               TenantStatementScreen(),
               OwnerStatementScreen(),
               TrialBalanceScreen(),
+              IncomeExpenseReportScreen(),
             ],
           ),
         ),
