@@ -630,6 +630,8 @@ class PrintUtils {
     String? paymentMethod,
     required String accountName,
     String? description,
+    String? periodStartDate,
+    String? periodEndDate,
     List<Map<String, dynamic>> journalLines = const [],
     List<Map<String, dynamic>> installmentAllocations = const [],
     List<Map<String, dynamic>> invoiceAllocations = const [],
@@ -643,6 +645,12 @@ class PrintUtils {
     final isReceipt = voucherType.contains('قبض');
     final hasParty = targetName != null && targetName.trim().isNotEmpty;
     final normalizedMethod = paymentMethod?.trim();
+    final normalizedPeriodStart = _firstNonEmpty(periodStartDate);
+    final normalizedPeriodEnd = _firstNonEmpty(periodEndDate);
+    final periodParts = <String>[
+      if (normalizedPeriodStart != null) 'من $normalizedPeriodStart',
+      if (normalizedPeriodEnd != null) 'إلى $normalizedPeriodEnd',
+    ];
     final showPaymentMethod =
         normalizedMethod != null &&
         normalizedMethod.isNotEmpty &&
@@ -775,6 +783,13 @@ class PrintUtils {
                     isReceipt
                         ? 'وذلك مقابل ${description.trim()}'
                         : description.trim(),
+                    labelWidth: 100,
+                    fontSize: 10,
+                  ),
+                if (periodParts.isNotEmpty)
+                  buildLabelValue(
+                    'الفترة',
+                    periodParts.join('  '),
                     labelWidth: 100,
                     fontSize: 10,
                   ),
@@ -1179,6 +1194,8 @@ class PrintUtils {
     String? paymentMethod,
     required String accountName,
     String? description,
+    String? periodStartDate,
+    String? periodEndDate,
     List<Map<String, dynamic>> journalLines = const [],
     List<Map<String, dynamic>> installmentAllocations = const [],
     bool isFinancialDocument = true,
@@ -1192,6 +1209,8 @@ class PrintUtils {
       paymentMethod: paymentMethod,
       accountName: accountName,
       description: description,
+      periodStartDate: periodStartDate,
+      periodEndDate: periodEndDate,
       journalLines: journalLines,
       installmentAllocations: installmentAllocations,
       isFinancialDocument: isFinancialDocument,

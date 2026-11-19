@@ -325,6 +325,8 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
       final voucherType = voucher['voucher_type']?.toString() ?? '';
       final isGeneralVoucher = voucherType.contains('عام');
       final partyName = voucher['party_name']?.toString().trim() ?? '';
+      final periodFrom = voucher['period_from_date']?.toString().trim();
+      final periodTo = voucher['period_to_date']?.toString().trim();
       final pdfBytes = await PrintUtils.buildVoucherPdf(
         voucherType: 'سند $voucherType',
         voucherNo: widget.voucherId,
@@ -334,6 +336,8 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         paymentMethod: null,
         accountName: '',
         description: voucher['description']?.toString(),
+        periodStartDate: periodFrom,
+        periodEndDate: periodTo,
         journalLines: lines,
         installmentAllocations: installments,
         invoiceAllocations: invoices,
@@ -522,6 +526,13 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         voucher['journal_entry_id']?.toString() ?? '—',
       ),
       _detailTile('البيان', voucher['description']?.toString() ?? '—'),
+      if ((voucher['period_from_date']?.toString().trim().isNotEmpty ??
+              false) ||
+          (voucher['period_to_date']?.toString().trim().isNotEmpty ?? false))
+        _detailTile(
+          'الفترة',
+          'من ${voucher['period_from_date']?.toString() ?? '—'} إلى ${voucher['period_to_date']?.toString() ?? '—'}',
+        ),
     ];
 
     return SingleChildScrollView(
