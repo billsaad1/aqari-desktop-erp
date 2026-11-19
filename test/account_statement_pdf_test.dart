@@ -50,4 +50,35 @@ void main() {
       expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
     },
   );
+
+  test(
+    'tenant statement PDF uses the same valid ledger report payload',
+    () async {
+      final report = AccountStatementReport(
+        accountId: 901,
+        accountCode: '120901',
+        accountName: 'ذمم المستأجر',
+        accountType: 'Asset',
+        currency: 'SAR',
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+        openingBalance: 250,
+        totalDebit: 40,
+        totalCredit: 15,
+        closingBalance: 275,
+        lines: const [],
+      );
+      final bytes = await AccountStatementPdf.build(
+        report: report,
+        companyInfo: null,
+        currency: 'ريال سعودي',
+        statementTitle: 'كشف حساب المستأجر',
+        partyName: 'مستأجر للاختبار',
+        accountLabel: 'حساب الذمم',
+      );
+
+      expect(bytes, isNotEmpty);
+      expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+    },
+  );
 }

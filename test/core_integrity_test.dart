@@ -4078,6 +4078,96 @@ void main() {
         throwsArgumentError,
       );
 
+      await helper.insertTenantWithAccount({
+        'name': 'مستأجر كشف دفتر الأستاذ',
+        'mobile': '777100001',
+      });
+      await helper.insertTenantWithAccount({
+        'name': 'مستأجر آخر لاختبار الربط',
+        'mobile': '777100002',
+      });
+      final tenant = (await db.query(
+        'tenants',
+        where: 'name = ?',
+        whereArgs: ['مستأجر كشف دفتر الأستاذ'],
+        limit: 1,
+      )).single;
+      final anotherTenant = (await db.query(
+        'tenants',
+        where: 'name = ?',
+        whereArgs: ['مستأجر آخر لاختبار الربط'],
+        limit: 1,
+      )).single;
+      final tenantId = (tenant['id'] as num).toInt();
+      final tenantAccountId = (tenant['account_id'] as num).toInt();
+      final anotherTenantId = (anotherTenant['id'] as num).toInt();
+      final anotherTenantAccountId = (anotherTenant['account_id'] as num)
+          .toInt();
+      final reportAccounts = await helper.getTenantStatementAccounts();
+      final tenantReportAccount = reportAccounts.singleWhere(
+        (row) => row['id'] == tenantId,
+      );
+      expect(tenantReportAccount['is_reportable'], 1);
+      expect(tenantReportAccount.keys, isNot(contains('mobile')));
+      expect(tenantReportAccount.keys, isNot(contains('identity_number')));
+
+      final duplicateTenantId = await db.insert('tenants', {
+        'name': 'مستأجر بربط حساب مشترك',
+        'account_id': tenantAccountId,
+      });
+      try {
+        final duplicateReportAccounts = await helper
+            .getTenantStatementAccounts();
+        for (final linkedTenantId in [tenantId, duplicateTenantId]) {
+          expect(
+            duplicateReportAccounts.singleWhere(
+              (row) => row['id'] == linkedTenantId,
+            )['is_reportable'],
+            0,
+          );
+          await expectLater(
+            helper.getLedgerAccountStatement(
+              accountId: tenantAccountId,
+              expectedTenantId: linkedTenantId,
+              startDate: '2026-02-01',
+              endDate: '2026-02-28',
+            ),
+            throwsStateError,
+          );
+        }
+      } finally {
+        await db.delete(
+          'tenants',
+          where: 'id = ?',
+          whereArgs: [duplicateTenantId],
+        );
+      }
+
+      final tenantReport = await helper.getLedgerAccountStatement(
+        accountId: tenantAccountId,
+        expectedTenantId: tenantId,
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(tenantReport.accountId, tenantAccountId);
+      expect(tenantReport.lines, isEmpty);
+      await expectLater(
+        helper.getLedgerAccountStatement(
+          accountId: tenantAccountId,
+          expectedTenantId: anotherTenantId,
+          startDate: '2026-02-01',
+          endDate: '2026-02-28',
+        ),
+        throwsStateError,
+      );
+      await db.delete(
+        'tenants',
+        where: 'id IN (?, ?)',
+        whereArgs: [tenantId, anotherTenantId],
+      );
+      await helper.deleteAccount(tenantAccountId);
+      await helper.deleteAccount(anotherTenantAccountId);
+
       try {
         PermissionRuntime.activate(
           userId: 44,
@@ -4100,6 +4190,10 @@ void main() {
             startDate: '2026-02-01',
             endDate: '2026-02-28',
           ),
+          throwsStateError,
+        );
+        await expectLater(
+          helper.getTenantStatementAccounts(),
           throwsStateError,
         );
       } finally {
