@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import 'account_balance_reconciliation_screen.dart';
 import 'financial_close_readiness_screen.dart';
 import 'smart_inquiry_screen.dart';
 import 'occupancy_report_screen.dart';
@@ -29,7 +30,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 14, vsync: this);
+    _tabController = TabController(length: 15, vsync: this);
   }
 
   @override
@@ -58,6 +59,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
             Tab(text: 'حركة الإيرادات والمصروفات'),
             Tab(text: 'تحصيل المستأجرين'),
             Tab(text: 'مطابقة الفواتير والقيود'),
+            Tab(text: 'مطابقة أرصدة الحسابات'),
             Tab(text: 'قائمة المركز المالي'),
             Tab(text: 'مراجعة جاهزية الإقفال'),
             Tab(text: 'كشف حساب العقار'),
@@ -78,6 +80,7 @@ class _ReportsMainScreenState extends State<ReportsMainScreen>
               IncomeExpenseReportScreen(),
               TenantCollectionReportScreen(),
               InvoiceLedgerReconciliationScreen(),
+              AccountBalanceReconciliationScreen(),
               FinancialPositionScreen(),
               FinancialCloseReadinessScreen(),
               PropertyStatementScreen(),

@@ -13,6 +13,7 @@ import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
 import '../core/sms_credential_store.dart';
+import '../models/account_balance_reconciliation_report_model.dart';
 import '../models/account_statement_report_model.dart';
 import '../models/financial_close_readiness_report_model.dart';
 import '../models/financial_position_report_model.dart';
@@ -8542,6 +8543,59 @@ class DatabaseHelper {
               ),
             )
             .toList(growable: false),
+      );
+    });
+  }
+
+  Future<AccountBalanceReconciliationReport>
+  getAccountBalanceReconciliationReport() async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final rows = await txn.rawQuery('''
+        WITH RECURSIVE account_tree(root_account_id, member_account_id) AS (
+          SELECT id, id FROM accounts
+          UNION
+          SELECT tree.root_account_id, child.id
+          FROM account_tree tree
+          JOIN accounts child ON child.parent_id = tree.member_account_id
+        ), ledger_balances AS (
+          SELECT
+            tree.root_account_id,
+            CAST(ROUND(COALESCE(SUM(CASE
+              WHEN journal.is_posted = 1
+               AND root.account_type IN ('Asset', 'Expense')
+              THEN COALESCE(line.debit, 0) - COALESCE(line.credit, 0)
+              WHEN journal.is_posted = 1
+               AND root.account_type IN ('Liability', 'Equity', 'Revenue')
+              THEN COALESCE(line.credit, 0) - COALESCE(line.debit, 0)
+              ELSE 0
+            END), 0) * 100) AS INTEGER) AS ledger_balance_minor
+          FROM account_tree tree
+          JOIN accounts root ON root.id = tree.root_account_id
+          LEFT JOIN journal_lines line
+            ON line.account_id = tree.member_account_id
+          LEFT JOIN journal_entries journal
+            ON journal.id = line.journal_entry_id
+          GROUP BY tree.root_account_id
+        )
+        SELECT
+          account.id AS account_id,
+          account.code AS account_code,
+          account.name AS account_name,
+          account.account_type AS account_type,
+          CAST(ROUND(COALESCE(account.balance, 0) * 100) AS INTEGER)
+            AS stored_balance_minor,
+          COALESCE(ledger.ledger_balance_minor, 0) AS ledger_balance_minor
+        FROM accounts account
+        LEFT JOIN ledger_balances ledger
+          ON ledger.root_account_id = account.id
+        ORDER BY account.code COLLATE NOCASE, account.id
+      ''');
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return AccountBalanceReconciliationReport(
+        rows: rows.map(AccountBalanceReconciliationRow.fromMap).toList(),
       );
     });
   }
