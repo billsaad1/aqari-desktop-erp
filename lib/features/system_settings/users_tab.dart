@@ -399,7 +399,7 @@ class _UsersTabState extends State<UsersTab> {
               children: [
                 Text(
                   isSuperAdmin
-                      ? 'هذا الحساب مدير نظام أعلى؛ جميع الصلاحيات مفتوحة دائمًا ولا يمكن تقليصها من هنا.'
+                      ? 'هذا الحساب مدير نظام أعلى. إعادة فتح الفترات لا تُمنح تلقائيًا؛ يمكن منح هذا الإجراء وحده من حساب مدير نظام أعلى آخر.'
                       : existing.isEmpty
                       ? 'يعرض الجدول افتراضيات الدور «${_roleLabels[role] ?? role}». أي تعديل سيحفظ تخصيصًا لهذا المستخدم فقط.'
                       : 'توجد تخصيصات محفوظة لهذا المستخدم؛ الأقسام التي لا يظهر لها سجل تبقى على افتراضيات الدور.',
@@ -449,9 +449,23 @@ class _UsersTabState extends State<UsersTab> {
                               runSpacing: 4,
                               children: [
                                 for (final action in AppPermissionAction.values)
-                                  if (action !=
-                                          AppPermissionAction.reviewApprove ||
-                                      module.code == 'property_sales')
+                                  if (module.code == 'accounting_periods'
+                                      ? const {
+                                          AppPermissionAction.view,
+                                          AppPermissionAction.add,
+                                          AppPermissionAction.lockPeriod,
+                                          AppPermissionAction.closePeriod,
+                                          AppPermissionAction.reopenPeriod,
+                                        }.contains(action)
+                                      : action !=
+                                                AppPermissionAction.lockPeriod &&
+                                            action !=
+                                                AppPermissionAction.closePeriod &&
+                                            action !=
+                                                AppPermissionAction.reopenPeriod &&
+                                            (action !=
+                                                    AppPermissionAction.reviewApprove ||
+                                                module.code == 'property_sales'))
                                     SizedBox(
                                       width: 145,
                                       child: CheckboxListTile(
@@ -463,7 +477,16 @@ class _UsersTabState extends State<UsersTab> {
                                         value:
                                             values[module.code]![action] ??
                                             false,
-                                        onChanged: isSuperAdmin || isSaving
+                                        onChanged:
+                                            isSaving ||
+                                                (isSuperAdmin &&
+                                                    (PermissionRuntime.role !=
+                                                            'SuperAdmin' ||
+                                                        !(module.code ==
+                                                                'accounting_periods' &&
+                                                            action ==
+                                                                AppPermissionAction
+                                                                    .reopenPeriod)))
                                             ? null
                                             : (value) {
                                                 setDialogState(() {
@@ -516,7 +539,8 @@ class _UsersTabState extends State<UsersTab> {
               child: const Text('إغلاق'),
             ),
             FilledButton.icon(
-              onPressed: isSuperAdmin || isSaving
+              onPressed: isSaving ||
+                      (isSuperAdmin && PermissionRuntime.role != 'SuperAdmin')
                   ? null
                   : () async {
                       setDialogState(() => isSaving = true);
@@ -524,13 +548,28 @@ class _UsersTabState extends State<UsersTab> {
                           ? <Map<String, dynamic>>[]
                           : [
                               for (final module in AppPermissionCatalog.modules)
-                                if (touchedModules.contains(module.code))
+                                if (isSuperAdmin
+                                    ? module.code == 'accounting_periods' &&
+                                          touchedModules.contains(module.code) &&
+                                          values[module.code]![AppPermissionAction
+                                                  .reopenPeriod] ==
+                                              true
+                                    : touchedModules.contains(module.code))
                                   {
                                     'screen_name': module.code,
                                     for (final action
                                         in AppPermissionAction.values)
                                       action.databaseColumn:
-                                          values[module.code]![action] ?? false,
+                                          isSuperAdmin
+                                              ? action ==
+                                                        AppPermissionAction.view ||
+                                                    (action ==
+                                                            AppPermissionAction
+                                                                .reopenPeriod &&
+                                                        values[module.code]![action] ==
+                                                            true)
+                                              : values[module.code]![action] ??
+                                                    false,
                                   },
                             ];
                       try {

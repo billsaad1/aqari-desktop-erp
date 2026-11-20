@@ -17,6 +17,7 @@ import '../master_data/lookups_screen.dart';
 import '../properties_owners/property_main_screen.dart';
 import '../property_sales/property_sale_reviews_screen.dart';
 import '../reports_inquiry/reports_main_screen.dart';
+import '../reports_inquiry/accounting_periods_screen.dart';
 import '../sms_gateway/sms_main_screen.dart';
 import '../system_services/system_services_screen.dart';
 import '../system_settings/system_settings_screen.dart';
@@ -93,7 +94,7 @@ class MainShellScreen extends StatelessWidget {
   }
 
   int? _firstAccessibleIndex(AuthProvider auth) {
-    for (var index = 0; index <= 12; index++) {
+    for (var index = 0; index <= 14; index++) {
       final module = AppPermissionCatalog.codeForNavigationIndex(index);
       if (module != null && auth.canAccessScreen(module)) return index;
     }
@@ -116,6 +117,7 @@ class MainShellScreen extends StatelessWidget {
       11 => 'إشعارات المستأجرين',
       12 => 'مراجعة بيع العقار والوحدة',
       13 => 'سجل التدقيق المالي',
+      14 => 'إدارة الفترات المحاسبية',
       _ => 'نظام إدارة العقارات',
     };
   }
@@ -136,6 +138,7 @@ class MainShellScreen extends StatelessWidget {
       11 => const TenantNoticesScreen(),
       12 => const PropertySaleReviewsScreen(),
       13 => const AuditTrailScreen(),
+      14 => const AccountingPeriodsScreen(),
       _ => const DashboardScreen(),
     };
   }
@@ -476,6 +479,14 @@ class _AppSidebarState extends State<AppSidebar> {
                               'الحسابات العامة',
                               Icons.account_balance_wallet_outlined,
                               6,
+                              navProvider,
+                            ),
+                          if (auth.canAccessScreen('accounting_periods'))
+                            _buildNavItem(
+                              context,
+                              'إدارة الفترات المحاسبية',
+                              Icons.calendar_month_outlined,
+                              14,
                               navProvider,
                             ),
                           if (auth.canAccessScreen('reports'))
