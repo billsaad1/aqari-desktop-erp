@@ -5563,6 +5563,7 @@ void main() {
         'description': 'صرف قديم غير مربوط بالمصدر',
       });
       await db.execute('PRAGMA foreign_keys = OFF');
+      await db.execute('DROP VIEW IF EXISTS credit_note_refund_balances');
       await db.execute('DROP VIEW collection_allocation_balances');
       await db.execute('DROP TABLE refund_allocations');
       await db.execute('DROP TABLE collection_allocations');

@@ -28,9 +28,12 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
   int? _selectedTenantId;
   int? _selectedCashAccountId;
   int? _selectedCollectionAllocationId;
+  int? _selectedCreditNoteId;
   List<Map<String, dynamic>> _refundSources = [];
+  List<Map<String, dynamic>> _creditNotes = [];
   List<Map<String, dynamic>> _legacyPayments = [];
   bool _isLoadingSources = false;
+  bool _isLoadingCreditNotes = false;
   bool _isProcessing = false;
   int _sourcesRequestId = 0;
 
@@ -40,6 +43,23 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
       if (id == _selectedCollectionAllocationId) return source;
     }
     return null;
+  }
+
+  Map<String, dynamic>? get _selectedCreditNote {
+    for (final note in _creditNotes) {
+      if ((note['id'] as num?)?.toInt() == _selectedCreditNoteId) return note;
+    }
+    return null;
+  }
+
+  int get _selectedRefundMaximumMinor {
+    final sourceMinor = InternalTax.toMinorUnits(
+      (_selectedSource?['remaining_amount'] as num?)?.toDouble() ?? 0,
+    );
+    final note = _selectedCreditNote;
+    if (note == null) return sourceMinor;
+    final noteMinor = (note['refundable_minor'] as num?)?.toInt() ?? 0;
+    return sourceMinor < noteMinor ? sourceMinor : noteMinor;
   }
 
   @override
@@ -71,7 +91,9 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
     if (mounted) {
       setState(() {
         _selectedCollectionAllocationId = null;
+        _selectedCreditNoteId = null;
         _refundSources = [];
+        _creditNotes = [];
         _legacyPayments = [];
         _amountController.clear();
         _isLoadingSources = tenantId != null;
@@ -102,6 +124,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
           _amountController.text = _inputAmount(first['remaining_amount']);
         }
       });
+      await _loadCreditNotesForSource(_selectedSource);
     } catch (error) {
       if (!mounted || requestId != _sourcesRequestId) return;
       setState(() => _isLoadingSources = false);
@@ -119,6 +142,61 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
           ? ''
           : _inputAmount(source['remaining_amount']);
     });
+    _loadCreditNotesForSource(_selectedSource);
+  }
+
+  Future<void> _loadCreditNotesForSource(
+    Map<String, dynamic>? source,
+  ) async {
+    final sourceAllocationId =
+        (source?['collection_allocation_id'] as num?)?.toInt();
+    final invoiceId = (source?['invoice_id'] as num?)?.toInt();
+    if (sourceAllocationId == null || invoiceId == null) {
+      if (mounted) {
+        setState(() {
+          _creditNotes = [];
+          _selectedCreditNoteId = null;
+          _isLoadingCreditNotes = false;
+        });
+      }
+      return;
+    }
+    setState(() {
+      _creditNotes = [];
+      _selectedCreditNoteId = null;
+      _isLoadingCreditNotes = true;
+    });
+    try {
+      final notes = (await DatabaseHelper.instance.getCreditNotesForInvoice(
+        invoiceId,
+      )).where((note) {
+        return ((note['refundable_minor'] as num?)?.toInt() ?? 0) > 0;
+      }).toList();
+      if (!mounted ||
+          _selectedCollectionAllocationId != sourceAllocationId) {
+        return;
+      }
+      setState(() {
+        _creditNotes = notes;
+        _selectedCreditNoteId = notes.length == 1
+            ? (notes.first['id'] as num).toInt()
+            : null;
+        _isLoadingCreditNotes = false;
+      });
+    } catch (error) {
+      if (!mounted ||
+          _selectedCollectionAllocationId != sourceAllocationId) {
+        return;
+      }
+      setState(() {
+        _creditNotes = [];
+        _selectedCreditNoteId = null;
+        _isLoadingCreditNotes = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('تعذر تحميل الإشعارات الدائنة: $error')),
+      );
+    }
   }
 
   Future<void> _pickDate() async {
@@ -157,18 +235,17 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
       return;
     }
     final amount = double.tryParse(_amountController.text.trim());
-    final remaining = (source['remaining_amount'] as num).toDouble();
     if (amount == null || !amount.isFinite || amount <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('أدخل مبلغ استرداد صحيحًا أكبر من صفر')),
       );
       return;
     }
-    if (InternalTax.toMinorUnits(amount) >
-        InternalTax.toMinorUnits(remaining)) {
+    final maximumMinor = _selectedRefundMaximumMinor;
+    if (InternalTax.toMinorUnits(amount) > maximumMinor) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('مبلغ الاسترداد يتجاوز الجزء غير المسترد من المصدر'),
+          content: Text('مبلغ الاسترداد يتجاوز الجزء غير المسترد من المصدر أو الإشعار'),
         ),
       );
       return;
@@ -192,6 +269,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
         cashAccountId: _selectedCashAccountId!,
         collectionAllocationId: _selectedCollectionAllocationId!,
         description: _descController.text.trim(),
+        creditNoteId: _selectedCreditNoteId,
       );
     } catch (error) {
       if (mounted) {
@@ -231,6 +309,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
             'source_receipt_voucher_id': sourceReceiptId,
             'source_receipt_date': source['receipt_date'],
             'invoice_id': source['invoice_id'],
+            'credit_note_id': _selectedCreditNoteId,
             'installment_id': source['installment_id'],
             'allocated_amount': amount,
           },
@@ -611,7 +690,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
                       ),
                       const SizedBox(height: 8),
                       const Text(
-                        'لا يمكن رد مبلغ يتجاوز المقبوض غير المسترد. هذا السند يرد نقدًا ويعيد رصيد الاستحقاق ولا يخفض قيمة الفاتورة؛ تخفيض الفاتورة بإشعار دائن مستقل ما زال خارج هذه الدفعة. الصرف غير المرتبط يُسجل كسند صرف عام.',
+                        'الإشعار الدائن يخفض الذمم ولا يرد النقد تلقائيًا. عند رد مبلغ ناتج عن إشعار، اربط الرد بالإشعار وبسند القبض الأصلي؛ أما الصرف غير المرتبط بمقبوض فيسجل كسند صرف عام.',
                       ),
                       const SizedBox(height: 24),
                       DropdownButtonFormField<int>(
@@ -722,6 +801,43 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
                             ),
                           ),
                         ],
+                        if (selectedSource?['invoice_id'] != null &&
+                            _isLoadingCreditNotes)
+                          const LinearProgressIndicator(),
+                        if (selectedSource?['invoice_id'] != null &&
+                            !_isLoadingCreditNotes &&
+                            _creditNotes.isNotEmpty) ...[
+                          const SizedBox(height: 12),
+                          DropdownButtonFormField<int?>(
+                            value: _selectedCreditNoteId,
+                            items: [
+                              const DropdownMenuItem<int?>(
+                                value: null,
+                                child: Text('صرف عام غير مرتبط بإشعار دائن'),
+                              ),
+                              ..._creditNotes.map((note) {
+                              final id = (note['id'] as num).toInt();
+                              return DropdownMenuItem<int?>(
+                                value: id,
+                                child: Text(
+                                  'إشعار دائن #$id — المتبقي ${_formatAmount((note['refundable_minor'] as num).toInt() / 100.0)}',
+                                ),
+                              );
+                            }),
+                            ],
+                            onChanged: _isProcessing
+                                ? null
+                                : (value) => setState(() {
+                                    _selectedCreditNoteId = value;
+                                  }),
+                            decoration: const InputDecoration(
+                              labelText: 'الإشعار الدائن المرتبط برد النقد',
+                              helperText:
+                                  'اختر الإشعار عند ارتباط الرد به؛ الصرف العام يظل غير مرتبط بالإشعار. كل رد محدود بمصدر القبض الأصلي.',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ],
                       ],
                       const SizedBox(height: 16),
                       DropdownButtonFormField<int>(
@@ -773,7 +889,7 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
                                 labelText: 'المبلغ المرتد',
                                 helperText: selectedSource == null
                                     ? null
-                                    : 'الحد الأقصى ${_formatAmount(selectedSource['remaining_amount'])}',
+                                    : 'الحد الأقصى ${_formatAmount(_selectedRefundMaximumMinor / 100.0)}',
                                 border: const OutlineInputBorder(),
                               ),
                               validator: (value) {
@@ -787,12 +903,8 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
                                 }
                                 if (selectedSource != null &&
                                     InternalTax.toMinorUnits(amount) >
-                                        InternalTax.toMinorUnits(
-                                          (selectedSource['remaining_amount']
-                                                  as num)
-                                              .toDouble(),
-                                        )) {
-                                  return 'يتجاوز المتاح من هذا المصدر';
+                                        _selectedRefundMaximumMinor) {
+                                  return 'يتجاوز المتاح من هذا المصدر أو الإشعار';
                                 }
                                 return null;
                               },

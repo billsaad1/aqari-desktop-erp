@@ -24,13 +24,14 @@ import '../models/tenant_collection_report_model.dart';
 import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
+import 'credit_note_schema.dart';
 import 'owner_settlement_schema.dart';
 import 'property_sale_schema.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 29;
+  static const int _schemaVersion = 30;
   @visibleForTesting
   static Future<void> Function()? restorePostReplacementHookForTesting;
 
@@ -77,6 +78,20 @@ class DatabaseHelper {
   bool _hasCentPrecision(num value) {
     final scaled = value.toDouble() * 100;
     return scaled.isFinite && (scaled - scaled.round()).abs() < 0.000001;
+  }
+
+  bool _isIsoCalendarDate(String value) {
+    if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+    final parts = value.split('-').map(int.tryParse).toList();
+    if (parts.any((part) => part == null)) return false;
+    final year = parts[0]!;
+    final month = parts[1]!;
+    final day = parts[2]!;
+    if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) {
+      return false;
+    }
+    final parsed = DateTime.utc(year, month, day);
+    return parsed.year == year && parsed.month == month && parsed.day == day;
   }
 
   void _requireAnyView(Iterable<String> modules) {
@@ -581,7 +596,28 @@ class DatabaseHelper {
         'tax_amount',
         'tax_rate',
       ],
-      'credit_notes': ['id', 'invoice_id', 'note_date', 'amount'],
+      'credit_notes': [
+        'id',
+        'invoice_id',
+        'note_date',
+        'amount',
+        'reason',
+        'status',
+        'net_amount_minor',
+        'tax_amount_minor',
+        'total_amount_minor',
+        'tax_rate_snapshot',
+        'tax_account_id',
+        'journal_entry_id',
+        'reversal_journal_entry_id',
+        'reversal_reason',
+        'created_by',
+        'created_at',
+        'posted_by',
+        'posted_at',
+        'reversed_by',
+        'reversed_at',
+      ],
       'vouchers': [
         'id',
         'voucher_type',
@@ -621,6 +657,7 @@ class DatabaseHelper {
         'id',
         'refund_voucher_id',
         'collection_allocation_id',
+        'credit_note_id',
         'amount_minor',
         'rent_amount_minor',
         'tax_amount_minor',
@@ -811,6 +848,18 @@ class DatabaseHelper {
       'refund_allocations_source_cap',
       'refund_allocations_no_update',
       'refund_allocations_no_delete',
+      'credit_notes_initial_draft',
+      'credit_notes_valid_transition',
+      'credit_notes_post_requires_journal',
+      'credit_notes_reversal_requires_journal',
+      'credit_notes_posted_immutable',
+      'credit_notes_no_delete',
+      'credit_notes_journal_entries_no_update',
+      'credit_notes_journal_entries_no_delete',
+      'credit_notes_journal_lines_no_update',
+      'credit_notes_journal_lines_no_delete',
+      'refund_allocations_credit_note_match',
+      'refund_allocations_credit_note_cap',
       'tenant_notices_issued_immutable',
       'tenant_notices_no_delete',
       'tenant_notice_events_no_update',
@@ -961,6 +1010,9 @@ class DatabaseHelper {
     )).map((row) => row['name']?.toString()).toSet();
     if (!views.contains('collection_allocation_balances')) {
       throw StateError('مخطط النسخة يفتقد عرض رصيد التحصيلات بعد الاسترداد');
+    }
+    if (!views.contains('credit_note_refund_balances')) {
+      throw StateError('مخطط النسخة يفتقد عرض رصيد الإشعارات الدائنة القابل للاسترداد');
     }
     final indexes = (await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'index'",
@@ -1500,6 +1552,9 @@ class DatabaseHelper {
     if (oldVersion < 29) {
       await _ensureColumn(db, 'contracts', 'terms_conditions_snapshot', 'TEXT');
     }
+    if (oldVersion < 30) {
+      await CreditNoteSchema.upgradeToV30(db);
+    }
   }
 
   /// Rebuilds `audit_logs` without a foreign key on `user_id`.
@@ -1874,6 +1929,7 @@ class DatabaseHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         refund_voucher_id INTEGER NOT NULL,
         collection_allocation_id INTEGER NOT NULL,
+        credit_note_id INTEGER REFERENCES credit_notes (id),
         amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
         rent_amount_minor INTEGER NOT NULL CHECK (rent_amount_minor >= 0),
         tax_amount_minor INTEGER NOT NULL CHECK (tax_amount_minor >= 0),
@@ -2625,15 +2681,7 @@ class DatabaseHelper {
       WHERE installment_id IS NOT NULL
     ''');
 
-    await db.execute('''
-      CREATE TABLE credit_notes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invoice_id INTEGER,
-        note_date TEXT NOT NULL,
-        amount REAL NOT NULL,
-        FOREIGN KEY (invoice_id) REFERENCES tax_invoices (id)
-      )
-    ''');
+    await CreditNoteSchema.createTable(db);
 
     await db.execute('''
       CREATE TABLE vouchers (
@@ -2732,6 +2780,7 @@ class DatabaseHelper {
     ''');
 
     await _createRefundSchema(db);
+    await CreditNoteSchema.installGuards(db);
     await _createTenantNoticeSchema(db);
     await _createPropertySaleReviewSchema(db);
     await createPropertySaleExecutionSchema(db);
@@ -6145,25 +6194,672 @@ class DatabaseHelper {
         ci.due_date,
         ci.amount AS installment_amount,
         ci.paid_amount AS installment_paid_amount,
-        COALESCE(vip.paid_amount, 0) AS paid_amount,
-        ROUND(MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0), 2)
+        COALESCE(vip.paid_minor, 0) / 100.0 AS paid_amount,
+        COALESCE(credit.total_minor, 0) / 100.0 AS credited_amount,
+        MAX(CAST(ROUND(ti.total_amount * 100) AS INTEGER)
+          - COALESCE(vip.paid_minor, 0)
+          - COALESCE(credit.total_minor, 0), 0) / 100.0
           AS remaining_amount
       FROM tax_invoices ti
       JOIN contracts c ON c.id = ti.contract_id
       JOIN contract_installments ci ON ci.id = ti.installment_id
       LEFT JOIN (
-        SELECT invoice_id, SUM(remaining_minor) / 100.0 AS paid_amount
+        SELECT invoice_id, SUM(remaining_minor) AS paid_minor
         FROM collection_allocation_balances
         WHERE invoice_id IS NOT NULL
         GROUP BY invoice_id
       ) vip ON vip.invoice_id = ti.id
+      LEFT JOIN (
+        SELECT invoice_id, SUM(total_amount_minor) AS total_minor
+        FROM credit_notes
+        WHERE status = 'posted'
+        GROUP BY invoice_id
+      ) credit ON credit.invoice_id = ti.id
       WHERE c.tenant_id = ? AND c.status = 'Active'
       GROUP BY ti.id
-      HAVING ROUND(MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0), 2) > 0
+      HAVING MAX(CAST(ROUND(ti.total_amount * 100) AS INTEGER)
+        - COALESCE(vip.paid_minor, 0)
+        - COALESCE(credit.total_minor, 0), 0) > 0
       ORDER BY ci.due_date, ti.invoice_date, ti.id
       ''',
       [tenantId],
     );
+  }
+
+  Future<List<Map<String, dynamic>>> getCreditNoteInvoiceCandidates() async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT
+        ti.id AS invoice_id,
+        ti.contract_id,
+        ti.installment_id,
+        ti.invoice_date,
+        ti.net_amount,
+        ti.tax_amount,
+        ti.total_amount,
+        ti.tax_rate,
+        ti.tax_account_id,
+        c.tenant_id,
+        t.name AS tenant_name,
+        COALESCE(credits.net_minor, 0) AS credited_net_minor,
+        COALESCE(credits.tax_minor, 0) AS credited_tax_minor,
+        COALESCE(credits.total_minor, 0) AS credited_total_minor,
+        MAX(CAST(ROUND(ti.total_amount * 100) AS INTEGER)
+          - COALESCE(credits.total_minor, 0), 0) AS available_credit_minor,
+        source.is_posted AS source_journal_posted
+      FROM tax_invoices ti
+      JOIN contracts c ON c.id = ti.contract_id
+      JOIN tenants t ON t.id = c.tenant_id
+      LEFT JOIN (
+        SELECT invoice_id,
+          SUM(net_amount_minor) AS net_minor,
+          SUM(tax_amount_minor) AS tax_minor,
+          SUM(total_amount_minor) AS total_minor
+        FROM credit_notes
+        WHERE status = 'posted'
+        GROUP BY invoice_id
+      ) credits ON credits.invoice_id = ti.id
+      LEFT JOIN journal_entries source ON source.id = ti.journal_entry_id
+      WHERE CAST(ROUND(ti.total_amount * 100) AS INTEGER)
+        > COALESCE(credits.total_minor, 0)
+        AND source.is_posted = 1
+        AND CAST(ROUND(ti.net_amount * 100) AS INTEGER)
+          + CAST(ROUND(ti.tax_amount * 100) AS INTEGER)
+          = CAST(ROUND(ti.total_amount * 100) AS INTEGER)
+      ORDER BY ti.invoice_date DESC, ti.id DESC
+    ''');
+  }
+
+  Future<List<Map<String, dynamic>>> getCreditNotesForInvoice(
+    int invoiceId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.transaction(
+      (txn) => _creditNoteRefundBalancesTx(txn, invoiceId),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _creditNoteRefundBalancesTx(
+    DatabaseExecutor txn,
+    int invoiceId,
+  ) async {
+    return txn.rawQuery(
+      '''
+      SELECT note.*, balance.tenant_id, balance.applied_minor,
+        balance.refunded_minor, balance.refunded_net_minor,
+        balance.refunded_tax_minor, balance.refundable_minor,
+        balance.refundable_net_minor, balance.refundable_tax_minor
+      FROM credit_note_refund_balances balance
+      JOIN credit_notes note ON note.id = balance.id
+      WHERE balance.invoice_id = ?
+      ORDER BY balance.note_date, balance.id
+      ''',
+      [invoiceId],
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getCreditNotes({int? invoiceId}) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    final where = invoiceId == null ? '' : 'WHERE note.invoice_id = ?';
+    return db.rawQuery('''
+      SELECT note.*,
+        invoice.invoice_date,
+        invoice.total_amount AS invoice_total_amount,
+        contract.tenant_id,
+        tenant.name AS tenant_name
+      FROM credit_notes note
+      LEFT JOIN tax_invoices invoice ON invoice.id = note.invoice_id
+      LEFT JOIN contracts contract ON contract.id = invoice.contract_id
+      LEFT JOIN tenants tenant ON tenant.id = contract.tenant_id
+      $where
+      ORDER BY note.note_date DESC, note.id DESC
+    ''', invoiceId == null ? const [] : [invoiceId]);
+  }
+
+  Future<int> createCreditNoteDraft({
+    required int invoiceId,
+    required String noteDate,
+    required int totalAmountMinor,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.add);
+    final normalizedReason = reason.trim();
+    if (!_isIsoCalendarDate(noteDate) ||
+        totalAmountMinor <= 0 ||
+        normalizedReason.isEmpty ||
+        normalizedReason.length > 500) {
+      throw ArgumentError('تاريخ الإشعار ومبلغه وسببه مطلوبة وصحيحة');
+    }
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('tenant_financial', AppPermissionAction.add);
+      final invoices = await txn.rawQuery(
+        '''
+        SELECT ti.* FROM tax_invoices ti
+        WHERE ti.id = ?
+        LIMIT 1
+        ''',
+        [invoiceId],
+      );
+      if (invoices.isEmpty) throw StateError('الفاتورة الأصلية غير موجودة');
+      final invoice = invoices.first;
+      final net = (invoice['net_amount'] as num).toDouble();
+      final tax = (invoice['tax_amount'] as num).toDouble();
+      final total = (invoice['total_amount'] as num).toDouble();
+      if (!_hasCentPrecision(net) ||
+          !_hasCentPrecision(tax) ||
+          !_hasCentPrecision(total) ||
+          InternalTax.toMinorUnits(net + tax) !=
+              InternalTax.toMinorUnits(total)) {
+        throw StateError('مبالغ الفاتورة الأصلية غير متسقة؛ يلزم فحص يدوي');
+      }
+      final priorCredits = await txn.rawQuery(
+        '''
+        SELECT COALESCE(SUM(net_amount_minor), 0) AS net_minor,
+          COALESCE(SUM(tax_amount_minor), 0) AS tax_minor,
+          COALESCE(SUM(total_amount_minor), 0) AS total_minor
+        FROM credit_notes
+        WHERE invoice_id = ? AND status = 'posted'
+        ''',
+        [invoiceId],
+      );
+      final originalNetMinor = InternalTax.toMinorUnits(net);
+      final originalTaxMinor = InternalTax.toMinorUnits(tax);
+      final originalTotalMinor = InternalTax.toMinorUnits(total);
+      final priorNetMinor =
+          (priorCredits.first['net_minor'] as num).toInt();
+      final priorTaxMinor =
+          (priorCredits.first['tax_minor'] as num).toInt();
+      final priorTotalMinor =
+          (priorCredits.first['total_minor'] as num).toInt();
+      final remainingNet = originalNetMinor - priorNetMinor;
+      final remainingTax = originalTaxMinor - priorTaxMinor;
+      final remainingTotal = originalTotalMinor - priorTotalMinor;
+      if (remainingNet < 0 ||
+          remainingTax < 0 ||
+          remainingTotal < 0 ||
+          remainingNet + remainingTax != remainingTotal ||
+          totalAmountMinor > remainingTotal) {
+        throw StateError('مبلغ الإشعار يتجاوز الرصيد غير المعكوس من الفاتورة');
+      }
+      var noteTaxMinor = totalAmountMinor == remainingTotal
+          ? remainingTax
+          : ((BigInt.from(totalAmountMinor) * BigInt.from(remainingTax) +
+                          BigInt.from(remainingTotal ~/ 2)) ~/
+                      BigInt.from(remainingTotal))
+                  .toInt();
+      if (noteTaxMinor > remainingTax) noteTaxMinor = remainingTax;
+      var noteNetMinor = totalAmountMinor - noteTaxMinor;
+      if (noteNetMinor > remainingNet) {
+        noteNetMinor = remainingNet;
+        noteTaxMinor = totalAmountMinor - noteNetMinor;
+      }
+      if (noteNetMinor < 0 ||
+          noteTaxMinor < 0 ||
+          noteTaxMinor > remainingTax ||
+          noteNetMinor + noteTaxMinor != totalAmountMinor) {
+        throw StateError('تعذر توزيع الإشعار على الصافي والضريبة بأمان');
+      }
+      final actorId = await _verifiedAuditUserId(txn);
+      final createdAt = DateTime.now().toIso8601String();
+      final noteId = await txn.insert('credit_notes', {
+        'invoice_id': invoiceId,
+        'note_date': noteDate,
+        'amount': totalAmountMinor / 100.0,
+        'reason': normalizedReason,
+        'status': 'draft',
+        'net_amount_minor': noteNetMinor,
+        'tax_amount_minor': noteTaxMinor,
+        'total_amount_minor': totalAmountMinor,
+        'tax_rate_snapshot': invoice['tax_rate'],
+        'tax_account_id': invoice['tax_account_id'],
+        'created_by': actorId,
+        'created_at': createdAt,
+      });
+      await _recordAuditTx(
+        txn,
+        action: 'CREDIT_NOTE_DRAFT_CREATED',
+        entityType: 'credit_note',
+        entityId: noteId,
+        amountMinor: totalAmountMinor,
+        details: {
+          'invoice_id': invoiceId,
+          'note_date': noteDate,
+          'net_amount_minor': noteNetMinor,
+          'tax_amount_minor': noteTaxMinor,
+          'reason': normalizedReason,
+        },
+      );
+      return noteId;
+    });
+  }
+
+  List<int> _allocateCreditNoteMinorUnits({
+    required int amountMinor,
+    required List<Map<String, dynamic>> sourceLines,
+    required String sourceAmountField,
+  }) {
+    if (sourceLines.isEmpty || amountMinor < 0) {
+      throw StateError('تعذر توزيع مبلغ الإشعار على أسطر مصدره');
+    }
+    final weights = sourceLines
+        .map((line) =>
+            InternalTax.toMinorUnits((line[sourceAmountField] as num).toDouble()))
+        .toList();
+    final totalWeight = weights.fold<int>(0, (sum, value) => sum + value);
+    if (totalWeight <= 0) {
+      throw StateError('لا توجد مبالغ مصدر صالحة لتوزيع الإشعار');
+    }
+    var allocated = 0;
+    return List<int>.generate(sourceLines.length, (index) {
+      if (index == sourceLines.length - 1) return amountMinor - allocated;
+      final share = (BigInt.from(amountMinor) * BigInt.from(weights[index]) ~/
+              BigInt.from(totalWeight))
+          .toInt();
+      allocated += share;
+      return share;
+    });
+  }
+
+  Future<void> postCreditNote(int creditNoteId) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+      final notes = await txn.query(
+        'credit_notes',
+        where: 'id = ?',
+        whereArgs: [creditNoteId],
+        limit: 1,
+      );
+      if (notes.isEmpty || notes.first['status'] != 'draft') {
+        throw StateError('لا يمكن ترحيل هذا الإشعار؛ يجب أن يكون مسودة');
+      }
+      final note = notes.first;
+      final invoiceId = (note['invoice_id'] as num?)?.toInt();
+      if (invoiceId == null) {
+        throw StateError('الإشعار التاريخي بلا فاتورة أصلية؛ يتطلب مراجعة يدوية');
+      }
+      final noteNet = (note['net_amount_minor'] as num).toInt();
+      final noteTax = (note['tax_amount_minor'] as num).toInt();
+      final noteTotal = (note['total_amount_minor'] as num).toInt();
+      final noteAmount = (note['amount'] as num).toDouble();
+      if (noteTotal <= 0 ||
+          noteNet + noteTax != noteTotal ||
+          !_hasCentPrecision(noteAmount) ||
+          InternalTax.toMinorUnits(noteAmount) != noteTotal ||
+          !_isIsoCalendarDate(note['note_date']?.toString() ?? '') ||
+          (note['reason']?.toString().trim().isEmpty ?? true)) {
+        throw StateError('تفصيل مبلغ الإشعار غير متوازن');
+      }
+      final invoices = await txn.rawQuery(
+        '''
+        SELECT ti.*, c.tenant_id, t.account_id AS tenant_account_id
+        FROM tax_invoices ti
+        JOIN contracts c ON c.id = ti.contract_id
+        JOIN tenants t ON t.id = c.tenant_id
+        WHERE ti.id = ?
+        LIMIT 1
+        ''',
+        [invoiceId],
+      );
+      if (invoices.isEmpty) throw StateError('الفاتورة الأصلية غير مرتبطة بمستأجر');
+      final invoice = invoices.first;
+      final invoiceNet = (invoice['net_amount'] as num).toDouble();
+      final invoiceTax = (invoice['tax_amount'] as num).toDouble();
+      final invoiceTotal = (invoice['total_amount'] as num).toDouble();
+      if (!_hasCentPrecision(invoiceNet) ||
+          !_hasCentPrecision(invoiceTax) ||
+          !_hasCentPrecision(invoiceTotal) ||
+          InternalTax.toMinorUnits(invoiceNet + invoiceTax) !=
+              InternalTax.toMinorUnits(invoiceTotal)) {
+        throw StateError('الفاتورة الأصلية غير متسقة؛ لا يمكن ترحيل الإشعار');
+      }
+      final invoiceTaxRate = invoice['tax_rate'] as num?;
+      final noteTaxRate = note['tax_rate_snapshot'] as num?;
+      if ((invoiceTaxRate == null) != (noteTaxRate == null) ||
+          (invoiceTaxRate != null &&
+              invoiceTaxRate.toDouble() != noteTaxRate!.toDouble()) ||
+          (invoice['tax_account_id'] as num?)?.toInt() !=
+              (note['tax_account_id'] as num?)?.toInt()) {
+        throw StateError('لقطة الضريبة في المسودة تغيرت عن الفاتورة الأصلية');
+      }
+      final sourceJournalId =
+          (invoice['journal_entry_id'] as num?)?.toInt();
+      if (sourceJournalId == null) {
+        throw StateError('الفاتورة لا تحمل قيدًا أصليًا صالحًا للانعكاس');
+      }
+      final sourceJournal = await txn.query(
+        'journal_entries',
+        columns: ['id', 'is_posted'],
+        where: 'id = ?',
+        whereArgs: [sourceJournalId],
+        limit: 1,
+      );
+      if (sourceJournal.isEmpty || sourceJournal.first['is_posted'] != 1) {
+        throw StateError('قيد الفاتورة الأصلية غير مرحّل؛ راجع المصدر يدويًا');
+      }
+      final sourceLines = await txn.rawQuery(
+        '''
+        SELECT jl.account_id, jl.debit, jl.credit, jl.cost_center_id,
+          a.account_type
+        FROM journal_lines jl
+        JOIN accounts a ON a.id = jl.account_id
+        WHERE jl.journal_entry_id = ?
+        ORDER BY jl.id
+        ''',
+        [sourceJournalId],
+      );
+      final receivableLines = <Map<String, dynamic>>[];
+      final revenueLines = <Map<String, dynamic>>[];
+      final taxLines = <Map<String, dynamic>>[];
+      var sourceDebitMinor = 0;
+      var sourceCreditMinor = 0;
+      var sourceNetMinor = 0;
+      var sourceTaxMinor = 0;
+      for (final line in sourceLines) {
+        final debit = (line['debit'] as num).toDouble();
+        final credit = (line['credit'] as num).toDouble();
+        if (!_hasCentPrecision(debit) ||
+            !_hasCentPrecision(credit) ||
+            debit < 0 ||
+            credit < 0 ||
+            (debit > 0 && credit > 0) ||
+            (debit == 0 && credit == 0)) {
+          throw StateError('سطر قيد الفاتورة غير صالح؛ يلزم فحص يدوي');
+        }
+        final debitMinor = InternalTax.toMinorUnits(debit);
+        final creditMinor = InternalTax.toMinorUnits(credit);
+        final type = line['account_type']?.toString();
+        final accountId = (line['account_id'] as num).toInt();
+        sourceDebitMinor += debitMinor;
+        sourceCreditMinor += creditMinor;
+        if (debitMinor > 0) {
+          if (type != 'Asset' ||
+              invoice['tenant_account_id'] == null ||
+              accountId != (invoice['tenant_account_id'] as num).toInt()) {
+            throw StateError(
+              'حساب الذمم بالقيد الأصلي لا يطابق حساب المستأجر الحالي؛ راجع الحساب يدويًا',
+            );
+          }
+          receivableLines.add(line);
+        } else if (type == 'Revenue') {
+          revenueLines.add(line);
+          sourceNetMinor += creditMinor;
+        } else if (type == 'Liability') {
+          if (invoice['tax_account_id'] == null ||
+              accountId != (invoice['tax_account_id'] as num).toInt()) {
+            throw StateError(
+              'حساب الالتزام بالقيد الأصلي لا يطابق لقطة ضريبة الفاتورة؛ راجعها يدويًا',
+            );
+          }
+          taxLines.add(line);
+          sourceTaxMinor += creditMinor;
+        } else {
+          throw StateError('قيد الفاتورة يحتوي حسابًا غير متوقع؛ لا يعكس آليًا');
+        }
+      }
+      final originalNetMinor = InternalTax.toMinorUnits(invoiceNet);
+      final originalTaxMinor = InternalTax.toMinorUnits(invoiceTax);
+      final originalTotalMinor = InternalTax.toMinorUnits(invoiceTotal);
+      if (sourceLines.isEmpty ||
+          sourceDebitMinor != originalTotalMinor ||
+          sourceCreditMinor != originalTotalMinor ||
+          sourceNetMinor != originalNetMinor ||
+          sourceTaxMinor != originalTaxMinor ||
+          receivableLines.isEmpty ||
+          revenueLines.isEmpty ||
+          (originalTaxMinor > 0 && taxLines.isEmpty) ||
+          (originalTaxMinor == 0 && taxLines.isNotEmpty)) {
+        throw StateError(
+          'القيد الأصلي لا يطابق صافي وضريبة وإجمالي الفاتورة؛ راجع المستند يدويًا',
+        );
+      }
+      final priorCredits = await txn.rawQuery(
+        '''
+        SELECT COALESCE(SUM(net_amount_minor), 0) AS net_minor,
+          COALESCE(SUM(tax_amount_minor), 0) AS tax_minor,
+          COALESCE(SUM(total_amount_minor), 0) AS total_minor
+        FROM credit_notes
+        WHERE invoice_id = ? AND status = 'posted'
+        ''',
+        [invoiceId],
+      );
+      final creditedNet = (priorCredits.first['net_minor'] as num).toInt();
+      final creditedTax = (priorCredits.first['tax_minor'] as num).toInt();
+      final creditedTotal = (priorCredits.first['total_minor'] as num).toInt();
+      if (noteNet > originalNetMinor - creditedNet ||
+          noteTax > originalTaxMinor - creditedTax ||
+          noteTotal > originalTotalMinor - creditedTotal ||
+          noteNet + noteTax != noteTotal) {
+        throw StateError('تجاوز الإشعار الرصيد غير المعكوس؛ أعد تحميله');
+      }
+      final revenueShares = _allocateCreditNoteMinorUnits(
+        amountMinor: noteNet,
+        sourceLines: revenueLines,
+        sourceAmountField: 'credit',
+      );
+      final taxShares = noteTax == 0
+          ? List<int>.filled(taxLines.length, 0)
+          : _allocateCreditNoteMinorUnits(
+              amountMinor: noteTax,
+              sourceLines: taxLines,
+              sourceAmountField: 'credit',
+            );
+      final receivableShares = _allocateCreditNoteMinorUnits(
+        amountMinor: noteTotal,
+        sourceLines: receivableLines,
+        sourceAmountField: 'debit',
+      );
+      final description = 'إشعار دائن رقم $creditNoteId مرتبط بالفاتورة $invoiceId';
+      final journalId = await txn.insert('journal_entries', {
+        'entry_date': note['note_date'],
+        'description': description,
+        'is_posted': 1,
+      });
+      Future<void> addLine({
+        required Map<String, dynamic> source,
+        required int amountMinor,
+        required bool debit,
+        required String lineDescription,
+      }) async {
+        if (amountMinor <= 0) return;
+        final amount = amountMinor / 100.0;
+        final accountId = (source['account_id'] as num).toInt();
+        await _requireLeafAccountTx(
+          txn,
+          accountId,
+          expectedType: debit
+              ? (source['account_type'] == 'Revenue' ? 'Revenue' : 'Liability')
+              : 'Asset',
+        );
+        await txn.insert('journal_lines', {
+          'journal_entry_id': journalId,
+          'account_id': accountId,
+          'debit': debit ? amount : 0.0,
+          'credit': debit ? 0.0 : amount,
+          'cost_center_id': source['cost_center_id'],
+          'description': lineDescription,
+        });
+        await _updateBalanceTx(
+          txn,
+          accountId,
+          debit ? amount : 0.0,
+          debit ? 0.0 : amount,
+        );
+      }
+
+      for (var i = 0; i < revenueLines.length; i++) {
+        await addLine(
+          source: revenueLines[i],
+          amountMinor: revenueShares[i],
+          debit: true,
+          lineDescription: 'عكس إيراد فاتورة $invoiceId',
+        );
+      }
+      for (var i = 0; i < taxLines.length; i++) {
+        await addLine(
+          source: taxLines[i],
+          amountMinor: taxShares[i],
+          debit: true,
+          lineDescription: 'عكس التزام ضريبة الفاتورة $invoiceId',
+        );
+      }
+      for (var i = 0; i < receivableLines.length; i++) {
+        await addLine(
+          source: receivableLines[i],
+          amountMinor: receivableShares[i],
+          debit: false,
+          lineDescription: 'تخفيض ذمم الفاتورة $invoiceId',
+        );
+      }
+      final actorId = await _verifiedAuditUserId(txn);
+      final changed = await txn.update(
+        'credit_notes',
+        {
+          'status': 'posted',
+          'journal_entry_id': journalId,
+          'posted_by': actorId,
+          'posted_at': DateTime.now().toIso8601String(),
+        },
+        where: "id = ? AND status = 'draft'",
+        whereArgs: [creditNoteId],
+      );
+      if (changed != 1) throw StateError('تغيرت حالة الإشعار؛ أُلغيت المعاملة');
+      await _recordAuditTx(
+        txn,
+        action: 'CREDIT_NOTE_POSTED',
+        entityType: 'credit_note',
+        entityId: creditNoteId,
+        amountMinor: noteTotal,
+        details: {
+          'invoice_id': invoiceId,
+          'journal_entry_id': journalId,
+          'net_amount_minor': noteNet,
+          'tax_amount_minor': noteTax,
+          'note_date': note['note_date'],
+        },
+      );
+    });
+  }
+
+  Future<void> reverseCreditNote(
+    int creditNoteId, {
+    required String reversalDate,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+    final normalizedReason = reason.trim();
+    if (!_isIsoCalendarDate(reversalDate) ||
+        normalizedReason.isEmpty ||
+        normalizedReason.length > 500) {
+      throw ArgumentError('تاريخ وسبب عكس الإشعار مطلوبان');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+      final notes = await txn.query(
+        'credit_notes',
+        where: 'id = ?',
+        whereArgs: [creditNoteId],
+        limit: 1,
+      );
+      if (notes.isEmpty || notes.first['status'] != 'posted') {
+        throw StateError('يمكن عكس الإشعار المرحّل فقط');
+      }
+      final originalNoteDate = notes.first['note_date']?.toString() ?? '';
+      if (!_isIsoCalendarDate(originalNoteDate) ||
+          reversalDate.compareTo(originalNoteDate) < 0) {
+        throw ArgumentError('تاريخ العكس يجب أن يكون صحيحًا وغير سابق لتاريخ الإشعار');
+      }
+      final linkedRefund = await txn.query(
+        'refund_allocations',
+        columns: ['id'],
+        where: 'credit_note_id = ?',
+        whereArgs: [creditNoteId],
+        limit: 1,
+      );
+      if (linkedRefund.isNotEmpty) {
+        throw StateError('لا يمكن عكس إشعار استُخدم في رد نقدي؛ يلزم مستند تسوية مستقل');
+      }
+      final originalJournalId =
+          (notes.first['journal_entry_id'] as num?)?.toInt();
+      if (originalJournalId == null) {
+        throw StateError('قيد الإشعار المرحّل غير موجود؛ يلزم فحص يدوي');
+      }
+      final originalJournal = await txn.query(
+        'journal_entries',
+        columns: ['id', 'is_posted'],
+        where: 'id = ?',
+        whereArgs: [originalJournalId],
+        limit: 1,
+      );
+      if (originalJournal.isEmpty || originalJournal.first['is_posted'] != 1) {
+        throw StateError('قيد الإشعار غير مرحّل؛ لا يمكن عكسه');
+      }
+      final lines = await txn.query(
+        'journal_lines',
+        where: 'journal_entry_id = ?',
+        whereArgs: [originalJournalId],
+        orderBy: 'id',
+      );
+      if (lines.isEmpty) throw StateError('قيد الإشعار بلا أسطر؛ يلزم فحص يدوي');
+      final journalId = await txn.insert('journal_entries', {
+        'entry_date': reversalDate,
+        'description': 'عكس إشعار دائن رقم $creditNoteId: $normalizedReason',
+        'is_posted': 1,
+      });
+      for (final line in lines) {
+        final debit = (line['debit'] as num).toDouble();
+        final credit = (line['credit'] as num).toDouble();
+        if (!_hasCentPrecision(debit) ||
+            !_hasCentPrecision(credit) ||
+            debit < 0 ||
+            credit < 0 ||
+            (debit > 0 && credit > 0)) {
+          throw StateError('سطر قيد الإشعار غير صالح؛ لا يمكن عكسه');
+        }
+        final accountId = (line['account_id'] as num).toInt();
+        await txn.insert('journal_lines', {
+          'journal_entry_id': journalId,
+          'account_id': accountId,
+          'debit': credit,
+          'credit': debit,
+          'cost_center_id': line['cost_center_id'],
+          'description': 'عكس قيد الإشعار الدائن رقم $creditNoteId',
+        });
+        await _updateBalanceTx(txn, accountId, credit, debit);
+      }
+      final actorId = await _verifiedAuditUserId(txn);
+      final changed = await txn.update(
+        'credit_notes',
+        {
+          'status': 'reversed',
+          'reversal_journal_entry_id': journalId,
+          'reversal_reason': normalizedReason,
+          'reversed_by': actorId,
+          'reversed_at': DateTime.now().toIso8601String(),
+        },
+        where: "id = ? AND status = 'posted'",
+        whereArgs: [creditNoteId],
+      );
+      if (changed != 1) throw StateError('تغيرت حالة الإشعار؛ أُلغيت المعاملة');
+      await _recordAuditTx(
+        txn,
+        action: 'CREDIT_NOTE_REVERSED',
+        entityType: 'credit_note',
+        entityId: creditNoteId,
+        amountMinor: (notes.first['total_amount_minor'] as num).toInt(),
+        details: {
+          'reversal_journal_entry_id': journalId,
+          'reversal_date': reversalDate,
+          'reason': normalizedReason,
+        },
+      );
+    });
   }
 
   Future<void> _ensureNoPendingLegacyInvoicesForTenant(
@@ -6247,6 +6943,7 @@ class DatabaseHelper {
       var allocatedCents = 0;
       var invoiceInstallmentId = 0;
       var invoiceRentCents = 0;
+      var invoiceTaxCents = 0;
       final verifiedUpdates = <Map<String, dynamic>>[];
       if (invoiceId != null) {
         final invoices = await txn.rawQuery(
@@ -6290,12 +6987,19 @@ class DatabaseHelper {
         }
         final paidRows = await txn.rawQuery(
           '''
-          SELECT COALESCE(SUM(
-            ca.amount_minor - COALESCE(refunds.amount_minor, 0)
-          ), 0) / 100.0 AS paid_amount
+          SELECT
+            COALESCE(SUM(ca.amount_minor - COALESCE(refunds.amount_minor, 0)), 0)
+              AS paid_minor,
+            COALESCE(SUM(ca.rent_amount_minor
+              - COALESCE(refunds.rent_amount_minor, 0)), 0) AS paid_rent_minor,
+            COALESCE(SUM(ca.tax_amount_minor
+              - COALESCE(refunds.tax_amount_minor, 0)), 0) AS paid_tax_minor
           FROM collection_allocations ca
           LEFT JOIN (
-            SELECT collection_allocation_id, SUM(amount_minor) AS amount_minor
+            SELECT collection_allocation_id,
+              SUM(amount_minor) AS amount_minor,
+              SUM(rent_amount_minor) AS rent_amount_minor,
+              SUM(tax_amount_minor) AS tax_amount_minor
             FROM refund_allocations
             GROUP BY collection_allocation_id
           ) refunds ON refunds.collection_allocation_id = ca.id
@@ -6303,12 +7007,39 @@ class DatabaseHelper {
           ''',
           [invoiceId],
         );
-        final invoicePaid = (paidRows.first['paid_amount'] as num).toDouble();
-        if (!_hasCentPrecision(invoicePaid)) {
-          throw StateError('تخصيصات الفاتورة السابقة غير دقيقة ماليًا');
+        final invoicePaidMinor = (paidRows.first['paid_minor'] as num).toInt();
+        final invoicePaidRentMinor =
+            (paidRows.first['paid_rent_minor'] as num).toInt();
+        final invoicePaidTaxMinor =
+            (paidRows.first['paid_tax_minor'] as num).toInt();
+        if (invoicePaidMinor != invoicePaidRentMinor + invoicePaidTaxMinor ||
+            invoicePaidMinor < 0) {
+          throw StateError('تخصيصات الفاتورة السابقة غير متسقة ماليًا');
+        }
+        final creditRows = await txn.rawQuery(
+          '''
+          SELECT COALESCE(SUM(net_amount_minor), 0) AS credited_net_minor,
+            COALESCE(SUM(tax_amount_minor), 0) AS credited_tax_minor,
+            COALESCE(SUM(total_amount_minor), 0) AS credited_total_minor
+          FROM credit_notes
+          WHERE invoice_id = ? AND status = 'posted'
+          ''',
+          [invoiceId],
+        );
+        final creditedNetMinor =
+            (creditRows.first['credited_net_minor'] as num).toInt();
+        final creditedTaxMinor =
+            (creditRows.first['credited_tax_minor'] as num).toInt();
+        final creditedTotalMinor =
+            (creditRows.first['credited_total_minor'] as num).toInt();
+        if (creditedNetMinor + creditedTaxMinor != creditedTotalMinor ||
+            creditedNetMinor > InternalTax.toMinorUnits(invoiceNet) ||
+            creditedTaxMinor > InternalTax.toMinorUnits(invoiceTax) ||
+            creditedTotalMinor > invoiceTotalCents) {
+          throw StateError('إجمالي الإشعارات الدائنة غير متسق مع الفاتورة');
         }
         final remainingInvoiceCents =
-            invoiceTotalCents - InternalTax.toMinorUnits(invoicePaid);
+            invoiceTotalCents - invoicePaidMinor - creditedTotalMinor;
         final receiptCents = (amount * 100).round();
         if (remainingInvoiceCents <= 0 ||
             receiptCents > remainingInvoiceCents) {
@@ -6329,11 +7060,23 @@ class DatabaseHelper {
         }
         final installmentRemainingCents =
             InternalTax.toMinorUnits(installmentTotal) -
-            InternalTax.toMinorUnits(oldPaid);
-        final principalCents = receiptCents < installmentRemainingCents
+            InternalTax.toMinorUnits(oldPaid) -
+            creditedNetMinor;
+        final nonnegativeRentRemaining =
+            installmentRemainingCents > 0 ? installmentRemainingCents : 0;
+        final principalCents = receiptCents < nonnegativeRentRemaining
             ? receiptCents
-            : installmentRemainingCents;
+            : nonnegativeRentRemaining;
+        final taxPart = receiptCents - principalCents;
+        final remainingTaxCents =
+            InternalTax.toMinorUnits(invoiceTax) -
+            invoicePaidTaxMinor -
+            creditedTaxMinor;
+        if (taxPart < 0 || taxPart > remainingTaxCents) {
+          throw StateError('مبلغ القبض يتجاوز المتبقي من ضريبة الفاتورة');
+        }
         invoiceRentCents = principalCents;
+        invoiceTaxCents = taxPart;
         if (principalCents > 0) {
           final newPaidCents =
               InternalTax.toMinorUnits(oldPaid) + principalCents;
@@ -6495,7 +7238,7 @@ class DatabaseHelper {
           'invoice_id': invoiceId,
           'amount_minor': allocatedCents,
           'rent_amount_minor': invoiceRentCents,
-          'tax_amount_minor': allocatedCents - invoiceRentCents,
+          'tax_amount_minor': invoiceTaxCents,
           'created_by': collectionCreatedBy,
         });
       } else {
@@ -7157,6 +7900,7 @@ class DatabaseHelper {
     required int cashAccountId,
     required int collectionAllocationId,
     required String description,
+    int? creditNoteId,
   }) async {
     PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
     if (amount <= 0 ||
@@ -7221,14 +7965,57 @@ class DatabaseHelper {
       if (refundCents > remainingMinor) {
         throw StateError('المبلغ يتجاوز الجزء غير المسترد من سند القبض الأصلي');
       }
-      final split = _splitRefundMinorUnits(
-        amountMinor: refundCents,
-        remainingRentMinor: (source['remaining_rent_minor'] as num).toInt(),
-        remainingTaxMinor: (source['remaining_tax_minor'] as num).toInt(),
-      );
+      final sourceRentRemaining =
+          (source['remaining_rent_minor'] as num).toInt();
+      final sourceTaxRemaining =
+          (source['remaining_tax_minor'] as num).toInt();
+      Map<String, int> split;
+      if (creditNoteId == null) {
+        split = _splitRefundMinorUnits(
+          amountMinor: refundCents,
+          remainingRentMinor: sourceRentRemaining,
+          remainingTaxMinor: sourceTaxRemaining,
+        );
+      } else {
+        final invoiceId = (source['invoice_id'] as num?)?.toInt();
+        if (invoiceId == null) {
+          throw StateError('الإشعار الدائن يتطلب تخصيص قبض مرتبطًا بفاتورة');
+        }
+        final noteBalances = await _creditNoteRefundBalancesTx(txn, invoiceId);
+        final matchingNotes = noteBalances.where(
+          (row) => (row['id'] as num).toInt() == creditNoteId,
+        );
+        if (matchingNotes.isEmpty ||
+            (matchingNotes.first['tenant_id'] as num?)?.toInt() != tenantId) {
+          throw StateError('الإشعار الدائن لا يطابق فاتورة ومصدر قبض المستأجر');
+        }
+        final note = matchingNotes.first;
+        final noteNetRemaining =
+            (note['refundable_net_minor'] as num).toInt();
+        final noteTaxRemaining =
+            (note['refundable_tax_minor'] as num).toInt();
+        final noteTotalRemaining = (note['refundable_minor'] as num).toInt();
+        final refundableRent =
+            math.min(sourceRentRemaining, noteNetRemaining).toInt();
+        final refundableTax =
+            math.min(sourceTaxRemaining, noteTaxRemaining).toInt();
+        if (noteNetRemaining < 0 ||
+            noteTaxRemaining < 0 ||
+            noteTotalRemaining < 0 ||
+            refundCents > noteTotalRemaining ||
+            refundCents > refundableRent + refundableTax) {
+          throw StateError('المبلغ يتجاوز الجزء غير المسترد من الإشعار الدائن');
+        }
+        split = _splitRefundMinorUnits(
+          amountMinor: refundCents,
+          remainingRentMinor: refundableRent,
+          remainingTaxMinor: refundableTax,
+        );
+      }
       final sourceVoucherId = (source['receipt_voucher_id'] as num).toInt();
-      final refundDescription =
-          'رد مرتبط بسند قبض رقم $sourceVoucherId - ${description.trim()}';
+      final refundDescription = creditNoteId == null
+          ? 'رد مرتبط بسند قبض رقم $sourceVoucherId - ${description.trim()}'
+          : 'رد مرتبط بالإشعار الدائن $creditNoteId وبسند قبض رقم $sourceVoucherId - ${description.trim()}';
       final journalId = await txn.insert('journal_entries', {
         'entry_date': voucherDate,
         'description': refundDescription,
@@ -7267,6 +8054,7 @@ class DatabaseHelper {
       await txn.insert('refund_allocations', {
         'refund_voucher_id': voucherId,
         'collection_allocation_id': collectionAllocationId,
+        'credit_note_id': creditNoteId,
         'amount_minor': refundCents,
         'rent_amount_minor': split['rent'],
         'tax_amount_minor': split['tax'],
@@ -7320,6 +8108,7 @@ class DatabaseHelper {
           'tenant_id': tenantId,
           'collection_allocation_id': collectionAllocationId,
           'source_receipt_voucher_id': sourceVoucherId,
+          'credit_note_id': creditNoteId,
           'amount_minor': refundCents,
           'rent_amount_minor': split['rent'],
           'tax_amount_minor': split['tax'],
@@ -9493,11 +10282,30 @@ class DatabaseHelper {
 
     int minor(Object? value) =>
         value is num ? (value.toDouble() * 100).round() : 0;
-
     final db = await instance.database;
     return db.transaction((txn) async {
       PermissionRuntime.require('reports', AppPermissionAction.view);
       final exceptions = <TenantAgingReviewException>[];
+      void addException({
+        required int id,
+        required String date,
+        required String type,
+        required String tenant,
+        required int amount,
+        required String reason,
+      }) {
+        exceptions.add(
+          TenantAgingReviewException(
+            documentId: id,
+            documentDate: date,
+            documentType: type,
+            tenantName: tenant,
+            amountMinor: amount.abs(),
+            reason: reason,
+          ),
+        );
+      }
+
       final installments = await txn.rawQuery('''
         SELECT
           ci.id AS installment_id,
@@ -9614,6 +10422,113 @@ class DatabaseHelper {
         invoiceAmountByInstallment[installmentId] = totalMinor;
       }
 
+      final creditNoteRows = await txn.rawQuery(
+        '''
+        SELECT note.id, note.invoice_id, note.note_date, note.status,
+          note.net_amount_minor, note.tax_amount_minor, note.total_amount_minor,
+          note.amount, invoice.installment_id,
+          COALESCE(tenant.name, 'غير محدد') AS tenant_name,
+          original_journal.is_posted AS note_journal_is_posted,
+          reversal.entry_date AS reversal_date,
+          reversal.is_posted AS reversal_journal_is_posted
+        FROM credit_notes note
+        LEFT JOIN tax_invoices invoice ON invoice.id = note.invoice_id
+        LEFT JOIN contracts contract ON contract.id = invoice.contract_id
+        LEFT JOIN tenants tenant ON tenant.id = contract.tenant_id
+        LEFT JOIN journal_entries original_journal
+          ON original_journal.id = note.journal_entry_id
+        LEFT JOIN journal_entries reversal
+          ON reversal.id = note.reversal_journal_entry_id
+        WHERE note.status != 'draft'
+          AND note.note_date < ?
+        ORDER BY note.note_date, note.id
+        ''',
+        [exclusiveEndDate],
+      );
+      final creditedByInstallment = <int, int>{};
+      for (final note in creditNoteRows) {
+        final noteId = (note['id'] as num).toInt();
+        final noteDate = dateOnly(note['note_date']);
+        final status = note['status']?.toString();
+        final noteTotal = (note['total_amount_minor'] as num?)?.toInt() ?? 0;
+        final legacyAmount = minor(note['amount']);
+        if (status == 'legacy_review') {
+          addException(
+            id: noteId,
+            date: noteDate,
+            type: 'إشعار دائن تاريخي',
+            tenant: note['tenant_name']?.toString() ?? 'غير محدد',
+            amount: legacyAmount,
+            reason: 'إشعار قديم بلا لقطة تفصيلية أو قيد موثوق؛ لم يُخصم من الذمم.',
+          );
+          continue;
+        }
+        if (status != 'posted' && status != 'reversed') continue;
+        if (!isCalendarDate(noteDate) || noteDate.compareTo(asOfDate) > 0) {
+          addException(
+            id: noteId,
+            date: noteDate,
+            type: 'إشعار دائن',
+            tenant: note['tenant_name']?.toString() ?? 'غير محدد',
+            amount: noteTotal,
+            reason: 'تاريخ الإشعار غير صالح أو بعد تاريخ القطع؛ لم يُحتسب.',
+          );
+          continue;
+        }
+        if ((note['note_journal_is_posted'] as num?)?.toInt() != 1 ||
+            (status == 'reversed' &&
+                (note['reversal_journal_is_posted'] as num?)?.toInt() != 1)) {
+          addException(
+            id: noteId,
+            date: noteDate,
+            type: status == 'reversed' ? 'إشعار دائن معكوس' : 'إشعار دائن',
+            tenant: note['tenant_name']?.toString() ?? 'غير محدد',
+            amount: noteTotal,
+            reason: 'قيد الإشعار أو قيد عكسه غير مرحّل؛ لم يُحتسب في أعمار الذمم.',
+          );
+          continue;
+        }
+        if (status == 'reversed') {
+          final reversalDate = dateOnly(note['reversal_date']);
+          if (!isCalendarDate(reversalDate)) {
+            addException(
+              id: noteId,
+              date: noteDate,
+              type: 'إشعار دائن معكوس',
+              tenant: note['tenant_name']?.toString() ?? 'غير محدد',
+              amount: noteTotal,
+              reason: 'قيد عكس الإشعار مفقود أو تاريخه غير صالح؛ يلزم التحقق.',
+            );
+            continue;
+          }
+          if (reversalDate.compareTo(asOfDate) <= 0) continue;
+        }
+        final invoiceId = (note['invoice_id'] as num?)?.toInt();
+        final installmentId = (note['installment_id'] as num?)?.toInt();
+        final noteNet = (note['net_amount_minor'] as num?)?.toInt() ?? 0;
+        final noteTax = (note['tax_amount_minor'] as num?)?.toInt() ?? 0;
+        if (invoiceId == null ||
+            installmentId == null ||
+            noteTotal <= 0 ||
+            noteNet < 0 ||
+            noteTax < 0 ||
+            noteNet + noteTax != noteTotal ||
+            invoicesSeenByInstallment[installmentId] != invoiceId ||
+            invoiceAmountByInstallment[installmentId] == null) {
+          addException(
+            id: noteId,
+            date: noteDate,
+            type: 'إشعار دائن',
+            tenant: note['tenant_name']?.toString() ?? 'غير محدد',
+            amount: noteTotal,
+            reason: 'الإشعار لا يرتبط بفاتورة مرحّلة وقسط متسق؛ لم يُخصم.',
+          );
+          continue;
+        }
+        creditedByInstallment[installmentId] =
+            (creditedByInstallment[installmentId] ?? 0) + noteTotal;
+      }
+
       final receipts = await txn.rawQuery(
         '''
         SELECT voucher.id AS voucher_id, voucher.tenant_id,
@@ -9707,26 +10622,6 @@ class DatabaseHelper {
       }
       final acceptedSourceAllocations = <int, Map<String, Object?>>{};
       final sourceIssues = <int, String>{};
-      void addException({
-        required int id,
-        required String date,
-        required String type,
-        required String tenant,
-        required int amount,
-        required String reason,
-      }) {
-        exceptions.add(
-          TenantAgingReviewException(
-            documentId: id,
-            documentDate: date,
-            documentType: type,
-            tenantName: tenant,
-            amountMinor: amount.abs(),
-            reason: reason,
-          ),
-        );
-      }
-
       for (final receipt in receipts) {
         final id = (receipt['voucher_id'] as num).toInt();
         final tenantId = (receipt['tenant_id'] as num).toInt();
@@ -10001,8 +10896,22 @@ class DatabaseHelper {
           );
           continue;
         }
-        final obligationMinor =
+        final grossObligationMinor =
             invoiceAmountByInstallment[installmentId] ?? scheduleMinor;
+        final requestedCreditMinor = creditedByInstallment[installmentId] ?? 0;
+        if (requestedCreditMinor > grossObligationMinor) {
+          addException(
+            id: installmentId,
+            date: dueDate,
+            type: 'إشعار دائن',
+            tenant: tenantName,
+            amount: requestedCreditMinor - grossObligationMinor,
+            reason: 'إجمالي الإشعارات يتجاوز الالتزام؛ عُزلت الزيادة للمراجعة.',
+          );
+        }
+        final obligationMinor =
+            grossObligationMinor -
+            requestedCreditMinor.clamp(0, grossObligationMinor).toInt();
         final paid = paidByInstallment[installmentId] ?? 0;
         if (paid > obligationMinor) {
           addException(
@@ -10012,7 +10921,7 @@ class DatabaseHelper {
             tenant: tenantName,
             amount: paid - obligationMinor,
             reason:
-                'تخصيصات القبض الصالحة تجاوزت قيمة الالتزام؛ عُزل الفائض عن أعمار الذمم.',
+                'القبوضات الصافية تجاوزت الالتزام بعد الإشعارات الدائنة؛ عُزل رصيد العميل الزائد عن أعمار الذمم.',
           );
         }
         final confirmedPaid = paid.clamp(0, obligationMinor).toInt();
