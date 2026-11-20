@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path_provider/path_provider.dart';
@@ -10,6 +12,7 @@ import '../core/internal_tax.dart';
 import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
 import '../core/rent_period.dart';
+import '../core/sms_credential_store.dart';
 import '../models/account_statement_report_model.dart';
 import '../models/financial_close_readiness_report_model.dart';
 import '../models/financial_position_report_model.dart';
@@ -26,7 +29,7 @@ import 'property_sale_schema.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 27;
+  static const int _schemaVersion = 28;
   @visibleForTesting
   static Future<void> Function()? restorePostReplacementHookForTesting;
 
@@ -68,6 +71,7 @@ class DatabaseHelper {
   };
 
   DatabaseHelper._init();
+  Future<void> _smsSettingsWriteQueue = Future<void>.value();
 
   bool _hasCentPrecision(num value) {
     final scaled = value.toDouble() * 100;
@@ -112,6 +116,50 @@ class DatabaseHelper {
 
   Future<void> backupToFile(String targetPath) async {
     PermissionRuntime.require('system_settings', AppPermissionAction.edit);
+    await _createDatabaseSnapshot(targetPath, clearSmsSecretReference: true);
+  }
+
+  Future<Map<int, String>> _captureSmsCredentialReferences(Database db) async {
+    final rows = await db.query(
+      'sms_settings',
+      columns: ['id', 'api_key_secret_id'],
+      orderBy: 'id ASC',
+    );
+    return {
+      for (final row in rows)
+        if (row['id'] is num &&
+            row['api_key_secret_id']?.toString().isNotEmpty == true)
+          (row['id'] as num).toInt(): row['api_key_secret_id'].toString(),
+    };
+  }
+
+  Future<void> _restoreSmsCredentialReferences(
+    Database db,
+    Map<int, String> references,
+  ) async {
+    await db.transaction((txn) async {
+      await txn.update('sms_settings', {
+        'api_key': null,
+        'api_key_secret_id': null,
+      });
+      for (final entry in references.entries) {
+        final updated = await txn.update(
+          'sms_settings',
+          {'api_key_secret_id': entry.value},
+          where: 'id = ?',
+          whereArgs: [entry.key],
+        );
+        if (updated != 1) {
+          throw StateError('تعذر استعادة ربط مفتاح الرسائل بالقاعدة السابقة');
+        }
+      }
+    });
+  }
+
+  Future<void> _createDatabaseSnapshot(
+    String targetPath, {
+    required bool clearSmsSecretReference,
+  }) async {
     final target = File(targetPath).absolute;
     final livePath = File(await getDbPath()).absolute.path;
     if (target.path == livePath) {
@@ -136,11 +184,20 @@ class DatabaseHelper {
         options: OpenDatabaseOptions(readOnly: false),
       );
       try {
-        await snapshot.update('sms_settings', {'api_key': null});
+        await snapshot.execute('PRAGMA secure_delete = ON');
+        await snapshot.update('sms_settings', {
+          'api_key': null,
+          if (clearSmsSecretReference) 'api_key_secret_id': null,
+        });
+        await snapshot.execute('VACUUM');
       } finally {
         await snapshot.close();
       }
-      await _validateDatabaseFile(temporary.path, requireCurrentSchema: true);
+      await _validateDatabaseFile(
+        temporary.path,
+        requireCurrentSchema: true,
+        requireSmsSecretsRemoved: clearSmsSecretReference,
+      );
       if (await target.exists()) {
         throw FileSystemException(
           'ملف النسخة ظهر أثناء العملية؛ لم يتم استبداله',
@@ -174,6 +231,10 @@ class DatabaseHelper {
       join(livePath.parent.path, 'aqari_pre_restore_$stamp.db'),
     );
     var liveReplacementStarted = false;
+    final stagedCredentialIds = <String>{};
+    final newlyCreatedStagedCredentialIds = <String>{};
+    final previousCredentialIds = <String>{};
+    final previousCredentialReferences = <int, String>{};
     await livePath.parent.create(recursive: true);
     try {
       final sourceStatBefore = await source.stat();
@@ -190,19 +251,42 @@ class DatabaseHelper {
         staged.path,
         options: OpenDatabaseOptions(
           version: _schemaVersion,
-          onConfigure: (db) async => db.execute('PRAGMA foreign_keys = ON'),
+          onConfigure: (db) async {
+            await db.execute('PRAGMA foreign_keys = ON');
+            await db.execute('PRAGMA secure_delete = ON');
+          },
           onUpgrade: _upgradeDB,
         ),
       );
       try {
+        final restoredCredentials = await _resolveAllSmsCredentials(candidate);
+        for (final credential in restoredCredentials) {
+          if (credential.id != null) stagedCredentialIds.add(credential.id!);
+          if (credential.created && credential.id != null) {
+            newlyCreatedStagedCredentialIds.add(credential.id!);
+          }
+        }
         await _validateOpenDatabase(candidate, requireCurrentSchema: true);
       } finally {
         await candidate.close();
       }
 
-      // Preserve a verified copy before disconnecting or replacing the live DB.
-      await backupToFile(rollback.path);
       final current = await database;
+      final currentCredentials = await _resolveAllSmsCredentials(current);
+      previousCredentialIds.addAll(
+        currentCredentials
+            .map((credential) => credential.id)
+            .whereType<String>(),
+      );
+      previousCredentialReferences.addAll(
+        await _captureSmsCredentialReferences(current),
+      );
+      // Rollback snapshots never contain secret values or vault references.
+      // Keep the verified references in memory and reattach only on rollback.
+      await _createDatabaseSnapshot(
+        rollback.path,
+        clearSmsSecretReference: true,
+      );
       await current.execute('PRAGMA wal_checkpoint(TRUNCATE)');
       await current.close();
       _database = null;
@@ -212,6 +296,11 @@ class DatabaseHelper {
       await restorePostReplacementHookForTesting?.call();
       _database = await _initDB('desktop_erp.db');
       await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+      for (final oldId in previousCredentialIds.difference(
+        stagedCredentialIds,
+      )) {
+        await _deleteSmsCredentialIgnoringFailure(oldId);
+      }
       return rollback.path;
     } catch (error) {
       if (liveReplacementStarted) {
@@ -227,17 +316,36 @@ class DatabaseHelper {
           await rollback.copy(livePath.path);
           _database = await _initDB('desktop_erp.db');
           await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+          await _restoreSmsCredentialReferences(
+            _database!,
+            previousCredentialReferences,
+          );
         } catch (failure) {
           rollbackError = failure;
         }
         if (rollbackError != null) {
+          for (final stagedId in newlyCreatedStagedCredentialIds.difference(
+            previousCredentialIds,
+          )) {
+            await _deleteSmsCredentialIgnoringFailure(stagedId);
+          }
           throw StateError(
             'فشلت الاستعادة ($error)، وتعذرت الاستعادة التلقائية ($rollbackError). احتفظ بنسخة الرجوع إن وُجدت: ${rollback.path}',
           );
         }
+        for (final stagedId in newlyCreatedStagedCredentialIds.difference(
+          previousCredentialIds,
+        )) {
+          await _deleteSmsCredentialIgnoringFailure(stagedId);
+        }
         throw StateError(
           'فشلت الاستعادة، لكن أُعيدت قاعدة التشغيل من نسخة الرجوع المحفوظة في ${rollback.path}. السبب: $error',
         );
+      }
+      for (final stagedId in newlyCreatedStagedCredentialIds.difference(
+        previousCredentialIds,
+      )) {
+        await _deleteSmsCredentialIgnoringFailure(stagedId);
       }
       rethrow;
     } finally {
@@ -248,6 +356,7 @@ class DatabaseHelper {
   Future<int> _validateDatabaseFile(
     String path, {
     bool requireCurrentSchema = false,
+    bool requireSmsSecretsRemoved = false,
   }) async {
     final file = File(path);
     if (!await file.exists() || await file.length() < 100) {
@@ -276,6 +385,19 @@ class DatabaseHelper {
       }
       if (requireCurrentSchema) {
         await _validateOpenDatabase(candidate, requireCurrentSchema: true);
+      }
+      if (requireSmsSecretsRemoved) {
+        final smsRows = await candidate.query(
+          'sms_settings',
+          columns: ['api_key', 'api_key_secret_id'],
+        );
+        if (smsRows.any(
+          (row) =>
+              (row['api_key']?.toString().isNotEmpty ?? false) ||
+              (row['api_key_secret_id']?.toString().isNotEmpty ?? false),
+        )) {
+          throw StateError('تحتوي النسخة الاحتياطية على بيانات اعتماد SMS');
+        }
       }
       await _rejectUncheckpointedWal(file.absolute.path);
       return version;
@@ -535,6 +657,7 @@ class DatabaseHelper {
         'id',
         'api_url',
         'api_key',
+        'api_key_secret_id',
         'sender_name',
         'reminder_template',
         'receipt_template',
@@ -894,8 +1017,16 @@ class DatabaseHelper {
       File(path).parent.path,
       'aqari_pre_reset_${DateTime.now().microsecondsSinceEpoch}.db',
     );
-    await backupToFile(rollbackPath);
     final current = await database;
+    final previousCredentials = await _resolveAllSmsCredentials(current);
+    final previousCredentialIds = previousCredentials
+        .map((credential) => credential.id)
+        .whereType<String>()
+        .toSet();
+    final previousCredentialReferences = await _captureSmsCredentialReferences(
+      current,
+    );
+    await _createDatabaseSnapshot(rollbackPath, clearSmsSecretReference: true);
     await current.execute('PRAGMA wal_checkpoint(TRUNCATE)');
     await current.close();
     _database = null;
@@ -904,6 +1035,9 @@ class DatabaseHelper {
       await databaseFactory.deleteDatabase(path);
       _database = await _initDB('desktop_erp.db');
       await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+      for (final credentialId in previousCredentialIds) {
+        await _deleteSmsCredentialIgnoringFailure(credentialId);
+      }
       return rollbackPath;
     } catch (error) {
       Object? rollbackError;
@@ -916,6 +1050,10 @@ class DatabaseHelper {
         await File(rollbackPath).copy(path);
         _database = await _initDB('desktop_erp.db');
         await _validateOpenDatabase(_database!, requireCurrentSchema: true);
+        await _restoreSmsCredentialReferences(
+          _database!,
+          previousCredentialReferences,
+        );
       } catch (failure) {
         rollbackError = failure;
       }
@@ -951,6 +1089,7 @@ class DatabaseHelper {
         version: _schemaVersion,
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
+          await db.execute('PRAGMA secure_delete = ON');
         },
         onCreate: _createDB,
         onUpgrade: _upgradeDB,
@@ -1352,6 +1491,9 @@ class DatabaseHelper {
     }
     if (oldVersion < 27) {
       await createOwnerSettlementSchema(db);
+    }
+    if (oldVersion < 28) {
+      await _ensureColumn(db, 'sms_settings', 'api_key_secret_id', 'TEXT');
     }
   }
 
@@ -2566,6 +2708,7 @@ class DatabaseHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         api_url TEXT,
         api_key TEXT,
+        api_key_secret_id TEXT,
         sender_name TEXT,
         reminder_template TEXT,
         receipt_template TEXT
@@ -11480,17 +11623,183 @@ class DatabaseHelper {
 
   // --- SMS Operations ---
 
+  String _newSmsCredentialId() {
+    final random = math.Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64UrlEncode(bytes).replaceAll('=', '');
+  }
+
+  Future<void> _deleteSmsCredentialIgnoringFailure(String? credentialId) async {
+    if (credentialId == null || credentialId.isEmpty) return;
+    try {
+      await SmsCredentialStoreRegistry.instance.delete(credentialId);
+    } catch (_) {
+      // An orphaned encrypted vault entry is not reachable without its DB ref.
+    }
+  }
+
+  Future<void> _writeAndVerifySmsCredential(
+    String credentialId,
+    String value,
+  ) async {
+    final store = SmsCredentialStoreRegistry.instance;
+    try {
+      await store.write(credentialId, value);
+      if (await store.read(credentialId) != value) {
+        throw StateError('credential verification mismatch');
+      }
+    } catch (_) {
+      await _deleteSmsCredentialIgnoringFailure(credentialId);
+      throw StateError('تعذر التحقق من حفظ مفتاح SMS في مخزن Windows الآمن');
+    }
+  }
+
+  String _smsSettingsSignature(List<Map<String, Object?>> rows) => jsonEncode([
+    for (final row in rows)
+      [
+        row['id'],
+        row['api_url'],
+        row['api_key'],
+        row['api_key_secret_id'],
+        row['sender_name'],
+        row['reminder_template'],
+        row['receipt_template'],
+      ],
+  ]);
+
+  Future<({String? id, String? value, bool created})> _resolveSmsCredential(
+    Database db,
+    Map<String, Object?> settings,
+  ) async {
+    final rowId = settings['id'];
+    final credentialStore = SmsCredentialStoreRegistry.instance;
+    final storedId = settings['api_key_secret_id']?.toString();
+    if (storedId != null && storedId.isNotEmpty) {
+      final storedValue = await credentialStore.read(storedId);
+      if (storedValue != null && storedValue.isNotEmpty) {
+        return (id: storedId, value: storedValue, created: false);
+      }
+      await db.update(
+        'sms_settings',
+        {'api_key_secret_id': null},
+        where: 'id = ? AND api_key_secret_id = ?',
+        whereArgs: [rowId, storedId],
+      );
+    }
+
+    final legacyValue = settings['api_key']?.toString().trim() ?? '';
+    if (legacyValue.isEmpty) return (id: null, value: null, created: false);
+
+    final newId = _newSmsCredentialId();
+    await _writeAndVerifySmsCredential(newId, legacyValue);
+
+    await db.execute('PRAGMA secure_delete = ON');
+    final activeId = await db.transaction<String?>((txn) async {
+      final currentRows = await txn.query(
+        'sms_settings',
+        columns: ['api_key', 'api_key_secret_id'],
+        where: 'id = ?',
+        whereArgs: [rowId],
+        limit: 1,
+      );
+      if (currentRows.isEmpty) return null;
+      final current = currentRows.single;
+      final currentId = current['api_key_secret_id']?.toString();
+      if (currentId != null && currentId.isNotEmpty) return currentId;
+      if (current['api_key']?.toString().trim() != legacyValue) return null;
+      await txn.update(
+        'sms_settings',
+        {'api_key': null, 'api_key_secret_id': newId},
+        where: 'id = ?',
+        whereArgs: [rowId],
+      );
+      return newId;
+    });
+
+    if (activeId != newId) {
+      await _deleteSmsCredentialIgnoringFailure(newId);
+      if (activeId == null) {
+        final latestRows = await db.query(
+          'sms_settings',
+          where: 'id = ?',
+          whereArgs: [rowId],
+          limit: 1,
+        );
+        if (latestRows.isEmpty) {
+          return (id: null, value: null, created: false);
+        }
+        return _resolveSmsCredential(db, latestRows.single);
+      }
+      final latestValue = await credentialStore.read(activeId);
+      if (latestValue == null || latestValue.isEmpty) {
+        return (id: null, value: null, created: false);
+      }
+      return (id: activeId, value: latestValue, created: false);
+    }
+
+    // secure_delete zeros deleted cell contents; VACUUM also compacts legacy
+    // copies from free pages where supported by the active SQLite driver.
+    try {
+      await db.execute('VACUUM');
+    } catch (_) {
+      // The DB pointer and secure_delete update are already committed safely.
+    }
+    return (id: newId, value: legacyValue, created: true);
+  }
+
+  Future<List<({String? id, String? value, bool created})>>
+  _resolveAllSmsCredentials(Database db) async {
+    final rows = await db.query('sms_settings');
+    final credentials = <({String? id, String? value, bool created})>[];
+    for (final row in rows) {
+      credentials.add(await _resolveSmsCredential(db, row));
+    }
+    return credentials;
+  }
+
+  /// Migrates legacy plaintext SMS keys before normal UI or sending begins.
+  /// On vault failure the source column remains untouched and callers may
+  /// continue with non-SMS functionality; SMS editing exposes a safe warning.
+  Future<void> migrateLegacySmsCredentials() async {
+    final db = await database;
+    await _resolveAllSmsCredentials(db);
+  }
+
   Future<Map<String, dynamic>?> getSmsSettingsForEditing() async {
     PermissionRuntime.require('sms', AppPermissionAction.edit);
     final db = await instance.database;
     final result = await db.query('sms_settings');
-    if (result.isNotEmpty) return result.first;
+    if (result.isNotEmpty) {
+      var configured = false;
+      var storageUnavailable = false;
+      try {
+        final credentials = await _resolveAllSmsCredentials(db);
+        configured = credentials.first.value != null;
+      } catch (_) {
+        storageUnavailable = true;
+        final first = result.first;
+        configured =
+            (first['api_key']?.toString().isNotEmpty ?? false) ||
+            (first['api_key_secret_id']?.toString().isNotEmpty ?? false);
+      }
+      final safeSettings = Map<String, dynamic>.from(result.first)
+        ..remove('api_key')
+        ..remove('api_key_secret_id')
+        ..['api_key_configured'] = configured
+        ..['api_key_storage_unavailable'] = storageUnavailable;
+      return safeSettings;
+    }
     return null;
   }
 
   Future<Map<String, dynamic>?> getSmsSettingsForDashboard() async {
     PermissionRuntime.require('sms', AppPermissionAction.view);
     final db = await instance.database;
+    try {
+      await _resolveAllSmsCredentials(db);
+    } catch (_) {
+      // Public dashboard data remains available; sending stays fail-closed.
+    }
     final result = await db.query(
       'sms_settings',
       columns: [
@@ -11508,24 +11817,129 @@ class DatabaseHelper {
   Future<Map<String, dynamic>?> getSmsSettingsForSending() async {
     PermissionRuntime.require('sms', AppPermissionAction.add);
     final db = await instance.database;
+    final credentials = await _resolveAllSmsCredentials(db);
     final result = await db.query('sms_settings');
-    if (result.isNotEmpty) return result.first;
+    if (result.isNotEmpty) {
+      final credential = credentials.first;
+      final safeSettings = Map<String, dynamic>.from(result.first)
+        ..remove('api_key_secret_id')
+        ..['api_key'] = credential.value;
+      return safeSettings;
+    }
     return null;
   }
 
   Future<void> saveSmsSettings(Map<String, dynamic> settings) async {
     PermissionRuntime.require('sms', AppPermissionAction.edit);
+    final settingsSnapshot = Map<String, dynamic>.from(settings);
+    final previousSave = _smsSettingsWriteQueue;
+    final releaseSave = Completer<void>();
+    _smsSettingsWriteQueue = releaseSave.future;
+    try {
+      await previousSave;
+      PermissionRuntime.require('sms', AppPermissionAction.edit);
+      await _saveSmsSettingsSerialized(settingsSnapshot);
+    } finally {
+      releaseSave.complete();
+    }
+  }
+
+  Future<void> _saveSmsSettingsSerialized(Map<String, dynamic> settings) async {
     final db = await instance.database;
-    final existing = await db.query('sms_settings');
-    if (existing.isEmpty) {
-      await db.insert('sms_settings', settings);
-    } else {
-      await db.update(
-        'sms_settings',
-        settings,
-        where: 'id = ?',
-        whereArgs: [existing.first['id']],
-      );
+    final initialRows = await db.query('sms_settings', orderBy: 'id ASC');
+    final requestedKey = settings['api_key']?.toString().trim() ?? '';
+    final clearKey = settings['clear_api_key'] == true;
+    final mustResolveExisting = requestedKey.isEmpty && !clearKey;
+    final credentials = mustResolveExisting
+        ? await _resolveAllSmsCredentials(db)
+        : <({String? id, String? value, bool created})>[];
+    final existingRows = mustResolveExisting
+        ? await db.query('sms_settings', orderBy: 'id ASC')
+        : initialRows;
+    if (mustResolveExisting &&
+        (credentials.length != existingRows.length ||
+            List<int>.generate(credentials.length, (index) => index).any(
+              (index) =>
+                  credentials[index].id !=
+                  (existingRows[index]['api_key_secret_id']?.toString()),
+            ))) {
+      throw StateError('تغيرت إعدادات SMS أثناء قراءتها؛ أعد تحميل الشاشة');
+    }
+    final expectedSignature = _smsSettingsSignature(existingRows);
+    final existing = existingRows.isEmpty ? null : existingRows.first;
+    final oldCredential = existing == null
+        ? (id: null, value: null, created: false)
+        : mustResolveExisting
+        ? credentials.first
+        : (
+            id: existing['api_key_secret_id']?.toString(),
+            value: null,
+            created: false,
+          );
+    final oldCredentialIds = <String>{
+      ...initialRows
+          .map((row) => row['api_key_secret_id']?.toString())
+          .whereType<String>()
+          .where((id) => id.isNotEmpty),
+      ...existingRows
+          .map((row) => row['api_key_secret_id']?.toString())
+          .whereType<String>()
+          .where((id) => id.isNotEmpty),
+      ...credentials.map((credential) => credential.id).whereType<String>(),
+    };
+    String? nextCredentialId = mustResolveExisting ? oldCredential.id : null;
+    var createdCredential = false;
+
+    if (requestedKey.isNotEmpty) {
+      nextCredentialId = _newSmsCredentialId();
+      await _writeAndVerifySmsCredential(nextCredentialId, requestedKey);
+      createdCredential = true;
+    } else if (clearKey) {
+      nextCredentialId = null;
+    } else if (oldCredential.value == null) {
+      throw StateError('أدخل مفتاح API جديدًا قبل حفظ إعدادات الرسائل');
+    }
+
+    final values = <String, Object?>{
+      'api_url': settings['api_url'],
+      'api_key': null,
+      'api_key_secret_id': nextCredentialId,
+      'sender_name': settings['sender_name'],
+      'reminder_template': settings['reminder_template'],
+      'receipt_template': settings['receipt_template'],
+    };
+    try {
+      await db.execute('PRAGMA secure_delete = ON');
+      await db.transaction((txn) async {
+        final latestRows = await txn.query('sms_settings', orderBy: 'id ASC');
+        if (_smsSettingsSignature(latestRows) != expectedSignature) {
+          throw StateError(
+            'تغيرت إعدادات SMS أثناء الحفظ؛ أعد تحميل الشاشة قبل المحاولة',
+          );
+        }
+        await txn.update('sms_settings', {
+          'api_key': null,
+          'api_key_secret_id': null,
+        });
+        if (latestRows.isEmpty) {
+          await txn.insert('sms_settings', values);
+        } else {
+          await txn.update(
+            'sms_settings',
+            values,
+            where: 'id = ?',
+            whereArgs: [latestRows.first['id']],
+          );
+        }
+      });
+    } catch (_) {
+      if (createdCredential) {
+        await _deleteSmsCredentialIgnoringFailure(nextCredentialId);
+      }
+      rethrow;
+    }
+    for (final oldId in oldCredentialIds.difference({?nextCredentialId})) {
+      await _deleteSmsCredentialIgnoringFailure(oldId);
     }
   }
 

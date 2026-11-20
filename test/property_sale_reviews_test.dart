@@ -534,7 +534,10 @@ void main() {
       await helper.close();
 
       final upgraded = await helper.database;
-      expect(_count(await upgraded.rawQuery('PRAGMA user_version')), 27);
+      expect(
+        _count(await upgraded.rawQuery('PRAGMA user_version')),
+        DatabaseHelper.schemaVersion,
+      );
       final legacy = (await upgraded.query(
         'property_sale_reviews',
         where: 'id = ?',

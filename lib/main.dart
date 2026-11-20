@@ -18,6 +18,12 @@ void main() async {
 
   // Initialize Database
   await DatabaseHelper.instance.database;
+  try {
+    await DatabaseHelper.instance.migrateLegacySmsCredentials();
+  } catch (_) {
+    // The SMS settings screen exposes a safe recovery prompt if the OS vault
+    // is temporarily unavailable; unrelated ERP modules must still open.
+  }
 
   runApp(
     MultiProvider(

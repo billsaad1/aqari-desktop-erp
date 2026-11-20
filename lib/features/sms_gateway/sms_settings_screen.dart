@@ -27,6 +27,9 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
     text: 'تم استلام مبلغ {المبلغ} ريال بسند رقم {رقم_السند}. شكراً لكم.',
   );
   bool _obscureApiKey = true;
+  bool _hasStoredApiKey = false;
+  bool _apiKeyStorageUnavailable = false;
+  bool _removeStoredApiKey = false;
   bool _isSaving = false;
   late final AuthProvider _authProvider;
   bool _hadEditPermission = false;
@@ -49,6 +52,9 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
     final canEdit = _authProvider.canPerform('sms', AppPermissionAction.edit);
     if (_hadEditPermission && !canEdit) {
       _apiKeyController.clear();
+      _hasStoredApiKey = false;
+      _apiKeyStorageUnavailable = false;
+      _removeStoredApiKey = false;
     } else if (!_hadEditPermission && canEdit) {
       unawaited(_loadEditorSettings());
     }
@@ -71,7 +77,9 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
           _authProvider.canPerform('sms', AppPermissionAction.edit) &&
           _authProvider.currentUser?.id == userId) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('تعذر تحميل إعدادات الرسائل: $error')),
+          const SnackBar(
+            content: Text('تعذر تحميل الإعدادات الآمنة للرسائل؛ أعد المحاولة.'),
+          ),
         );
       }
     }
@@ -80,7 +88,10 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
   void _loadSettings(Map<String, dynamic>? settings) {
     if (settings == null) return;
     _apiUrlController.text = settings['api_url']?.toString() ?? '';
-    _apiKeyController.text = settings['api_key']?.toString() ?? '';
+    _apiKeyController.clear();
+    _hasStoredApiKey = settings['api_key_configured'] == true;
+    _apiKeyStorageUnavailable = settings['api_key_storage_unavailable'] == true;
+    _removeStoredApiKey = false;
     _senderNameController.text = settings['sender_name']?.toString() ?? '';
     _reminderTemplateController.text =
         settings['reminder_template']?.toString() ??
@@ -98,19 +109,31 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
       await Provider.of<SmsProvider>(context, listen: false).saveSettings({
         'api_url': _apiUrlController.text.trim(),
         'api_key': _apiKeyController.text.trim(),
+        'clear_api_key': _removeStoredApiKey,
         'sender_name': _senderNameController.text.trim(),
         'reminder_template': _reminderTemplateController.text,
         'receipt_template': _receiptTemplateController.text,
       });
-      if (mounted)
+      if (mounted) {
+        setState(() {
+          _hasStoredApiKey =
+              _apiKeyController.text.trim().isNotEmpty ||
+              (_hasStoredApiKey && !_removeStoredApiKey);
+          _apiKeyStorageUnavailable = false;
+          _removeStoredApiKey = false;
+          _apiKeyController.clear();
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('تم حفظ إعدادات مزود الرسائل')),
         );
-    } catch (e) {
+      }
+    } catch (_) {
       if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('تعذر حفظ الإعدادات: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تعذر حفظ الإعدادات الآمنة؛ لم يتم اعتماد التغيير.'),
+          ),
+        );
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }
@@ -182,7 +205,17 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
               controller: _apiKeyController,
               obscureText: _obscureApiKey,
               decoration: InputDecoration(
-                labelText: 'مفتاح الربط (API Key / Token)',
+                labelText: 'مفتاح API جديد أو بديل',
+                hintText: _apiKeyStorageUnavailable
+                    ? 'تعذر الوصول للمفتاح السابق؛ أدخل مفتاحًا جديدًا'
+                    : _hasStoredApiKey && !_removeStoredApiKey
+                    ? 'اتركه فارغًا للإبقاء على المفتاح المحفوظ'
+                    : 'أدخل مفتاح API لإتاحة الإرسال',
+                helperText: _apiKeyStorageUnavailable
+                    ? 'لم يُكشف المفتاح السابق. أدخل مفتاحًا بديلًا أو اختر إزالته.'
+                    : _hasStoredApiKey && !_removeStoredApiKey
+                    ? 'يوجد مفتاح محفوظ بأمان على هذا الجهاز؛ لا يُعرض هنا.'
+                    : 'سيُحفظ المفتاح في مخزن النظام الآمن، وليس في قاعدة البيانات.',
                 border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   onPressed: () =>
@@ -192,10 +225,27 @@ class _SmsSettingsScreenState extends State<SmsSettingsScreen> {
                   ),
                 ),
               ),
-              validator: (value) => value == null || value.trim().isEmpty
+              validator: (value) =>
+                  (value == null || value.trim().isEmpty) &&
+                      (!_hasStoredApiKey || _apiKeyStorageUnavailable) &&
+                      !_removeStoredApiKey
                   ? 'مفتاح API مطلوب للإرسال'
                   : null,
             ),
+            if (_hasStoredApiKey) ...[
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _removeStoredApiKey,
+                onChanged: (value) =>
+                    setState(() => _removeStoredApiKey = value ?? false),
+                title: const Text('إزالة المفتاح المحفوظ من هذا الجهاز'),
+                subtitle: const Text(
+                  'لن يعمل إرسال الرسائل بعد الحذف حتى تحفظ مفتاحًا جديدًا.',
+                ),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+            ],
             const SizedBox(height: 16),
             TextFormField(
               controller: _senderNameController,
