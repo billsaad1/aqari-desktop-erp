@@ -18,6 +18,7 @@ import '../models/account_statement_report_model.dart';
 import '../models/financial_close_readiness_report_model.dart';
 import '../models/financial_position_report_model.dart';
 import '../models/income_expense_report_model.dart';
+import '../models/internal_subledger_reconciliation_report_model.dart';
 import '../models/invoice_ledger_reconciliation_report_model.dart';
 import '../models/property_statement_report_model.dart';
 import '../models/tenant_collection_report_model.dart';
@@ -25,6 +26,7 @@ import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
 import 'credit_note_schema.dart';
+import 'internal_subledger_reconciliation_service.dart';
 import 'owner_settlement_schema.dart';
 import 'property_sale_schema.dart';
 
@@ -9768,151 +9770,220 @@ class DatabaseHelper {
         '${nextDay.day.toString().padLeft(2, '0')}';
 
     final db = await instance.database;
-    return db.transaction((txn) async {
-      PermissionRuntime.require('reports', AppPermissionAction.view);
-      final rows = await txn.rawQuery(
-        '''
-        WITH invoice_link_counts AS (
-          SELECT journal_entry_id, COUNT(*) AS linked_invoice_count
-          FROM tax_invoices
-          WHERE journal_entry_id IS NOT NULL
-          GROUP BY journal_entry_id
-        ), scoped_invoices AS (
-          SELECT
-            ti.id AS invoice_id,
-            ti.invoice_date AS invoice_date,
-            CAST(ROUND(COALESCE(ti.net_amount, 0) * 100) AS INTEGER)
-              AS net_minor,
-            CAST(ROUND(COALESCE(ti.tax_amount, 0) * 100) AS INTEGER)
-              AS tax_minor,
-            CAST(ROUND(COALESCE(ti.total_amount, 0) * 100) AS INTEGER)
-              AS total_minor,
-            ti.tax_account_id AS tax_account_id,
-            CASE WHEN invoice_contract.id IS NULL THEN 1 ELSE 0
-              END AS invoice_contract_missing,
-            CASE WHEN ci.id IS NULL THEN 1 ELSE 0
-              END AS invoice_installment_missing,
-            CASE
-              WHEN ti.contract_id IS NOT NULL
-               AND ti.installment_id IS NOT NULL
-               AND ci.contract_id IS NOT NULL
-               AND ci.contract_id != ti.contract_id THEN 1
-              ELSE 0
-            END AS invoice_installment_contract_mismatch,
-            CASE WHEN ti.installment_id IS NULL THEN NULL
-              ELSE CAST(ROUND(COALESCE(ci.amount, 0) * 100) AS INTEGER)
-            END AS installment_amount_minor,
-            CASE
-              WHEN ti.installment_id IS NOT NULL
-               AND (ci.id IS NULL OR
-                 CAST(ROUND(COALESCE(ci.amount, 0) * 100) AS INTEGER) !=
-                 CAST(ROUND(COALESCE(ti.net_amount, 0) * 100) AS INTEGER))
-              THEN 1 ELSE 0
-            END AS invoice_installment_amount_mismatch,
-            ti.journal_entry_id AS journal_entry_id,
-            CASE WHEN je.id IS NULL THEN 0 ELSE 1 END AS journal_entry_exists,
-            COALESCE(je.is_posted, 0) AS journal_is_posted,
-            tenants.account_id AS tenant_account_id,
-            tenants.name AS tenant_name,
-            COALESCE(link_counts.linked_invoice_count, 0)
-              AS linked_invoice_count
-          FROM tax_invoices ti
-          LEFT JOIN contracts invoice_contract
-            ON invoice_contract.id = ti.contract_id
-          LEFT JOIN contract_installments ci
-            ON ci.id = ti.installment_id
-          LEFT JOIN contracts installment_contract
-            ON installment_contract.id = ci.contract_id
-          LEFT JOIN tenants
-            ON tenants.id = COALESCE(
-              invoice_contract.tenant_id,
-              installment_contract.tenant_id
-            )
-          LEFT JOIN journal_entries je ON je.id = ti.journal_entry_id
-          LEFT JOIN invoice_link_counts link_counts
-            ON link_counts.journal_entry_id = ti.journal_entry_id
-          WHERE ti.invoice_date >= ? AND ti.invoice_date < ?
-        )
-        SELECT
-          invoice.invoice_id,
-          invoice.invoice_date,
-          invoice.net_minor,
-          invoice.tax_minor,
-          invoice.total_minor,
-          invoice.tax_account_id,
-          invoice.invoice_contract_missing,
-          invoice.invoice_installment_missing,
-          invoice.journal_entry_id,
-          invoice.journal_entry_exists,
-          invoice.journal_is_posted,
-          invoice.tenant_account_id,
-          invoice.tenant_name,
-          invoice.linked_invoice_count,
-          invoice.invoice_installment_contract_mismatch,
-          invoice.installment_amount_minor,
-          invoice.invoice_installment_amount_mismatch,
-          CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
-            AS journal_debit_minor,
-          CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
-            AS journal_credit_minor,
-          CAST(ROUND(COALESCE(SUM(CASE
-            WHEN jl.account_id = invoice.tenant_account_id
-            THEN jl.debit ELSE 0 END), 0) * 100) AS INTEGER)
-            AS tenant_receivable_debit_minor,
-          CAST(ROUND(COALESCE(SUM(CASE
-            WHEN account.account_type = 'Revenue'
-            THEN jl.credit ELSE 0 END), 0) * 100) AS INTEGER)
-            AS revenue_credit_minor,
-          CAST(ROUND(COALESCE(SUM(CASE
-            WHEN jl.account_id = invoice.tax_account_id
-             AND account.account_type = 'Liability'
-            THEN jl.credit ELSE 0 END), 0) * 100) AS INTEGER)
-            AS tax_liability_credit_minor
-        FROM scoped_invoices invoice
-        LEFT JOIN journal_lines jl
-          ON jl.journal_entry_id = invoice.journal_entry_id
-        LEFT JOIN accounts account ON account.id = jl.account_id
-        GROUP BY
-          invoice.invoice_id,
-          invoice.invoice_date,
-          invoice.net_minor,
-          invoice.tax_minor,
-          invoice.total_minor,
-          invoice.tax_account_id,
-          invoice.invoice_contract_missing,
-          invoice.invoice_installment_missing,
-          invoice.invoice_installment_contract_mismatch,
-          invoice.installment_amount_minor,
-          invoice.invoice_installment_amount_mismatch,
-          invoice.journal_entry_id,
-          invoice.journal_entry_exists,
-          invoice.journal_is_posted,
-          invoice.tenant_account_id,
-          invoice.tenant_name,
-          invoice.linked_invoice_count
-        ORDER BY invoice.invoice_date, invoice.invoice_id
-        ''',
-        [startDate, exclusiveEndDate],
-      );
-      final companyRows = await txn.query(
-        'company_info',
-        columns: ['default_currency'],
-        orderBy: 'id ASC',
-        limit: 1,
-      );
-      final configuredCurrency = companyRows.isEmpty
-          ? null
-          : companyRows.first['default_currency']?.toString().trim();
-      final currency = configuredCurrency == null || configuredCurrency.isEmpty
-          ? 'غير محددة'
-          : configuredCurrency;
-      PermissionRuntime.require('reports', AppPermissionAction.view);
-      return InvoiceLedgerReconciliationReport(
+    return db.transaction(
+      (txn) => _loadInvoiceLedgerReconciliationReport(
+        db: txn,
         startDate: startDate,
         endDate: endDate,
-        currency: currency,
-        rows: rows.map(InvoiceLedgerReconciliationRow.fromMap).toList(),
+        exclusiveEndDate: exclusiveEndDate,
+      ),
+    );
+  }
+
+  Future<InvoiceLedgerReconciliationReport>
+  _loadInvoiceLedgerReconciliationReport({
+    required DatabaseExecutor db,
+    required String startDate,
+    required String endDate,
+    required String exclusiveEndDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    final rows = await db.rawQuery(
+      '''
+      WITH invoice_link_counts AS (
+        SELECT journal_entry_id, COUNT(*) AS linked_invoice_count
+        FROM tax_invoices
+        WHERE journal_entry_id IS NOT NULL
+        GROUP BY journal_entry_id
+      ), scoped_invoices AS (
+        SELECT
+          ti.id AS invoice_id,
+          ti.invoice_date AS invoice_date,
+          CAST(ROUND(COALESCE(ti.net_amount, 0) * 100) AS INTEGER)
+            AS net_minor,
+          CAST(ROUND(COALESCE(ti.tax_amount, 0) * 100) AS INTEGER)
+            AS tax_minor,
+          CAST(ROUND(COALESCE(ti.total_amount, 0) * 100) AS INTEGER)
+            AS total_minor,
+          ti.tax_account_id AS tax_account_id,
+          CASE WHEN invoice_contract.id IS NULL THEN 1 ELSE 0
+            END AS invoice_contract_missing,
+          CASE WHEN ci.id IS NULL THEN 1 ELSE 0
+            END AS invoice_installment_missing,
+          CASE
+            WHEN ti.contract_id IS NOT NULL
+             AND ti.installment_id IS NOT NULL
+             AND ci.contract_id IS NOT NULL
+             AND ci.contract_id != ti.contract_id THEN 1
+            ELSE 0
+          END AS invoice_installment_contract_mismatch,
+          CASE WHEN ti.installment_id IS NULL THEN NULL
+            ELSE CAST(ROUND(COALESCE(ci.amount, 0) * 100) AS INTEGER)
+          END AS installment_amount_minor,
+          CASE
+            WHEN ti.installment_id IS NOT NULL
+             AND (ci.id IS NULL OR
+               CAST(ROUND(COALESCE(ci.amount, 0) * 100) AS INTEGER) !=
+               CAST(ROUND(COALESCE(ti.net_amount, 0) * 100) AS INTEGER))
+            THEN 1 ELSE 0
+          END AS invoice_installment_amount_mismatch,
+          ti.journal_entry_id AS journal_entry_id,
+          CASE WHEN je.id IS NULL THEN 0 ELSE 1 END AS journal_entry_exists,
+          COALESCE(je.is_posted, 0) AS journal_is_posted,
+          tenants.account_id AS tenant_account_id,
+          tenants.name AS tenant_name,
+          COALESCE(link_counts.linked_invoice_count, 0)
+            AS linked_invoice_count
+        FROM tax_invoices ti
+        LEFT JOIN contracts invoice_contract
+          ON invoice_contract.id = ti.contract_id
+        LEFT JOIN contract_installments ci
+          ON ci.id = ti.installment_id
+        LEFT JOIN contracts installment_contract
+          ON installment_contract.id = ci.contract_id
+        LEFT JOIN tenants
+          ON tenants.id = COALESCE(
+            invoice_contract.tenant_id,
+            installment_contract.tenant_id
+          )
+        LEFT JOIN journal_entries je ON je.id = ti.journal_entry_id
+        LEFT JOIN invoice_link_counts link_counts
+          ON link_counts.journal_entry_id = ti.journal_entry_id
+        WHERE ti.invoice_date >= ? AND ti.invoice_date < ?
+      )
+      SELECT
+        invoice.invoice_id,
+        invoice.invoice_date,
+        invoice.net_minor,
+        invoice.tax_minor,
+        invoice.total_minor,
+        invoice.tax_account_id,
+        invoice.invoice_contract_missing,
+        invoice.invoice_installment_missing,
+        invoice.journal_entry_id,
+        invoice.journal_entry_exists,
+        invoice.journal_is_posted,
+        invoice.tenant_account_id,
+        invoice.tenant_name,
+        invoice.linked_invoice_count,
+        invoice.invoice_installment_contract_mismatch,
+        invoice.installment_amount_minor,
+        invoice.invoice_installment_amount_mismatch,
+        CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+          AS journal_debit_minor,
+        CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+          AS journal_credit_minor,
+        CAST(ROUND(COALESCE(SUM(CASE
+          WHEN jl.account_id = invoice.tenant_account_id
+          THEN jl.debit ELSE 0 END), 0) * 100) AS INTEGER)
+          AS tenant_receivable_debit_minor,
+        CAST(ROUND(COALESCE(SUM(CASE
+          WHEN account.account_type = 'Revenue'
+          THEN jl.credit ELSE 0 END), 0) * 100) AS INTEGER)
+          AS revenue_credit_minor,
+        CAST(ROUND(COALESCE(SUM(CASE
+          WHEN jl.account_id = invoice.tax_account_id
+           AND account.account_type = 'Liability'
+          THEN jl.credit ELSE 0 END), 0) * 100) AS INTEGER)
+          AS tax_liability_credit_minor
+      FROM scoped_invoices invoice
+      LEFT JOIN journal_lines jl
+        ON jl.journal_entry_id = invoice.journal_entry_id
+      LEFT JOIN accounts account ON account.id = jl.account_id
+      GROUP BY
+        invoice.invoice_id,
+        invoice.invoice_date,
+        invoice.net_minor,
+        invoice.tax_minor,
+        invoice.total_minor,
+        invoice.tax_account_id,
+        invoice.invoice_contract_missing,
+        invoice.invoice_installment_missing,
+        invoice.invoice_installment_contract_mismatch,
+        invoice.installment_amount_minor,
+        invoice.invoice_installment_amount_mismatch,
+        invoice.journal_entry_id,
+        invoice.journal_entry_exists,
+        invoice.journal_is_posted,
+        invoice.tenant_account_id,
+        invoice.tenant_name,
+        invoice.linked_invoice_count
+      ORDER BY invoice.invoice_date, invoice.invoice_id
+      ''',
+      [startDate, exclusiveEndDate],
+    );
+    final companyRows = await db.query(
+      'company_info',
+      columns: ['default_currency'],
+      orderBy: 'id ASC',
+      limit: 1,
+    );
+    final configuredCurrency = companyRows.isEmpty
+        ? null
+        : companyRows.first['default_currency']?.toString().trim();
+    final currency = configuredCurrency == null || configuredCurrency.isEmpty
+        ? 'غير محددة'
+        : configuredCurrency;
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    return InvoiceLedgerReconciliationReport(
+      startDate: startDate,
+      endDate: endDate,
+      currency: currency,
+      rows: rows.map(InvoiceLedgerReconciliationRow.fromMap).toList(),
+    );
+  }
+
+  Future<InternalSubledgerReconciliationReport>
+  getInternalSubledgerReconciliationReport({
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+
+    bool isCalendarDate(String value) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+      final parts = value.split('-').map(int.tryParse).toList();
+      if (parts.any((part) => part == null)) return false;
+      final date = DateTime.utc(parts[0]!, parts[1]!, parts[2]!);
+      return date.year == parts[0] &&
+          date.month == parts[1] &&
+          date.day == parts[2];
+    }
+
+    if (!isCalendarDate(startDate) || !isCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final endParts = endDate.split('-').map(int.parse).toList();
+    final nextDay = DateTime.utc(endParts[0], endParts[1], endParts[2]).add(
+      const Duration(days: 1),
+    );
+    final exclusiveEndDate =
+        '${nextDay.year.toString().padLeft(4, '0')}-'
+        '${nextDay.month.toString().padLeft(2, '0')}-'
+        '${nextDay.day.toString().padLeft(2, '0')}';
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      final invoiceReport = await _loadInvoiceLedgerReconciliationReport(
+        db: txn,
+        startDate: startDate,
+        endDate: endDate,
+        exclusiveEndDate: exclusiveEndDate,
       );
+      final report = await InternalSubledgerReconciliationService.load(
+        db: txn,
+        startDate: startDate,
+        endDate: endDate,
+        exclusiveEndDate: exclusiveEndDate,
+        currency: invoiceReport.currency,
+        invoices: invoiceReport,
+      );
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+      return report;
     });
   }
 
