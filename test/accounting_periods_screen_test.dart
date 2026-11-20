@@ -67,12 +67,14 @@ void main() {
   testWidgets('period controls remain scrollable in a short desktop window', (
     tester,
   ) async {
-    final period = await helper.createAccountingPeriod(
-      startDate: '2026-02-01',
-      endDate: '2026-02-28',
-    );
-    await helper.lockAccountingPeriod(period.id);
-    await helper.closeAccountingPeriod(period.id);
+    await tester.runAsync(() async {
+      final period = await helper.createAccountingPeriod(
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      await helper.lockAccountingPeriod(period.id);
+      await helper.closeAccountingPeriod(period.id);
+    });
 
     await pumpScreen(tester);
 
