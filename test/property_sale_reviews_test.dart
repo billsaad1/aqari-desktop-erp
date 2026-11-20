@@ -534,7 +534,7 @@ void main() {
       await helper.close();
 
       final upgraded = await helper.database;
-      expect(_count(await upgraded.rawQuery('PRAGMA user_version')), 26);
+      expect(_count(await upgraded.rawQuery('PRAGMA user_version')), 27);
       final legacy = (await upgraded.query(
         'property_sale_reviews',
         where: 'id = ?',
@@ -574,7 +574,7 @@ void main() {
   );
 
   test(
-    'v20 upgrades through v26, preserving permissions and default-denying review',
+    'v20 upgrades through v27, preserving permissions and default-denying review',
     () async {
       final db = await helper.database;
       await db.insert('user_permissions', {

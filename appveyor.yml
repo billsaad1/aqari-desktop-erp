@@ -31,7 +31,7 @@ install:
 
 before_build:
   - flutter analyze --no-pub --no-fatal-infos
-  - flutter test --no-pub --reporter=expanded
+  - flutter test --no-pub --reporter=expanded --concurrency=1
 
 build_script:
   - flutter build windows --release

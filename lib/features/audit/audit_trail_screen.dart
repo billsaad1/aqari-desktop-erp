@@ -26,11 +26,13 @@ class AuditTrailScreen extends StatefulWidget {
     'tenant_notice': 'إشعار مستأجر',
     'property_sale_review': 'مراجعة بيع عقار',
     'property_sale_execution': 'تنفيذ بيع عقار',
+    'owner_settlement': 'سداد مستحقات مالك',
   };
 
   static const _actionLabels = <String, String>{
     'JOURNAL_ENTRY_POSTED': 'ترحيل قيد يومية',
     'GENERAL_VOUCHER_POSTED': 'ترحيل سند عام',
+    'OWNER_SETTLEMENT_POSTED': 'ترحيل سند سداد مالك',
     'TENANT_RECEIPT_POSTED': 'ترحيل سند قبض مستأجر',
     'TENANT_REFUND_POSTED': 'ترحيل استرداد مستأجر',
     'TAX_INVOICE_ISSUED': 'إصدار فاتورة ضريبية',

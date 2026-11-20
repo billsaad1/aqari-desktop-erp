@@ -670,6 +670,10 @@ void main() {
 
       expect(codes, isNotEmpty);
       expect(AuditTrailScreen.actionLabel('CONTRACT_RENEWED'), 'تجديد عقد');
+      expect(
+        AuditTrailScreen.actionLabel('OWNER_SETTLEMENT_POSTED'),
+        'ترحيل سند سداد مالك',
+      );
       final unlabelled = codes.where((code) {
         final label = AuditTrailScreen.actionLabel(code);
         return label == code || !RegExp(r'[\u0600-\u06FF]').hasMatch(label);
