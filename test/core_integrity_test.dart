@@ -1707,6 +1707,9 @@ void main() {
       final incompleteBackupPath = '$testDocuments/incomplete-schema.db';
       final missingColumnBackupPath =
           '$testDocuments/missing-contract-column.db';
+      final missingSaleTriggerBackupPath =
+          '$testDocuments/missing-sale-trigger.db';
+      final missingSaleIndexBackupPath = '$testDocuments/missing-sale-index.db';
       await DatabaseHelper.instance.backupToFile(completeBackupPath);
       await File(completeBackupPath).copy(incompleteBackupPath);
       final incompleteDb = await databaseFactory.openDatabase(
@@ -1741,6 +1744,42 @@ void main() {
         originalName,
       );
 
+      await File(completeBackupPath).copy(missingSaleTriggerBackupPath);
+      final missingSaleTriggerDb = await databaseFactory.openDatabase(
+        missingSaleTriggerBackupPath,
+      );
+      await missingSaleTriggerDb.execute(
+        'DROP TRIGGER property_sale_executions_valid_insert',
+      );
+      await missingSaleTriggerDb.close();
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(missingSaleTriggerBackupPath),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+        reason: 'غياب حارس نقل الملكية لا يستبدل قاعدة التشغيل',
+      );
+
+      await File(completeBackupPath).copy(missingSaleIndexBackupPath);
+      final missingSaleIndexDb = await databaseFactory.openDatabase(
+        missingSaleIndexBackupPath,
+      );
+      await missingSaleIndexDb.execute(
+        'DROP INDEX property_sale_accounting_successor_unique',
+      );
+      await missingSaleIndexDb.close();
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(missingSaleIndexBackupPath),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+        reason: 'غياب قيد سلسلة التصحيح لا يستبدل قاعدة التشغيل',
+      );
+
       final walBackupPath = '$testDocuments/wal-pending-backup.db';
       await DatabaseHelper.instance.backupToFile(walBackupPath);
       final walDatabase = await databaseFactory.openDatabase(walBackupPath);
@@ -1765,6 +1804,8 @@ void main() {
         completeBackupPath,
         incompleteBackupPath,
         missingColumnBackupPath,
+        missingSaleTriggerBackupPath,
+        missingSaleIndexBackupPath,
         walBackupPath,
       ]) {
         for (final suffix in ['', '-wal', '-shm']) {
