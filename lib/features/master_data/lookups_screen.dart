@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/erp_data_table.dart';
@@ -81,10 +82,13 @@ class LookupConfig {
 class LookupTab extends StatefulWidget {
   final LookupConfig config;
   final List<String> displayFields;
+  @visibleForTesting
+  final Future<List<Map<String, dynamic>>> Function()? dataLoader;
   const LookupTab({
     super.key,
     required this.config,
     required this.displayFields,
+    this.dataLoader,
   });
 
   @override
@@ -126,9 +130,10 @@ class _LookupTabState extends State<LookupTab> {
   }
 
   Future<void> _loadData() async {
-    final data = await DatabaseHelper.instance.getLookupData(
-      widget.config.tableName,
-    );
+    final loader = widget.dataLoader;
+    final data = loader == null
+        ? await DatabaseHelper.instance.getLookupData(widget.config.tableName)
+        : await loader();
     if (!mounted) return;
     setState(() {
       _data = data;
