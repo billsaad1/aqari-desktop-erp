@@ -28,4 +28,11 @@ class LeaseContractTerms {
         .toList(growable: false);
     return clauses.isEmpty ? defaultClauses : clauses;
   }
+
+  static List<String> resolveForContract({
+    required Map<String, dynamic> contract,
+    Map<String, dynamic>? companyInfo,
+  }) => resolve(
+    contract['terms_conditions_snapshot'] ?? companyInfo?['terms_conditions'],
+  );
 }
