@@ -806,8 +806,10 @@ void main() {
         ]),
       );
       expect(
-        (await upgraded.rawQuery('PRAGMA user_version')).single['user_version'],
-        28,
+        ((await upgraded.rawQuery('PRAGMA user_version')).single[
+          'user_version'
+        ] as num).toInt(),
+        DatabaseHelper.schemaVersion,
       );
       final triggers = (await upgraded.rawQuery(
         "SELECT name FROM sqlite_master WHERE type = 'trigger'",
