@@ -748,7 +748,7 @@ class InternalSubledgerReconciliationService {
             state: reversalIssue.$1,
             issueSummary: reversalIssue.$2,
             journalEntryId: reversalId,
-            journalDate: reversalJournalDate,
+            journalDate: ledgerReversalDate,
             journalPosted: reversalPosted,
             journalDebitMinor: reversalDebit,
             journalCreditMinor: reversalCredit,

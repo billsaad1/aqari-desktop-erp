@@ -239,6 +239,7 @@ class _InternalSubledgerReconciliationScreenState
           _statusFilter != filter) {
         return;
       }
+      if (!mounted) return;
       await PdfDocumentPreviewDialog.show(
         context: context,
         bytes: bytes,
@@ -268,7 +269,9 @@ class _InternalSubledgerReconciliationScreenState
             _report!.endDate == _endDateController.text
         ? _report
         : null;
-    final rows = report == null ? const [] : _visibleRows(report);
+    final List<InternalSubledgerReconciliationRow> rows = report == null
+        ? const <InternalSubledgerReconciliationRow>[]
+        : _visibleRows(report);
     return Padding(
       padding: const EdgeInsets.all(18),
       child: Column(
