@@ -9560,12 +9560,7 @@ class DatabaseHelper {
     if (startDate.compareTo(endDate) > 0) {
       throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
     }
-    final endParts = endDate.split('-').map(int.parse).toList();
-    final exclusiveEndDate = DateTime.utc(
-      endParts[0],
-      endParts[1],
-      endParts[2],
-    ).add(const Duration(days: 1)).toIso8601String().substring(0, 10);
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
 
     final db = await instance.database;
     return db.transaction((txn) async {
@@ -9625,6 +9620,22 @@ class DatabaseHelper {
       final currency = configuredCurrency == null || configuredCurrency.isEmpty
           ? 'غير محددة'
           : configuredCurrency;
+      final invoiceReport = await _loadInvoiceLedgerReconciliationReport(
+        db: txn,
+        startDate: startDate,
+        endDate: endDate,
+        exclusiveEndDate: exclusiveEndDate,
+        requireReportPermission: false,
+      );
+      final internalReconciliation =
+          await InternalSubledgerReconciliationService.load(
+            db: txn,
+            startDate: startDate,
+            endDate: endDate,
+            exclusiveEndDate: exclusiveEndDate,
+            currency: currency,
+            invoices: invoiceReport,
+          );
       PermissionRuntime.require('reports', AppPermissionAction.view);
       return FinancialCloseReadinessReport(
         startDate: startDate,
@@ -9638,6 +9649,7 @@ class DatabaseHelper {
         unbalancedPostedEntries: unbalancedRows
             .map((row) => FinancialCloseEntryIssue.fromMap(row, isPosted: true))
             .toList(growable: false),
+        internalReconciliation: internalReconciliation,
       );
     });
   }
@@ -9742,12 +9754,19 @@ class DatabaseHelper {
     });
   }
 
-  Future<void> lockAccountingPeriod(int periodId) async {
+  Future<void> lockAccountingPeriod(
+    int periodId, {
+    String reason = '',
+  }) async {
     PermissionRuntime.require(
       'accounting_periods',
       AppPermissionAction.lockPeriod,
     );
     if (periodId <= 0) throw ArgumentError('رقم الفترة غير صالح');
+    final normalizedReason = reason.trim();
+    if (normalizedReason.length > 500) {
+      throw ArgumentError('سبب القفل لا يتجاوز 500 حرف');
+    }
     final db = await instance.database;
     await db.transaction((txn) async {
       PermissionRuntime.require(
@@ -9767,7 +9786,14 @@ class DatabaseHelper {
         endDate: period.endDate,
       );
       if (report.hasBlockingIssues) {
-        throw StateError('توجد قيود غير مرحلة أو غير متوازنة؛ راجع الجاهزية أولًا');
+        throw StateError(
+          'توجد قيود أو استثناءات مطابقة داخلية تحتاج معالجة يدوية؛ راجع الجاهزية أولًا',
+        );
+      }
+      if (report.requiresManualReviewAcknowledgement && normalizedReason.isEmpty) {
+        throw StateError(
+          'توجد استثناءات تتطلب إقرار مراجعة؛ أدخل سبب المراجعة أو الاعتماد قبل القفل',
+        );
       }
       PermissionRuntime.require(
         'accounting_periods',
@@ -9778,6 +9804,11 @@ class DatabaseHelper {
         'end_date': period.endDate,
         'unposted_count': report.unpostedEntries.length,
         'unbalanced_posted_count': report.unbalancedPostedEntries.length,
+        'internal_reconciliation_blocking_count':
+            report.blockingReconciliationCount,
+        'internal_manual_review_ack_count':
+            report.manualReviewAcknowledgementCount,
+        'internal_legacy_review_count': report.legacyReviewCount,
       };
       final timestamp = DateTime.now().toIso8601String();
       await _appendAccountingPeriodEventTx(
@@ -9785,6 +9816,7 @@ class DatabaseHelper {
         periodId: periodId,
         action: 'locked',
         actor: actor,
+        reason: normalizedReason.isEmpty ? null : normalizedReason,
         readinessSummary: jsonEncode(summary),
         timestamp: timestamp,
       );
@@ -9800,7 +9832,10 @@ class DatabaseHelper {
         action: 'ACCOUNTING_PERIOD_LOCKED',
         entityType: 'accounting_period',
         entityId: periodId,
-        details: summary,
+        details: {
+          ...summary,
+          if (normalizedReason.isNotEmpty) 'lock_review_reason': normalizedReason,
+        },
         timestamp: timestamp,
       );
     });
@@ -9981,6 +10016,15 @@ class DatabaseHelper {
     });
   }
 
+  String _exclusiveDateBoundAfter(String inclusiveEndDate) {
+    if (inclusiveEndDate == '9999-12-31') return '9999-12-32';
+    final parts = inclusiveEndDate.split('-').map(int.parse).toList();
+    final nextDay = DateTime.utc(parts[0], parts[1], parts[2]).add(
+      const Duration(days: 1),
+    );
+    return nextDay.toIso8601String().substring(0, 10);
+  }
+
   Future<FinancialCloseReadinessReport> _financialCloseReadinessTx(
     DatabaseExecutor txn, {
     required String startDate,
@@ -10041,6 +10085,23 @@ class DatabaseHelper {
     final currency = configuredCurrency == null || configuredCurrency.isEmpty
         ? 'غير محددة'
         : configuredCurrency;
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
+    final invoiceReport = await _loadInvoiceLedgerReconciliationReport(
+      db: txn,
+      startDate: startDate,
+      endDate: endDate,
+      exclusiveEndDate: exclusiveEndDate,
+      requireReportPermission: false,
+    );
+    final internalReconciliation =
+        await InternalSubledgerReconciliationService.load(
+          db: txn,
+          startDate: startDate,
+          endDate: endDate,
+          exclusiveEndDate: exclusiveEndDate,
+          currency: currency,
+          invoices: invoiceReport,
+        );
     return FinancialCloseReadinessReport(
       startDate: startDate,
       endDate: endDate,
@@ -10051,6 +10112,7 @@ class DatabaseHelper {
       unbalancedPostedEntries: unbalancedRows
           .map((row) => FinancialCloseEntryIssue.fromMap(row, isPosted: true))
           .toList(growable: false),
+      internalReconciliation: internalReconciliation,
     );
   }
 
@@ -10313,16 +10375,7 @@ class DatabaseHelper {
     if (startDate.compareTo(endDate) > 0) {
       throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
     }
-    final endParts = endDate.split('-').map(int.parse).toList();
-    final nextDay = DateTime.utc(
-      endParts[0],
-      endParts[1],
-      endParts[2],
-    ).add(const Duration(days: 1));
-    final exclusiveEndDate =
-        '${nextDay.year.toString().padLeft(4, '0')}-'
-        '${nextDay.month.toString().padLeft(2, '0')}-'
-        '${nextDay.day.toString().padLeft(2, '0')}';
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
 
     final db = await instance.database;
     return db.transaction(
@@ -10341,8 +10394,11 @@ class DatabaseHelper {
     required String startDate,
     required String endDate,
     required String exclusiveEndDate,
+    bool requireReportPermission = true,
   }) async {
-    PermissionRuntime.require('reports', AppPermissionAction.view);
+    if (requireReportPermission) {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+    }
     final rows = await db.rawQuery(
       '''
       WITH invoice_link_counts AS (
@@ -10479,7 +10535,9 @@ class DatabaseHelper {
     final currency = configuredCurrency == null || configuredCurrency.isEmpty
         ? 'غير محددة'
         : configuredCurrency;
-    PermissionRuntime.require('reports', AppPermissionAction.view);
+    if (requireReportPermission) {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+    }
     return InvoiceLedgerReconciliationReport(
       startDate: startDate,
       endDate: endDate,
@@ -10511,14 +10569,7 @@ class DatabaseHelper {
     if (startDate.compareTo(endDate) > 0) {
       throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
     }
-    final endParts = endDate.split('-').map(int.parse).toList();
-    final nextDay = DateTime.utc(endParts[0], endParts[1], endParts[2]).add(
-      const Duration(days: 1),
-    );
-    final exclusiveEndDate =
-        '${nextDay.year.toString().padLeft(4, '0')}-'
-        '${nextDay.month.toString().padLeft(2, '0')}-'
-        '${nextDay.day.toString().padLeft(2, '0')}';
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
 
     final db = await instance.database;
     return db.transaction((txn) async {

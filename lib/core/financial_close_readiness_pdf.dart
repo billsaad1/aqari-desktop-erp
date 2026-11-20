@@ -4,6 +4,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import '../models/financial_close_readiness_report_model.dart';
+import '../models/internal_subledger_reconciliation_report_model.dart';
 import 'print_utils.dart';
 
 class FinancialCloseReadinessPdf {
@@ -28,6 +29,22 @@ class FinancialCloseReadinessPdf {
             PrintUtils.formatPdfAmount(issue.debitMinor / 100),
             PrintUtils.formatPdfAmount(issue.creditMinor / 100),
             PrintUtils.formatPdfAmount(issue.differenceMinor / 100),
+          ],
+        )
+        .toList(growable: false);
+    final reconciliationRows = report.internalReconciliation.rows
+        .where((row) => !row.isLedgerMatched)
+        .toList(growable: false);
+    final reconciliationTableRows = reconciliationRows
+        .map(
+          (row) => [
+            row.state.label,
+            row.source.label,
+            row.sourceId.toString(),
+            row.sourceDate,
+            row.partyName,
+            PrintUtils.formatPdfAmount(row.amountMinor / 100),
+            row.issueSummary,
           ],
         )
         .toList(growable: false);
@@ -103,6 +120,33 @@ class FinancialCloseReadinessPdf {
                     ),
                   ],
                 ),
+                pw.SizedBox(height: 8),
+                pw.Row(
+                  children: [
+                    _metric(
+                      'استثناءات مطابقة داخلية مانعة',
+                      report.blockingReconciliationCount.toString(),
+                    ),
+                    _metric(
+                      'بنود تاريخية للمراجعة',
+                      report.legacyReviewCount.toString(),
+                    ),
+                  ],
+                ),
+                pw.SizedBox(height: 8),
+                pw.Row(
+                  children: [
+                    _metric(
+                      'استثناءات تتطلب إقرار مراجعة',
+                      report.manualReviewAcknowledgementCount.toString(),
+                    ),
+                    _metric(
+                      'قيود أستاذ مباشرة',
+                      report.internalReconciliation.directJournalCount
+                          .toString(),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -110,27 +154,34 @@ class FinancialCloseReadinessPdf {
           pw.Container(
             padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: pw.BoxDecoration(
-              color: report.isReadyForManualReview
-                  ? PdfColors.green50
-                  : PdfColors.orange50,
+              color: !report.isReadyForManualReview
+                  ? PdfColors.orange50
+                  : report.requiresManualReviewAcknowledgement
+                  ? PdfColors.orange50
+                  : PdfColors.green50,
               borderRadius: pw.BorderRadius.circular(4),
             ),
             child: pw.Text(
-              report.isReadyForManualReview
-                  ? 'اجتازت الفترة فحوص توازن القيود الأساسية؛ هذا التقرير لا ينفذ الإقفال، ويظل الاعتماد اليدوي والمراجعة المحاسبية مطلوبين.'
-                  : 'تحتاج الفترة إلى مراجعة القيود المعروضة قبل أي إجراء إقفال يدوي.',
+              !report.isReadyForManualReview
+                  ? 'توجد قيود أو استثناءات مطابقة داخلية تحتاج معالجة يدوية قبل القفل.'
+                  : report.requiresManualReviewAcknowledgement
+                  ? 'لا توجد موانع تشغيلية، لكن توجد حركات تتطلب قرار مراجعة يدويًا وتوثيقًا عند القفل.'
+                  : 'اجتازت الفترة فحوص التوازن والمطابقة الداخلية الأساسية؛ يظل الاعتماد اليدوي مطلوبًا.',
               textDirection: pw.TextDirection.rtl,
               style: pw.TextStyle(
                 fontSize: 9,
                 fontWeight: pw.FontWeight.bold,
-                color: report.isReadyForManualReview
-                    ? PrintUtils.brandEmerald
-                    : PdfColors.deepOrange,
+                color: !report.isReadyForManualReview
+                    ? PdfColors.deepOrange
+                    : report.requiresManualReviewAcknowledgement
+                    ? PdfColors.deepOrange
+                    : PrintUtils.brandEmerald,
               ),
             ),
           ),
           pw.SizedBox(height: 9),
-          pw.TableHelper.fromTextArray(
+          if (issues.isNotEmpty)
+            pw.TableHelper.fromTextArray(
             headers: const [
               'حالة المراجعة',
               'رقم القيد',
@@ -187,9 +238,78 @@ class FinancialCloseReadinessPdf {
                 style: const pw.TextStyle(color: PdfColors.grey700),
               ),
             ),
+          pw.SizedBox(height: 10),
+          pw.Text(
+            'استثناءات المطابقة الداخلية بين المستندات والأستاذ',
+            textDirection: pw.TextDirection.rtl,
+            style: pw.TextStyle(
+              fontSize: 12,
+              fontWeight: pw.FontWeight.bold,
+              color: PrintUtils.brandNavy,
+            ),
+          ),
+          pw.SizedBox(height: 5),
+          if (reconciliationTableRows.isNotEmpty)
+            pw.TableHelper.fromTextArray(
+              headers: const [
+                'الحالة',
+                'المصدر',
+                'رقم المصدر',
+                'التاريخ',
+                'الطرف / البيان',
+                'المبلغ',
+                'سبب المراجعة',
+              ],
+              data: reconciliationTableRows,
+              headerStyle: pw.TextStyle(
+                fontSize: 8,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration: pw.BoxDecoration(color: PrintUtils.brandNavy),
+              cellStyle: const pw.TextStyle(fontSize: 7, lineSpacing: 1.2),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 3,
+                vertical: 3,
+              ),
+              tableDirection: pw.TextDirection.rtl,
+              headerDirection: pw.TextDirection.rtl,
+              columnWidths: const {
+                0: pw.FlexColumnWidth(1.0),
+                1: pw.FlexColumnWidth(1.2),
+                2: pw.FlexColumnWidth(0.7),
+                3: pw.FlexColumnWidth(1.0),
+                4: pw.FlexColumnWidth(1.5),
+                5: pw.FlexColumnWidth(0.8),
+                6: pw.FlexColumnWidth(2.0),
+              },
+              border: pw.TableBorder.all(
+                color: PrintUtils.softBorder,
+                width: 0.5,
+              ),
+              cellAlignments: {
+                0: pw.Alignment.centerRight,
+                1: pw.Alignment.centerRight,
+                2: pw.Alignment.center,
+                3: pw.Alignment.center,
+                4: pw.Alignment.centerRight,
+                5: pw.Alignment.center,
+                6: pw.Alignment.centerRight,
+              },
+            )
+          else
+            pw.Padding(
+              padding: const pw.EdgeInsets.all(8),
+              child: pw.Text(
+                'لا توجد استثناءات مطابقة داخلية ظاهرة ضمن الفترة.',
+                textDirection: pw.TextDirection.rtl,
+                textAlign: pw.TextAlign.center,
+                style: const pw.TextStyle(color: PdfColors.grey700),
+              ),
+            ),
           pw.SizedBox(height: 8),
           pw.Text(
-            'العملة: $currency. هذا فحص قراءة فقط لقيود الفترة: يكشف المسودات والقيود المرحّلة غير المتوازنة أو بلا سطور، ولا ينشئ قيود إقفال أو يقفل الفترة أو يغير الأرصدة.',
+            'العملة: $currency. المطابقة هنا داخلية فقط ولا تعتمد على كشوف خارجية. يكشف التقرير المسودات والقيود غير المتوازنة ومشكلات ربط المستندات؛ لا ينشئ قيود تصحيح أو قيد إقفال أرباح وخسائر ولا يغير الأرصدة. لا تُخمن روابط السجلات التاريخية أو القيود المباشرة الملتبسة؛ يلزم توثيق المراجعة قبل القفل.',
             textDirection: pw.TextDirection.rtl,
             style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
           ),

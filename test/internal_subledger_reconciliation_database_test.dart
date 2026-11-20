@@ -401,6 +401,14 @@ void main() {
     },
   );
 
+  test('accepts the maximum calendar date without overflowing', () async {
+    final report = await helper.getInternalSubledgerReconciliationReport(
+      startDate: '9999-12-31',
+      endDate: '9999-12-31',
+    );
+    expect(report.rows, isEmpty);
+  });
+
   test('requires report permission and rejects an invalid date range', () async {
     await expectLater(
       helper.getInternalSubledgerReconciliationReport(

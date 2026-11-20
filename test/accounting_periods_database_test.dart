@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:app/core/permission_policy.dart';
 import 'package:app/database/database_helper.dart';
+import 'package:app/models/internal_subledger_reconciliation_report_model.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -345,6 +346,151 @@ void main() {
       );
     },
   );
+
+  test(
+    'internal subledger exceptions block period lock without report permission',
+    () async {
+      final db = await helper.database;
+      final periodId = await createPeriod();
+      final receivables = await accountByCode('1201');
+      final revenue = await accountByCode('4101');
+      final receivableId = (receivables['id'] as num).toInt();
+      final revenueId = (revenue['id'] as num).toInt();
+      final tenantId = await db.insert('tenants', {
+        'name': 'مستأجر للمطابقة',
+        'account_id': receivableId,
+      });
+      await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2026-01-10',
+        'amount': 25.0,
+        'tenant_id': tenantId,
+        'party_name': 'مستأجر للمطابقة',
+        'description': 'قبض بلا قيد مرتبط',
+      });
+      final journalId = await db.insert('journal_entries', {
+        'entry_date': '2026-01-12',
+        'description': 'قيد ذمم بلا مستند فرعي',
+        'is_posted': 1,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': receivableId,
+        'debit': 100.0,
+        'credit': 0.0,
+      });
+      await db.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': revenueId,
+        'debit': 0.0,
+        'credit': 100.0,
+      });
+
+      PermissionRuntime.activate(
+        userId: 1,
+        role: 'Accountant',
+        permissionRows: const [
+          {
+            'screen_name': 'accounting_periods',
+            'can_view': 1,
+            'can_lock_period': 1,
+          },
+          {'screen_name': 'reports', 'can_view': 0},
+        ],
+      );
+      final readiness = await helper.getAccountingPeriodReadiness(periodId);
+      expect(readiness.report.blockingReconciliationCount, 1);
+      expect(readiness.report.manualReviewAcknowledgementCount, 1);
+      expect(readiness.report.hasBlockingIssues, isTrue);
+      expect(
+        readiness.report.internalReconciliation.rows.singleWhere(
+          (row) => row.source == InternalSubledgerSource.directJournal,
+        ).journalEntryId,
+        journalId,
+      );
+
+      PermissionRuntime.activate(
+        userId: 1,
+        role: 'SuperAdmin',
+        permissionRows: const [],
+      );
+      final eventsBeforeFailedLock = await helper.getAccountingPeriodEvents(
+        periodId,
+      );
+      await expectLater(
+        helper.lockAccountingPeriod(periodId),
+        throwsStateError,
+      );
+      expect((await helper.getAccountingPeriods()).single.status, 'open');
+      expect(
+        await helper.getAccountingPeriodEvents(periodId),
+        hasLength(eventsBeforeFailedLock.length),
+      );
+    },
+  );
+
+  test('legacy review items require an audited lock acknowledgement', () async {
+    final db = await helper.database;
+    final periodId = await createPeriod();
+    final receivableId = ((await accountByCode('1201'))['id'] as num).toInt();
+    final revenueId = ((await accountByCode('4101'))['id'] as num).toInt();
+    await db.insert('tenants', {
+      'name': 'مستأجر للقيد المباشر',
+      'account_id': receivableId,
+    });
+    final directJournalId = await db.insert('journal_entries', {
+      'entry_date': '2026-01-12',
+      'description': 'قيد مباشر يحتاج إقرارًا',
+      'is_posted': 1,
+    });
+    await db.insert('journal_lines', {
+      'journal_entry_id': directJournalId,
+      'account_id': receivableId,
+      'debit': 25.0,
+      'credit': 0.0,
+    });
+    await db.insert('journal_lines', {
+      'journal_entry_id': directJournalId,
+      'account_id': revenueId,
+      'debit': 0.0,
+      'credit': 25.0,
+    });
+    await db.insert('vouchers', {
+      'voucher_type': 'صرف مستحقات مالك',
+      'voucher_date': '2026-01-20',
+      'amount': 75.0,
+      'party_name': 'سند مالك قديم',
+      'description': 'مستند تاريخي غير مرتبط بسجل تسوية صريح',
+    });
+
+    final readiness = await helper.getAccountingPeriodReadiness(periodId);
+    expect(readiness.report.hasBlockingIssues, isFalse);
+    expect(readiness.report.legacyReviewCount, 1);
+    expect(readiness.report.manualReviewAcknowledgementCount, 2);
+    expect(readiness.report.requiresManualReviewAcknowledgement, isTrue);
+    await expectLater(helper.lockAccountingPeriod(periodId), throwsStateError);
+    expect((await helper.getAccountingPeriods()).single.status, 'open');
+
+    await helper.lockAccountingPeriod(
+      periodId,
+      reason: 'رُوجع السند التاريخي والقيد المباشر ولم يُفترض ربط غير مثبت',
+    );
+    expect((await helper.getAccountingPeriods()).single.status, 'locked');
+    final events = await helper.getAccountingPeriodEvents(periodId);
+    expect(events.last.action, 'locked');
+    expect(
+      events.last.reason,
+      'رُوجع السند التاريخي والقيد المباشر ولم يُفترض ربط غير مثبت',
+    );
+    expect(
+      events.last.readinessSummary,
+      contains('"internal_legacy_review_count":1'),
+    );
+    expect(
+      events.last.readinessSummary,
+      contains('"internal_manual_review_ack_count":2'),
+    );
+  });
 
   test('reopening needs a separate grant and a non-empty audited reason', () async {
     final db = await helper.database;

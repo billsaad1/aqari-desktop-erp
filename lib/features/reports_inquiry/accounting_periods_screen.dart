@@ -5,6 +5,7 @@ import '../../core/permission_policy.dart';
 import '../../database/database_helper.dart';
 import '../../models/accounting_period_model.dart';
 import '../../models/financial_close_readiness_report_model.dart';
+import '../../models/internal_subledger_reconciliation_report_model.dart';
 
 class AccountingPeriodsScreen extends StatefulWidget {
   const AccountingPeriodsScreen({super.key});
@@ -164,7 +165,7 @@ class _AccountingPeriodsScreenState extends State<AccountingPeriodsScreen> {
               FilledButton.icon(
                 onPressed: () {
                   Navigator.pop(dialogContext);
-                  _confirmAndLock(period);
+                  _confirmAndLock(period, readiness.report);
                 },
                 icon: const Icon(Icons.lock_outline),
                 label: const Text('تأكيد القفل'),
@@ -179,11 +180,18 @@ class _AccountingPeriodsScreenState extends State<AccountingPeriodsScreen> {
 
   Widget _readinessContent(FinancialCloseReadinessReport report) {
     final isReady = report.isReadyForManualReview;
-    final color = isReady ? Colors.green.shade700 : Colors.orange.shade800;
+    final color = !isReady
+        ? Colors.orange.shade800
+        : report.requiresManualReviewAcknowledgement
+        ? Colors.amber.shade900
+        : Colors.green.shade700;
     final issues = [
       ...report.unpostedEntries,
       ...report.unbalancedPostedEntries,
     ];
+    final reconciliationRows = report.internalReconciliation.rows
+        .where((row) => !row.isLedgerMatched)
+        .toList(growable: false);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -196,18 +204,23 @@ class _AccountingPeriodsScreenState extends State<AccountingPeriodsScreen> {
             borderRadius: BorderRadius.circular(10),
           ),
           child: Text(
-            isReady
-                ? 'اجتازت الفترة فحوص القيود الأساسية وتنتظر اعتماد القفل.'
-                : 'توجد استثناءات تمنع القفل؛ عالجها يدويًا ثم أعد الفحص.',
+            !isReady
+                ? 'توجد استثناءات محاسبية أو مطابقة داخلية تمنع القفل؛ عالجها يدويًا ثم أعد الفحص.'
+                : report.requiresManualReviewAcknowledgement
+                ? 'اجتازت الفحوص المانعة، لكن توجد حركات تحتاج قرار مراجعة يدويًا. يلزم تسجيل ملخص القرار عند القفل؛ لا يستنتج النظام روابط غير مثبتة.'
+                : 'اجتازت الفترة فحوص التوازن والمطابقة الداخلية الأساسية وتنتظر اعتماد القفل.',
             style: TextStyle(color: color, fontWeight: FontWeight.w600),
           ),
         ),
         const SizedBox(height: 10),
         Text('قيود غير مرحلة: ${report.unpostedEntries.length}'),
         Text('قيود مرحلة غير متوازنة: ${report.unbalancedPostedEntries.length}'),
+        Text('استثناءات المطابقة الداخلية المانعة: ${report.blockingReconciliationCount}'),
+        Text('استثناءات تتطلب إقرار مراجعة: ${report.manualReviewAcknowledgementCount}'),
+        Text('بنود تاريخية للمراجعة والإقرار: ${report.legacyReviewCount}'),
         const SizedBox(height: 8),
         const Text(
-          'هذا فحص للقيود غير المرحلة والقيود غير المتوازنة فقط. راجع أيضًا تقارير المطابقة الداخلية والتسويات قبل اعتماد الإقفال. لا ينشئ النظام قيد إقفال أرباح وخسائر.',
+          'يشمل الفحص اتساق المستندات الفرعية مع الأستاذ. لا ينشئ النظام قيود تصحيح أو قيد إقفال أرباح وخسائر، ولا يستنتج روابط تاريخية مفقودة.',
         ),
         if (issues.isNotEmpty) ...[
           const Divider(),
@@ -219,13 +232,41 @@ class _AccountingPeriodsScreenState extends State<AccountingPeriodsScreen> {
               subtitle: Text(
                 '${issue.entryDate} • ${issue.description.isEmpty ? 'بلا بيان' : issue.description}\nمدين ${_money(issue.debitMinor)} | دائن ${_money(issue.creditMinor)}',
               ),
+          ),
+        ],
+        if (reconciliationRows.isNotEmpty) ...[
+          const Divider(),
+          for (final row in reconciliationRows)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                '${row.source.label} — #${row.sourceId} • ${row.state.label}',
+              ),
+              subtitle: Text(
+                '${row.sourceDate} • ${row.partyName}\n${row.issueSummary}',
+              ),
+              trailing: Text(_money(row.amountMinor)),
             ),
         ],
       ],
     );
   }
 
-  Future<void> _confirmAndLock(AccountingPeriod period) async {
+  Future<void> _confirmAndLock(
+    AccountingPeriod period,
+    FinancialCloseReadinessReport report,
+  ) async {
+    var reason = '';
+    if (report.requiresManualReviewAcknowledgement) {
+      final reviewReason = await _askReason(
+        title: 'إقرار مراجعة الاستثناءات الداخلية',
+        label: 'ملخص المراجعة أو الاعتماد (إلزامي)',
+        requiredReason: true,
+      );
+      if (reviewReason == null || !mounted) return;
+      reason = reviewReason;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -247,7 +288,10 @@ class _AccountingPeriodsScreenState extends State<AccountingPeriodsScreen> {
     );
     if (confirmed != true || !mounted) return;
     await _performPeriodAction(
-      () => DatabaseHelper.instance.lockAccountingPeriod(period.id),
+      () => DatabaseHelper.instance.lockAccountingPeriod(
+        period.id,
+        reason: reason,
+      ),
       'قُفلت الفترة؛ لن تُرحّل قيود جديدة ضمن نطاقها.',
     );
   }
@@ -322,7 +366,7 @@ class _AccountingPeriodsScreenState extends State<AccountingPeriodsScreen> {
             },
             decoration: InputDecoration(
               labelText: label,
-              errorText: missingReason ? 'سبب إعادة الفتح مطلوب' : null,
+              errorText: missingReason ? 'هذا الحقل مطلوب' : null,
             ),
           ),
           actions: [
