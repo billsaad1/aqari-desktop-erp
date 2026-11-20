@@ -12,6 +12,7 @@ import 'package:app/core/lease_contract_terms.dart';
 import 'package:app/core/permission_policy.dart';
 import 'package:app/core/print_utils.dart';
 import 'package:app/core/property_unit_inquiry_pdf.dart';
+import 'package:app/core/sms_credential_store.dart';
 import 'package:app/database/database_helper.dart';
 import 'package:app/database/database_integrity_migrations.dart';
 import 'package:app/models/company_info_model.dart';
@@ -34,6 +35,7 @@ import 'package:image/image.dart' as img;
 import 'package:provider/provider.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'support/fake_sms_credential_store.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -42,8 +44,10 @@ void main() {
     'aqari_erp_flutter_test_',
   );
   final testDocuments = testDirectory.path;
+  final smsCredentialStore = FakeSmsCredentialStore();
 
   setUpAll(() async {
+    SmsCredentialStoreRegistry.overrideForTesting = smsCredentialStore;
     PermissionRuntime.activate(
       userId: 1,
       role: 'SuperAdmin',
@@ -60,6 +64,7 @@ void main() {
   });
 
   tearDownAll(() async {
+    SmsCredentialStoreRegistry.overrideForTesting = null;
     PermissionRuntime.clear();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pathProvider, null);
@@ -293,6 +298,7 @@ void main() {
       () async {
         final db = await DatabaseHelper.instance.database;
         final provider = SmsProvider();
+        smsCredentialStore.values.clear();
         await db.delete('sms_logs');
         await db.delete('sms_settings');
         await db.insert('sms_settings', {
@@ -323,9 +329,16 @@ void main() {
             'receipt_template': 'Receipt',
           });
           expect(provider.settings?.containsKey('api_key'), isFalse);
+          final editableSettings = await DatabaseHelper.instance
+              .getSmsSettingsForEditing();
+          expect(editableSettings?['api_key_configured'], isTrue);
+          expect(editableSettings?.containsKey('api_key'), isFalse);
+          expect(editableSettings?.containsKey('api_key_secret_id'), isFalse);
+          final storedRow = (await db.query('sms_settings')).single;
+          expect(storedRow['api_key'], isNull);
+          final credentialId = storedRow['api_key_secret_id'] as String;
           expect(
-            (await DatabaseHelper.instance
-                .getSmsSettingsForEditing())?['api_key'],
+            await smsCredentialStore.read(credentialId),
             'test-secret-token',
           );
 
@@ -356,11 +369,496 @@ void main() {
           provider.dispose();
           await db.delete('sms_logs');
           await db.delete('sms_settings');
+          smsCredentialStore.values.clear();
           PermissionRuntime.activate(
             userId: 1,
             role: 'SuperAdmin',
             permissionRows: const [],
           );
+        }
+      },
+    );
+
+    test('SMS key can be kept, rotated, and explicitly removed', () async {
+      final db = await DatabaseHelper.instance.database;
+      await db.delete('sms_settings');
+      smsCredentialStore.values.clear();
+      final baseSettings = <String, dynamic>{
+        'api_url': 'https://sms.example.test/send',
+        'sender_name': 'Aqari',
+        'reminder_template': 'Reminder',
+        'receipt_template': 'Receipt',
+      };
+
+      try {
+        await DatabaseHelper.instance.saveSmsSettings({
+          ...baseSettings,
+          'api_key': 'first-secret',
+        });
+        var row = (await db.query('sms_settings')).single;
+        final firstId = row['api_key_secret_id'] as String;
+        expect(row['api_key'], isNull);
+        expect(await smsCredentialStore.read(firstId), 'first-secret');
+        final editingSettings = await DatabaseHelper.instance
+            .getSmsSettingsForEditing();
+        expect(editingSettings?['api_key_configured'], isTrue);
+        expect(editingSettings?.containsKey('api_key'), isFalse);
+        expect(editingSettings?.containsKey('api_key_secret_id'), isFalse);
+
+        await DatabaseHelper.instance.saveSmsSettings({
+          ...baseSettings,
+          'sender_name': 'Aqari Kept',
+          'api_key': '',
+        });
+        row = (await db.query('sms_settings')).single;
+        expect(row['api_key_secret_id'], firstId);
+        expect(await smsCredentialStore.read(firstId), 'first-secret');
+
+        await DatabaseHelper.instance.saveSmsSettings({
+          ...baseSettings,
+          'api_key': 'replacement-secret',
+        });
+        row = (await db.query('sms_settings')).single;
+        final replacementId = row['api_key_secret_id'] as String;
+        expect(replacementId, isNot(firstId));
+        expect(await smsCredentialStore.read(firstId), isNull);
+        expect(
+          await smsCredentialStore.read(replacementId),
+          'replacement-secret',
+        );
+
+        await DatabaseHelper.instance.saveSmsSettings({
+          ...baseSettings,
+          'api_key': '',
+          'clear_api_key': true,
+        });
+        row = (await db.query('sms_settings')).single;
+        expect(row['api_key'], isNull);
+        expect(row['api_key_secret_id'], isNull);
+        expect(await smsCredentialStore.read(replacementId), isNull);
+        expect(
+          (await DatabaseHelper.instance
+              .getSmsSettingsForEditing())?['api_key_configured'],
+          isFalse,
+        );
+        expect(
+          (await DatabaseHelper.instance
+              .getSmsSettingsForSending())?['api_key'],
+          isNull,
+        );
+      } finally {
+        await db.delete('sms_settings');
+        smsCredentialStore.values.clear();
+      }
+    });
+
+    test(
+      'stale SMS editor cannot restore a credential rotated elsewhere',
+      () async {
+        final db = await DatabaseHelper.instance.database;
+        await db.delete('sms_settings');
+        smsCredentialStore.values.clear();
+        await db.insert('sms_settings', {
+          'api_url': 'https://sms.example.test/send',
+          'sender_name': 'Aqari',
+        });
+        const concurrentCredentialId = 'other-process-credential';
+        var concurrentRotationApplied = false;
+
+        try {
+          await DatabaseHelper.instance.saveSmsSettings({
+            'api_url': 'https://sms.example.test/send',
+            'sender_name': 'Aqari',
+            'reminder_template': 'Reminder',
+            'receipt_template': 'Receipt',
+            'api_key': 'original-secret',
+          });
+          final originalId =
+              (await db.query('sms_settings')).single['api_key_secret_id']
+                  as String;
+          smsCredentialStore.values[concurrentCredentialId] =
+              'rotated-by-other-process';
+          smsCredentialStore.afterRead = (credentialId) async {
+            if (credentialId != originalId || concurrentRotationApplied) return;
+            concurrentRotationApplied = true;
+            await db.update(
+              'sms_settings',
+              {'api_key_secret_id': concurrentCredentialId},
+              where: 'api_key_secret_id = ?',
+              whereArgs: [originalId],
+            );
+            await smsCredentialStore.delete(originalId);
+          };
+
+          await expectLater(
+            DatabaseHelper.instance.saveSmsSettings({
+              'api_url': 'https://sms.example.test/send',
+              'sender_name': 'Stale editor',
+              'reminder_template': 'Reminder',
+              'receipt_template': 'Receipt',
+              'api_key': '',
+            }),
+            throwsA(isA<StateError>()),
+          );
+          smsCredentialStore.afterRead = null;
+          expect(concurrentRotationApplied, isTrue);
+          final row = (await db.query('sms_settings')).single;
+          expect(row['api_key_secret_id'], concurrentCredentialId);
+          expect(row['sender_name'], 'Aqari');
+          expect(
+            (await DatabaseHelper.instance
+                .getSmsSettingsForSending())?['api_key'],
+            'rotated-by-other-process',
+          );
+        } finally {
+          smsCredentialStore.afterRead = null;
+          await db.delete('sms_settings');
+          smsCredentialStore.values.clear();
+        }
+      },
+    );
+
+    test('legacy SMS key is retained if secure migration fails', () async {
+      final db = await DatabaseHelper.instance.database;
+      await db.delete('sms_settings');
+      smsCredentialStore.values.clear();
+      final rowId = await db.insert('sms_settings', {
+        'api_url': 'https://sms.example.test/send',
+        'api_key': 'legacy-secret',
+        'sender_name': 'Aqari',
+      });
+
+      try {
+        smsCredentialStore.failWrites = true;
+        final unavailableSettings = await DatabaseHelper.instance
+            .getSmsSettingsForEditing();
+        expect(unavailableSettings?['api_key_configured'], isTrue);
+        expect(unavailableSettings?['api_key_storage_unavailable'], isTrue);
+        expect(unavailableSettings?.containsKey('api_key'), isFalse);
+        var row = (await db.query(
+          'sms_settings',
+          where: 'id = ?',
+          whereArgs: [rowId],
+        )).single;
+        expect(row['api_key'], 'legacy-secret');
+        expect(row['api_key_secret_id'], isNull);
+
+        smsCredentialStore.failWrites = false;
+        smsCredentialStore.failReads = true;
+        final verificationFailure = await DatabaseHelper.instance
+            .getSmsSettingsForEditing();
+        expect(verificationFailure?['api_key_storage_unavailable'], isTrue);
+        row = (await db.query(
+          'sms_settings',
+          where: 'id = ?',
+          whereArgs: [rowId],
+        )).single;
+        expect(row['api_key'], 'legacy-secret');
+        expect(row['api_key_secret_id'], isNull);
+        expect(smsCredentialStore.values, isEmpty);
+
+        smsCredentialStore.failReads = false;
+        smsCredentialStore.failWrites = false;
+        final safeSettings = await DatabaseHelper.instance
+            .getSmsSettingsForEditing();
+        row = (await db.query(
+          'sms_settings',
+          where: 'id = ?',
+          whereArgs: [rowId],
+        )).single;
+        expect(safeSettings?['api_key_configured'], isTrue);
+        expect(safeSettings?.containsKey('api_key'), isFalse);
+        expect(row['api_key'], isNull);
+        expect(
+          await smsCredentialStore.read(row['api_key_secret_id'] as String),
+          'legacy-secret',
+        );
+
+        final originalCredentialId = row['api_key_secret_id'] as String;
+        smsCredentialStore.failReads = true;
+        final unreadableSettings = await DatabaseHelper.instance
+            .getSmsSettingsForEditing();
+        expect(unreadableSettings?['api_key_storage_unavailable'], isTrue);
+        expect(unreadableSettings?.containsKey('api_key'), isFalse);
+
+        smsCredentialStore.failReads = false;
+        await DatabaseHelper.instance.saveSmsSettings({
+          'api_url': 'https://sms.example.test/send',
+          'sender_name': 'Aqari',
+          'reminder_template': 'Reminder',
+          'receipt_template': 'Receipt',
+          'api_key': 'replacement-after-vault-recovery',
+        });
+        row = (await db.query(
+          'sms_settings',
+          where: 'id = ?',
+          whereArgs: [rowId],
+        )).single;
+        final replacementId = row['api_key_secret_id'] as String;
+        expect(replacementId, isNot(originalCredentialId));
+        expect(await smsCredentialStore.read(originalCredentialId), isNull);
+        expect(
+          await smsCredentialStore.read(replacementId),
+          'replacement-after-vault-recovery',
+        );
+      } finally {
+        smsCredentialStore.failWrites = false;
+        smsCredentialStore.failReads = false;
+        await db.delete('sms_settings', where: 'id = ?', whereArgs: [rowId]);
+        smsCredentialStore.values.clear();
+      }
+    });
+
+    test(
+      'failed vault verification compensates a newly written SMS key',
+      () async {
+        final db = await DatabaseHelper.instance.database;
+        await db.delete('sms_settings');
+        smsCredentialStore.values.clear();
+        await db.insert('sms_settings', {
+          'api_url': 'https://sms.example.test/send',
+          'sender_name': 'Aqari',
+        });
+
+        try {
+          smsCredentialStore.failReads = true;
+          await expectLater(
+            DatabaseHelper.instance.saveSmsSettings({
+              'api_url': 'https://sms.example.test/send',
+              'sender_name': 'Aqari',
+              'reminder_template': 'Reminder',
+              'receipt_template': 'Receipt',
+              'api_key': 'unverified-secret',
+            }),
+            throwsA(isA<StateError>()),
+          );
+          expect(smsCredentialStore.values, isEmpty);
+          final row = (await db.query('sms_settings')).single;
+          expect(row['api_key'], isNull);
+          expect(row['api_key_secret_id'], isNull);
+        } finally {
+          smsCredentialStore.failReads = false;
+          await db.delete('sms_settings');
+          smsCredentialStore.values.clear();
+        }
+      },
+    );
+
+    test('failed SQLite update compensates a newly staged SMS key', () async {
+      final db = await DatabaseHelper.instance.database;
+      await db.delete('sms_settings');
+      smsCredentialStore.values.clear();
+      await db.insert('sms_settings', {
+        'api_url': 'https://sms.example.test/send',
+        'sender_name': 'Aqari',
+      });
+      await db.execute('''
+        CREATE TRIGGER test_reject_sms_settings_update
+        BEFORE UPDATE ON sms_settings
+        BEGIN
+          SELECT RAISE(ABORT, 'simulated settings failure');
+        END
+      ''');
+
+      try {
+        await expectLater(
+          DatabaseHelper.instance.saveSmsSettings({
+            'api_url': 'https://sms.example.test/send',
+            'sender_name': 'Aqari',
+            'reminder_template': 'Reminder',
+            'receipt_template': 'Receipt',
+            'api_key': 'staged-secret',
+          }),
+          throwsA(anything),
+        );
+        expect(smsCredentialStore.values, isEmpty);
+        final row = (await db.query('sms_settings')).single;
+        expect(row['api_key'], isNull);
+        expect(row['api_key_secret_id'], isNull);
+      } finally {
+        await db.execute('DROP TRIGGER test_reject_sms_settings_update');
+        await db.delete('sms_settings');
+        smsCredentialStore.values.clear();
+      }
+    });
+
+    test('restores and upgrades a v27 SMS schema to v28', () async {
+      final sourcePath = '$testDocuments/aqari-v27-sms-schema.db';
+      await DatabaseHelper.instance.backupToFile(sourcePath);
+      final legacy = await databaseFactory.openDatabase(
+        sourcePath,
+        options: OpenDatabaseOptions(readOnly: false),
+      );
+      await legacy.execute(
+        'ALTER TABLE sms_settings DROP COLUMN api_key_secret_id',
+      );
+      await legacy.execute('PRAGMA user_version = 27');
+      await legacy.close();
+
+      String? rollbackPath;
+      try {
+        rollbackPath = await DatabaseHelper.instance.restoreFromFile(
+          sourcePath,
+        );
+        final upgraded = await DatabaseHelper.instance.database;
+        final version = await upgraded.rawQuery('PRAGMA user_version');
+        expect((version.single.values.single as num).toInt(), 28);
+        final columns = await upgraded.rawQuery(
+          'PRAGMA table_info(sms_settings)',
+        );
+        expect(
+          columns.any((column) => column['name'] == 'api_key_secret_id'),
+          isTrue,
+        );
+      } finally {
+        final source = File(sourcePath);
+        if (await source.exists()) await source.delete();
+        if (rollbackPath != null) {
+          final rollback = File(rollbackPath);
+          if (await rollback.exists()) await rollback.delete();
+        }
+      }
+    });
+
+    test(
+      'restore rollback preserves prior SMS credential and deletes staged one',
+      () async {
+        final db = await DatabaseHelper.instance.database;
+        await db.delete('sms_settings');
+        smsCredentialStore.values.clear();
+        final sourcePath = '$testDocuments/aqari-sms-restore-failure.db';
+        await db.insert('sms_settings', {
+          'api_url': 'https://sms.example.test/live',
+          'sender_name': 'Aqari',
+        });
+        await DatabaseHelper.instance.saveSmsSettings({
+          'api_url': 'https://sms.example.test/live',
+          'sender_name': 'Aqari',
+          'reminder_template': 'Reminder',
+          'receipt_template': 'Receipt',
+          'api_key': 'live-secret',
+        });
+        var liveRow = (await db.query('sms_settings')).single;
+        final liveCredentialId = liveRow['api_key_secret_id'] as String;
+        await DatabaseHelper.instance.backupToFile(sourcePath);
+        final sourceDb = await databaseFactory.openDatabase(
+          sourcePath,
+          options: OpenDatabaseOptions(readOnly: false),
+        );
+        await sourceDb.update('sms_settings', {
+          'api_key': 'restored-legacy-secret',
+        });
+        await sourceDb.close();
+
+        String? rollbackPath;
+        DatabaseHelper.restorePostReplacementHookForTesting = () async {
+          final livePath = await DatabaseHelper.instance.getDbPath();
+          final rollbackDirectory = Directory(File(livePath).parent.path);
+          final rollbackFiles =
+              rollbackDirectory
+                  .listSync()
+                  .whereType<File>()
+                  .where(
+                    (file) => file.path
+                        .split(Platform.pathSeparator)
+                        .last
+                        .startsWith('aqari_pre_restore_'),
+                  )
+                  .toList()
+                ..sort((left, right) => left.path.compareTo(right.path));
+          final rollbackFile = rollbackFiles.last;
+          rollbackPath = rollbackFile.path;
+          final rollbackDb = await databaseFactory.openDatabase(
+            rollbackFile.path,
+            options: OpenDatabaseOptions(readOnly: true),
+          );
+          try {
+            final rollbackSettings = (await rollbackDb.query(
+              'sms_settings',
+            )).single;
+            expect(rollbackSettings['api_key'], isNull);
+            expect(rollbackSettings['api_key_secret_id'], isNull);
+          } finally {
+            await rollbackDb.close();
+          }
+          throw StateError('injected failure after replacement');
+        };
+        try {
+          await expectLater(
+            DatabaseHelper.instance.restoreFromFile(sourcePath),
+            throwsA(isA<StateError>()),
+          );
+          final restoredDb = await DatabaseHelper.instance.database;
+          liveRow = (await restoredDb.query('sms_settings')).single;
+          expect(liveRow['api_key'], isNull);
+          expect(liveRow['api_key_secret_id'], liveCredentialId);
+          expect(smsCredentialStore.values, {liveCredentialId: 'live-secret'});
+          expect(
+            (await DatabaseHelper.instance
+                .getSmsSettingsForSending())?['api_key'],
+            'live-secret',
+          );
+        } finally {
+          DatabaseHelper.restorePostReplacementHookForTesting = null;
+          final source = File(sourcePath);
+          if (await source.exists()) await source.delete();
+          if (rollbackPath != null) {
+            final rollback = File(rollbackPath!);
+            if (await rollback.exists()) await rollback.delete();
+          }
+          smsCredentialStore.values.clear();
+          final restoredDb = await DatabaseHelper.instance.database;
+          await restoredDb.delete('sms_settings');
+        }
+      },
+    );
+
+    test(
+      'successful restore requires SMS secret to be entered again',
+      () async {
+        final db = await DatabaseHelper.instance.database;
+        await db.delete('sms_settings');
+        smsCredentialStore.values.clear();
+        final sourcePath = '$testDocuments/aqari-sms-restore-clean.db';
+        await db.insert('sms_settings', {
+          'api_url': 'https://sms.example.test/source',
+          'sender_name': 'Aqari',
+        });
+        await DatabaseHelper.instance.backupToFile(sourcePath);
+        await DatabaseHelper.instance.saveSmsSettings({
+          'api_url': 'https://sms.example.test/live',
+          'sender_name': 'Aqari',
+          'reminder_template': 'Reminder',
+          'receipt_template': 'Receipt',
+          'api_key': 'old-live-secret',
+        });
+        final oldId =
+            (await db.query('sms_settings')).single['api_key_secret_id']
+                as String;
+
+        try {
+          final actualRollback = await DatabaseHelper.instance.restoreFromFile(
+            sourcePath,
+          );
+          final restoredDb = await DatabaseHelper.instance.database;
+          final restored = (await restoredDb.query('sms_settings')).single;
+          expect(restored['api_key'], isNull);
+          expect(restored['api_key_secret_id'], isNull);
+          expect(await smsCredentialStore.read(oldId), isNull);
+          expect(
+            (await DatabaseHelper.instance
+                .getSmsSettingsForEditing())?['api_key_configured'],
+            isFalse,
+          );
+          final generatedRollback = File(actualRollback);
+          if (await generatedRollback.exists())
+            await generatedRollback.delete();
+        } finally {
+          final source = File(sourcePath);
+          if (await source.exists()) await source.delete();
+          smsCredentialStore.values.clear();
+          final restoredDb = await DatabaseHelper.instance.database;
+          await restoredDb.delete('sms_settings');
         }
       },
     );
@@ -1574,6 +2072,7 @@ void main() {
       final backupPath = '$testDocuments/aqari-test-backup.db';
       final secretId = await db.insert('sms_settings', {
         'api_key': 'secret-test-token-must-not-be-backed-up',
+        'api_key_secret_id': 'opaque-vault-reference-must-not-be-backed-up',
       });
       try {
         final dashboardSettings = await DatabaseHelper.instance
@@ -1583,6 +2082,14 @@ void main() {
         final backup = File(backupPath);
         expect(await backup.exists(), isTrue);
         expect(await backup.length(), greaterThan(0));
+        final backupText = latin1.decode(
+          await backup.readAsBytes(),
+          allowInvalid: true,
+        );
+        expect(
+          backupText,
+          isNot(contains('secret-test-token-must-not-be-backed-up')),
+        );
         final backupDb = await databaseFactory.openDatabase(
           backupPath,
           options: OpenDatabaseOptions(readOnly: true),
@@ -1590,22 +2097,29 @@ void main() {
         try {
           final backedUpSmsSettings = await backupDb.query(
             'sms_settings',
-            columns: ['api_key'],
+            columns: ['api_key', 'api_key_secret_id'],
           );
           expect(
-            backedUpSmsSettings.every((row) => row['api_key'] == null),
+            backedUpSmsSettings.every(
+              (row) =>
+                  row['api_key'] == null && row['api_key_secret_id'] == null,
+            ),
             isTrue,
           );
         } finally {
           await backupDb.close();
         }
+        final liveSmsSettings = (await db.query(
+          'sms_settings',
+          columns: ['api_key', 'api_key_secret_id'],
+          where: 'id = ?',
+          whereArgs: [secretId],
+        )).single;
+        expect(liveSmsSettings['api_key'], isNull);
         expect(
-          (await db.query(
-            'sms_settings',
-            columns: ['api_key'],
-            where: 'id = ?',
-            whereArgs: [secretId],
-          )).single['api_key'],
+          await smsCredentialStore.read(
+            liveSmsSettings['api_key_secret_id'] as String,
+          ),
           'secret-test-token-must-not-be-backed-up',
         );
         await backup.delete();
@@ -3611,10 +4125,43 @@ void main() {
   test(
     'factory reset creates a verified rollback copy before reseeding',
     () async {
+      final helper = DatabaseHelper.instance;
+      final liveDb = await helper.database;
+      await liveDb.delete('sms_settings');
+      smsCredentialStore.values.clear();
+      await liveDb.insert('sms_settings', {
+        'api_url': 'https://sms.example.test/reset',
+        'sender_name': 'Aqari',
+      });
+      await helper.saveSmsSettings({
+        'api_url': 'https://sms.example.test/reset',
+        'sender_name': 'Aqari',
+        'reminder_template': 'Reminder',
+        'receipt_template': 'Receipt',
+        'api_key': 'reset-secret',
+      });
+      final oldCredentialId =
+          (await liveDb.query('sms_settings')).single['api_key_secret_id']
+              as String;
+
       final rollbackPath = await DatabaseHelper.instance.factoryReset();
       final rollback = File(rollbackPath);
       expect(await rollback.exists(), isTrue);
       expect(await rollback.length(), greaterThan(100));
+      final rollbackDb = await databaseFactory.openDatabase(
+        rollbackPath,
+        options: OpenDatabaseOptions(readOnly: true),
+      );
+      try {
+        final rollbackSettings = (await rollbackDb.query(
+          'sms_settings',
+        )).single;
+        expect(rollbackSettings['api_key'], isNull);
+        expect(rollbackSettings['api_key_secret_id'], isNull);
+      } finally {
+        await rollbackDb.close();
+      }
+      expect(await smsCredentialStore.read(oldCredentialId), isNull);
 
       final company = await DatabaseHelper.instance.getCompanyInfo();
       expect(company?['name_ar'], isNotEmpty);
@@ -3628,6 +4175,7 @@ void main() {
         'ok',
       );
       await rollback.delete();
+      smsCredentialStore.values.clear();
     },
   );
 

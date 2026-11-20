@@ -50,6 +50,8 @@ class SmsProvider with ChangeNotifier {
     if (settings == null) return null;
     final safeSettings = Map<String, dynamic>.from(settings);
     safeSettings.remove('api_key');
+    safeSettings.remove('api_key_secret_id');
+    safeSettings.remove('clear_api_key');
     return safeSettings;
   }
 

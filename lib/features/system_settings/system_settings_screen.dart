@@ -939,7 +939,10 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
       final messenger = ScaffoldMessenger.of(context);
       messenger.showSnackBar(
         SnackBar(
-          content: Text('تمت الاستعادة. نسخة الرجوع محفوظة في: $rollbackPath'),
+          content: Text(
+            'تمت الاستعادة. أدخل مفتاح API للرسائل من جديد إذا لزم. '
+            'نسخة الرجوع محفوظة في: $rollbackPath',
+          ),
           duration: const Duration(seconds: 10),
         ),
       );
@@ -1049,7 +1052,10 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('اكتملت التهيئة. نسخة الرجوع: $rollbackPath'),
+            content: Text(
+              'اكتملت التهيئة؛ أعد إدخال مفتاح API للرسائل عند الحاجة. '
+              'نسخة الرجوع: $rollbackPath',
+            ),
             duration: const Duration(seconds: 10),
           ),
         );
