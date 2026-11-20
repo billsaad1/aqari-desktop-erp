@@ -8,6 +8,7 @@ import '../../core/pdf_preview_dialog.dart';
 import '../../core/print_utils.dart';
 import '../../database/database_helper.dart';
 import '../../models/financial_close_readiness_report_model.dart';
+import '../../models/internal_subledger_reconciliation_report_model.dart';
 import '../../providers/reports_provider.dart';
 
 class FinancialCloseReadinessScreen extends StatefulWidget {
@@ -187,7 +188,7 @@ class _FinancialCloseReadinessScreenState
                       ),
                       const SizedBox(height: 5),
                       const Text(
-                        'فحص قراءة فقط للمسودات والقيود المرحلة غير المتوازنة ضمن الفترة. التقرير لا يرحّل قيودًا ولا يقفل الفترة؛ الاعتماد والإقفال يبقيان يدويين.',
+                        'فحص قراءة فقط للمسودات والقيود غير المتوازنة واتساق السجلات الفرعية مع الأستاذ ضمن الفترة. لا ينشئ التقرير قيود تصحيح أو يقفل الفترة؛ الاعتماد والإقفال يبقيان يدويين.',
                       ),
                       const SizedBox(height: 14),
                       Wrap(
@@ -281,15 +282,20 @@ class _FinancialCloseReadinessScreenState
   );
 
   Widget _statusBanner(FinancialCloseReadinessReport report) {
-    final color = report.isReadyForManualReview
-        ? Colors.green.shade700
-        : Colors.orange.shade800;
-    final icon = report.isReadyForManualReview
-        ? Icons.fact_check_outlined
-        : Icons.warning_amber_rounded;
-    final text = report.isReadyForManualReview
-        ? 'اجتازت الفترة فحوص التوازن الأساسية؛ لا يعني ذلك تنفيذ الإقفال أو اعتماد القوائم.'
-        : 'توجد قيود تحتاج مراجعة يدوية قبل أي إقفال.';
+    final color = !report.isReadyForManualReview
+        ? Colors.orange.shade800
+        : report.requiresManualReviewAcknowledgement
+        ? Colors.amber.shade900
+        : Colors.green.shade700;
+    final icon = !report.isReadyForManualReview ||
+            report.requiresManualReviewAcknowledgement
+        ? Icons.warning_amber_rounded
+        : Icons.fact_check_outlined;
+    final text = !report.isReadyForManualReview
+        ? 'توجد قيود أو استثناءات مطابقة داخلية تحتاج معالجة يدوية قبل القفل.'
+        : report.requiresManualReviewAcknowledgement
+        ? 'لا توجد موانع تشغيلية، لكن توجد حركات تتطلب قرار مراجعة يدويًا وتوثيقًا عند القفل.'
+        : 'اجتازت الفترة فحوص التوازن والمطابقة الداخلية الأساسية؛ لا يعني ذلك اعتماد القوائم أو تنفيذ الإقفال.';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
@@ -327,6 +333,18 @@ class _FinancialCloseReadinessScreenState
             '${report.unbalancedPostedEntries.length}',
           ),
           _summaryValue(
+            'استثناءات مطابقة داخلية مانعة',
+            '${report.blockingReconciliationCount}',
+          ),
+          _summaryValue(
+            'استثناءات تتطلب إقرار مراجعة',
+            '${report.manualReviewAcknowledgementCount}',
+          ),
+          _summaryValue(
+            'بنود تاريخية للمراجعة',
+            '${report.legacyReviewCount}',
+          ),
+          _summaryValue(
             'مدين المسودات',
             '${_amount(report.unpostedDebitMinor)} ${PrintUtils.currencyInArabic(report.currency)}',
           ),
@@ -352,60 +370,134 @@ class _FinancialCloseReadinessScreenState
   );
 
   Widget _issuesTable(FinancialCloseReadinessReport report) {
-    final issues = [
+    final journalIssues = [
       ...report.unpostedEntries,
       ...report.unbalancedPostedEntries,
     ];
-    if (issues.isEmpty) {
+    final reconciliationRows = report.internalReconciliation.rows
+        .where((row) => !row.isLedgerMatched)
+        .toList(growable: false);
+    if (journalIssues.isEmpty && reconciliationRows.isEmpty) {
       return const Center(
-        child: Text('لا توجد مسودات أو قيود مرحلة غير متوازنة ضمن الفترة.'),
+        child: Text('لا توجد مسودات أو فروق مطابقة داخلية ظاهرة ضمن الفترة.'),
       );
     }
-    return Card(
-      elevation: 1,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: SingleChildScrollView(
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: DataTable(
-            headingRowColor: WidgetStatePropertyAll(
-              Theme.of(context).colorScheme.surfaceContainerHighest,
+    return ListView(
+      children: [
+        if (journalIssues.isNotEmpty)
+          Card(
+            elevation: 1,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
             ),
-            columns: const [
-              DataColumn(label: Text('حالة المراجعة')),
-              DataColumn(label: Text('رقم القيد')),
-              DataColumn(label: Text('التاريخ')),
-              DataColumn(label: Text('البيان')),
-              DataColumn(label: Text('مدين')),
-              DataColumn(label: Text('دائن')),
-              DataColumn(label: Text('الفرق')),
-            ],
-            rows: issues
-                .map(
-                  (issue) => DataRow(
-                    cells: [
-                      DataCell(Text(issue.statusLabel)),
-                      DataCell(Text('${issue.journalEntryId}')),
-                      DataCell(Text(issue.entryDate)),
-                      DataCell(
-                        SizedBox(
-                          width: 260,
-                          child: Text(
-                            issue.description.isEmpty ? '—' : issue.description,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ),
-                      DataCell(Text(_amount(issue.debitMinor))),
-                      DataCell(Text(_amount(issue.creditMinor))),
-                      DataCell(Text(_amount(issue.differenceMinor))),
-                    ],
+            child: SingleChildScrollView(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: DataTable(
+                  headingRowColor: WidgetStatePropertyAll(
+                    Theme.of(context).colorScheme.surfaceContainerHighest,
                   ),
-                )
-                .toList(growable: false),
+                  columns: const [
+                    DataColumn(label: Text('حالة المراجعة')),
+                    DataColumn(label: Text('رقم القيد')),
+                    DataColumn(label: Text('التاريخ')),
+                    DataColumn(label: Text('البيان')),
+                    DataColumn(label: Text('مدين')),
+                    DataColumn(label: Text('دائن')),
+                    DataColumn(label: Text('الفرق')),
+                  ],
+                  rows: journalIssues
+                      .map(
+                        (issue) => DataRow(
+                          cells: [
+                            DataCell(Text(issue.statusLabel)),
+                            DataCell(Text('${issue.journalEntryId}')),
+                            DataCell(Text(issue.entryDate)),
+                            DataCell(
+                              SizedBox(
+                                width: 260,
+                                child: Text(
+                                  issue.description.isEmpty
+                                      ? '—'
+                                      : issue.description,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                            DataCell(Text(_amount(issue.debitMinor))),
+                            DataCell(Text(_amount(issue.creditMinor))),
+                            DataCell(Text(_amount(issue.differenceMinor))),
+                          ],
+                        ),
+                      )
+                      .toList(growable: false),
+                ),
+              ),
+            ),
           ),
-        ),
-      ),
+        if (reconciliationRows.isNotEmpty)
+          Card(
+            elevation: 1,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                headingRowColor: WidgetStatePropertyAll(
+                  Theme.of(context).colorScheme.surfaceContainerHighest,
+                ),
+                columns: const [
+                  DataColumn(label: Text('حالة المطابقة')),
+                  DataColumn(label: Text('نوع المصدر')),
+                  DataColumn(label: Text('رقم المصدر')),
+                  DataColumn(label: Text('التاريخ')),
+                  DataColumn(label: Text('الطرف / البيان')),
+                  DataColumn(label: Text('المبلغ')),
+                  DataColumn(label: Text('سبب المراجعة')),
+                ],
+                rows: reconciliationRows
+                    .map(
+                      (row) => DataRow(
+                        cells: [
+                          DataCell(Text(row.state.label)),
+                          DataCell(Text(row.source.label)),
+                          DataCell(Text('${row.sourceId}')),
+                          DataCell(Text(row.sourceDate)),
+                          DataCell(
+                            SizedBox(
+                              width: 190,
+                              child: Text(
+                                row.partyName,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                          DataCell(Text(_amount(row.amountMinor))),
+                          DataCell(
+                            SizedBox(
+                              width: 280,
+                              child: Text(
+                                row.issueSummary,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            ),
+          ),
+        if (report.requiresManualReviewAcknowledgement)
+          const Padding(
+            padding: EdgeInsets.all(12),
+            child: Text(
+              'لا يُخمن النظام روابط المستندات التاريخية أو هوية الطرف في القيود المباشرة. راجعها يدويًا وسجّل ملخص القرار عند قفل الفترة.',
+            ),
+          ),
+      ],
     );
   }
 

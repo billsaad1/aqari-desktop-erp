@@ -73,6 +73,24 @@ class InternalSubledgerReconciliationRow {
   final String? allocationStatus;
 
   bool get isLedgerMatched => state == InternalSubledgerRowState.matched;
+  bool get hasReviewablePostedJournal =>
+      journalEntryId != null &&
+      journalPosted &&
+      journalDate != null &&
+      journalDate!.isNotEmpty &&
+      journalDebitMinor > 0 &&
+      journalDebitMinor == journalCreditMinor;
+
+  bool get requiresManualAcknowledgement {
+    if (state == InternalSubledgerRowState.legacyReview) {
+      return journalEntryId == null || hasReviewablePostedJournal;
+    }
+    if (state != InternalSubledgerRowState.needsReview ||
+        !hasReviewablePostedJournal) return false;
+    return source == InternalSubledgerSource.directJournal ||
+        source == InternalSubledgerSource.generalVoucher;
+  }
+
   int get unallocatedMinor => allocatedMinor == null
       ? 0
       : (amountMinor - allocatedMinor!).clamp(0, amountMinor).toInt();

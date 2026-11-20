@@ -1,3 +1,5 @@
+import 'internal_subledger_reconciliation_report_model.dart';
+
 class FinancialCloseEntryIssue {
   const FinancialCloseEntryIssue({
     required this.journalEntryId,
@@ -46,17 +48,43 @@ class FinancialCloseReadinessReport {
     required this.currency,
     required List<FinancialCloseEntryIssue> unpostedEntries,
     required List<FinancialCloseEntryIssue> unbalancedPostedEntries,
+    InternalSubledgerReconciliationReport? internalReconciliation,
   }) : unpostedEntries = List.unmodifiable(unpostedEntries),
-       unbalancedPostedEntries = List.unmodifiable(unbalancedPostedEntries);
+       unbalancedPostedEntries = List.unmodifiable(unbalancedPostedEntries),
+       internalReconciliation =
+           internalReconciliation ??
+           InternalSubledgerReconciliationReport(
+             startDate: startDate,
+             endDate: endDate,
+             currency: currency,
+             rows: const <InternalSubledgerReconciliationRow>[],
+           );
 
   final String startDate;
   final String endDate;
   final String currency;
   final List<FinancialCloseEntryIssue> unpostedEntries;
   final List<FinancialCloseEntryIssue> unbalancedPostedEntries;
+  final InternalSubledgerReconciliationReport internalReconciliation;
 
+  int get blockingReconciliationCount => internalReconciliation.rows
+      .where(
+        (row) =>
+            !row.isLedgerMatched &&
+            !row.requiresManualAcknowledgement,
+      )
+      .length;
+  int get legacyReviewCount => internalReconciliation.legacyReviewCount;
+  int get internalReviewCount => internalReconciliation.reviewCount;
+  int get manualReviewAcknowledgementCount => internalReconciliation.rows
+      .where((row) => row.requiresManualAcknowledgement)
+      .length;
+  bool get requiresManualReviewAcknowledgement =>
+      manualReviewAcknowledgementCount > 0;
   bool get hasBlockingIssues =>
-      unpostedEntries.isNotEmpty || unbalancedPostedEntries.isNotEmpty;
+      unpostedEntries.isNotEmpty ||
+      unbalancedPostedEntries.isNotEmpty ||
+      blockingReconciliationCount > 0;
   bool get isReadyForManualReview => !hasBlockingIssues;
   int get unpostedDebitMinor =>
       unpostedEntries.fold(0, (sum, row) => sum + row.debitMinor);

@@ -24,8 +24,10 @@ import '../models/property_statement_report_model.dart';
 import '../models/tenant_collection_report_model.dart';
 import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
+import '../models/accounting_period_model.dart';
 import 'database_integrity_migrations.dart';
 import 'credit_note_schema.dart';
+import 'accounting_period_schema.dart';
 import 'internal_subledger_reconciliation_service.dart';
 import 'owner_settlement_schema.dart';
 import 'property_sale_schema.dart';
@@ -33,7 +35,7 @@ import 'property_sale_schema.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 30;
+  static const int _schemaVersion = 31;
   @visibleForTesting
   static Future<void> Function()? restorePostReplacementHookForTesting;
 
@@ -489,6 +491,27 @@ class DatabaseHelper {
         'can_print',
         'can_post',
         'can_review_approve',
+        'can_lock_period',
+        'can_close_period',
+        'can_reopen_period',
+      ],
+      'accounting_periods': [
+        'id',
+        'start_date',
+        'end_date',
+        'status',
+        'created_at',
+        'created_by_user_id',
+      ],
+      'accounting_period_events': [
+        'id',
+        'period_id',
+        'action',
+        'actor_user_id',
+        'actor_name',
+        'reason',
+        'readiness_summary',
+        'created_at',
       ],
       'audit_logs': [
         'id',
@@ -907,6 +930,22 @@ class DatabaseHelper {
       'owner_settlement_journal_lines_no_delete',
       'audit_logs_no_update',
       'audit_logs_no_delete',
+      'accounting_periods_initially_open',
+      'accounting_periods_no_overlap_insert',
+      'accounting_periods_no_overlap_update',
+      'accounting_periods_identity_immutable',
+      'accounting_periods_valid_transition',
+      'accounting_periods_transition_audited',
+      'accounting_periods_no_delete',
+      'accounting_period_events_state_valid',
+      'accounting_period_events_no_update',
+      'accounting_period_events_no_delete',
+      'accounting_period_journal_insert_guard',
+      'accounting_period_journal_update_guard',
+      'accounting_period_journal_delete_guard',
+      'accounting_period_lines_insert_guard',
+      'accounting_period_lines_update_guard',
+      'accounting_period_lines_delete_guard',
     ];
     final missingTriggers = requiredTriggers
         .where((trigger) => !triggers.contains(trigger))
@@ -1007,6 +1046,62 @@ class DatabaseHelper {
         'تعريف حواجز سداد المالك في النسخة غير مطابق أو معطل: ${invalidOwnerTriggerDefinitions.join('، ')}',
       );
     }
+    const requiredAccountingPeriodTriggerFragments =
+        <String, List<String>>{
+          'accounting_periods_transition_audited': [
+            'before update of status on accounting_periods',
+            'accounting_period_events',
+            'raise(abort',
+          ],
+          'accounting_period_events_no_update': [
+            'before update on accounting_period_events',
+            'raise(abort',
+          ],
+          'accounting_period_journal_insert_guard': [
+            'before insert on journal_entries',
+            'date(substr(new.entry_date, 1, 10))',
+            'p.status in (\'locked\', \'closed\')',
+            'raise(abort',
+          ],
+          'accounting_period_journal_update_guard': [
+            'before update on journal_entries',
+            'old.entry_date',
+            'new.entry_date',
+            'raise(abort',
+          ],
+          'accounting_period_journal_delete_guard': [
+            'before delete on journal_entries',
+            'old.entry_date',
+            'raise(abort',
+          ],
+          'accounting_period_lines_insert_guard': [
+            'before insert on journal_lines',
+            'join accounting_periods p',
+            'raise(abort',
+          ],
+          'accounting_period_lines_update_guard': [
+            'before update on journal_lines',
+            'old.journal_entry_id, new.journal_entry_id',
+            'raise(abort',
+          ],
+          'accounting_period_lines_delete_guard': [
+            'before delete on journal_lines',
+            'old.journal_entry_id',
+            'raise(abort',
+          ],
+        };
+    final invalidAccountingPeriodTriggerDefinitions = <String>[];
+    for (final entry in requiredAccountingPeriodTriggerFragments.entries) {
+      final definition = triggerSqlByName[entry.key] ?? '';
+      if (entry.value.any((fragment) => !definition.contains(fragment))) {
+        invalidAccountingPeriodTriggerDefinitions.add(entry.key);
+      }
+    }
+    if (invalidAccountingPeriodTriggerDefinitions.isNotEmpty) {
+      throw StateError(
+        'تعريف حواجز الفترة المحاسبية في النسخة غير مطابق أو معطل: ${invalidAccountingPeriodTriggerDefinitions.join('، ')}',
+      );
+    }
     final views = (await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'view'",
     )).map((row) => row['name']?.toString()).toSet();
@@ -1039,6 +1134,7 @@ class DatabaseHelper {
       'property_sale_accounting_successor_unique',
       'owner_settlements_owner_date_idx',
       'owner_settlements_cash_date_idx',
+      'accounting_period_events_period_idx',
     ];
     final missingIndexes = requiredIndexes
         .where((index) => !indexes.contains(index))
@@ -1556,6 +1652,27 @@ class DatabaseHelper {
     }
     if (oldVersion < 30) {
       await CreditNoteSchema.upgradeToV30(db);
+    }
+    if (oldVersion < 31) {
+      await _ensureColumn(
+        db,
+        'user_permissions',
+        'can_lock_period',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
+      await _ensureColumn(
+        db,
+        'user_permissions',
+        'can_close_period',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
+      await _ensureColumn(
+        db,
+        'user_permissions',
+        'can_reopen_period',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
+      await AccountingPeriodSchema.install(db);
     }
   }
 
@@ -2470,6 +2587,9 @@ class DatabaseHelper {
         can_print INTEGER DEFAULT 0,
         can_post INTEGER DEFAULT 0,
         can_review_approve INTEGER NOT NULL DEFAULT 0,
+        can_lock_period INTEGER NOT NULL DEFAULT 0,
+        can_close_period INTEGER NOT NULL DEFAULT 0,
+        can_reopen_period INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
       )
     ''');
@@ -2789,6 +2909,7 @@ class DatabaseHelper {
     await _createContractRenewalSchema(db);
     await _createAuditTrailSchema(db);
     await createOwnerSettlementSchema(db);
+    await AccountingPeriodSchema.install(db);
     await _insertSeedData(db);
   }
 
@@ -3314,8 +3435,30 @@ class DatabaseHelper {
         limit: 1,
       );
       if (users.isEmpty) throw StateError('المستخدم غير موجود');
-      if (users.first['role'] == 'SuperAdmin' && normalized.isNotEmpty) {
-        throw StateError('مدير النظام الأعلى يمتلك جميع الصلاحيات دائمًا');
+      if (users.first['role'] == 'SuperAdmin') {
+        if (PermissionRuntime.role != 'SuperAdmin') {
+          throw StateError(
+            'لا يمكن إلا لمدير نظام أعلى إدارة استثناء إعادة الفتح لحساب أعلى',
+          );
+        }
+        if (normalized.any((permission) {
+            return permission['screen_name'] != 'accounting_periods' ||
+                permission['can_view'] != 1 ||
+                permission['can_reopen_period'] != 1 ||
+                AppPermissionAction.values
+                    .where(
+                      (action) =>
+                          action != AppPermissionAction.view &&
+                          action != AppPermissionAction.reopenPeriod,
+                    )
+                    .any(
+                      (action) => permission[action.databaseColumn] != 0,
+                    );
+          })) {
+          throw StateError(
+            'لا يسمح لمدير النظام الأعلى إلا بتخصيص إعادة فتح الفترات بصورة مستقلة',
+          );
+        }
       }
       await txn.delete(
         'user_permissions',
@@ -9417,12 +9560,7 @@ class DatabaseHelper {
     if (startDate.compareTo(endDate) > 0) {
       throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
     }
-    final endParts = endDate.split('-').map(int.parse).toList();
-    final exclusiveEndDate = DateTime.utc(
-      endParts[0],
-      endParts[1],
-      endParts[2],
-    ).add(const Duration(days: 1)).toIso8601String().substring(0, 10);
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
 
     final db = await instance.database;
     return db.transaction((txn) async {
@@ -9482,6 +9620,22 @@ class DatabaseHelper {
       final currency = configuredCurrency == null || configuredCurrency.isEmpty
           ? 'غير محددة'
           : configuredCurrency;
+      final invoiceReport = await _loadInvoiceLedgerReconciliationReport(
+        db: txn,
+        startDate: startDate,
+        endDate: endDate,
+        exclusiveEndDate: exclusiveEndDate,
+        requireReportPermission: false,
+      );
+      final internalReconciliation =
+          await InternalSubledgerReconciliationService.load(
+            db: txn,
+            startDate: startDate,
+            endDate: endDate,
+            exclusiveEndDate: exclusiveEndDate,
+            currency: currency,
+            invoices: invoiceReport,
+          );
       PermissionRuntime.require('reports', AppPermissionAction.view);
       return FinancialCloseReadinessReport(
         startDate: startDate,
@@ -9495,8 +9649,471 @@ class DatabaseHelper {
         unbalancedPostedEntries: unbalancedRows
             .map((row) => FinancialCloseEntryIssue.fromMap(row, isPosted: true))
             .toList(growable: false),
+        internalReconciliation: internalReconciliation,
       );
     });
+  }
+
+  Future<List<AccountingPeriod>> getAccountingPeriods() async {
+    PermissionRuntime.require('accounting_periods', AppPermissionAction.view);
+    final db = await instance.database;
+    final rows = await db.query(
+      'accounting_periods',
+      orderBy: 'start_date DESC, id DESC',
+    );
+    PermissionRuntime.require('accounting_periods', AppPermissionAction.view);
+    return rows.map(AccountingPeriod.fromMap).toList(growable: false);
+  }
+
+  Future<List<AccountingPeriodEvent>> getAccountingPeriodEvents(
+    int periodId,
+  ) async {
+    PermissionRuntime.require('accounting_periods', AppPermissionAction.view);
+    if (periodId <= 0) throw ArgumentError('رقم الفترة غير صالح');
+    final db = await instance.database;
+    final rows = await db.query(
+      'accounting_period_events',
+      where: 'period_id = ?',
+      whereArgs: [periodId],
+      orderBy: 'id ASC',
+    );
+    PermissionRuntime.require('accounting_periods', AppPermissionAction.view);
+    return rows.map(AccountingPeriodEvent.fromMap).toList(growable: false);
+  }
+
+  Future<AccountingPeriod> createAccountingPeriod({
+    required String startDate,
+    required String endDate,
+  }) async {
+    PermissionRuntime.require('accounting_periods', AppPermissionAction.add);
+    if (!_isIsoCalendarDate(startDate) || !_isIsoCalendarDate(endDate)) {
+      throw ArgumentError('يجب إدخال تاريخ صحيح بصيغة YYYY-MM-DD');
+    }
+    if (startDate.compareTo(endDate) > 0) {
+      throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('accounting_periods', AppPermissionAction.add);
+      final actor = await _requireAccountingPeriodActorTx(txn);
+      PermissionRuntime.require('accounting_periods', AppPermissionAction.add);
+      final periodId = await txn.insert('accounting_periods', {
+        'start_date': startDate,
+        'end_date': endDate,
+        'status': 'open',
+        'created_by_user_id': actor.id,
+      });
+      final timestamp = DateTime.now().toIso8601String();
+      await _appendAccountingPeriodEventTx(
+        txn,
+        periodId: periodId,
+        action: 'created',
+        actor: actor,
+        timestamp: timestamp,
+      );
+      await _recordAuditTx(
+        txn,
+        action: 'ACCOUNTING_PERIOD_CREATED',
+        entityType: 'accounting_period',
+        entityId: periodId,
+        details: {'start_date': startDate, 'end_date': endDate},
+        timestamp: timestamp,
+      );
+      final rows = await txn.query(
+        'accounting_periods',
+        where: 'id = ?',
+        whereArgs: [periodId],
+        limit: 1,
+      );
+      return AccountingPeriod.fromMap(rows.single);
+    });
+  }
+
+  Future<AccountingPeriodReadiness> getAccountingPeriodReadiness(
+    int periodId,
+  ) async {
+    PermissionRuntime.require('accounting_periods', AppPermissionAction.view);
+    if (periodId <= 0) throw ArgumentError('رقم الفترة غير صالح');
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.view,
+      );
+      final period = await _accountingPeriodTx(txn, periodId);
+      final report = await _financialCloseReadinessTx(
+        txn,
+        startDate: period.startDate,
+        endDate: period.endDate,
+      );
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.view,
+      );
+      return AccountingPeriodReadiness(period: period, report: report);
+    });
+  }
+
+  Future<void> lockAccountingPeriod(
+    int periodId, {
+    String reason = '',
+  }) async {
+    PermissionRuntime.require(
+      'accounting_periods',
+      AppPermissionAction.lockPeriod,
+    );
+    if (periodId <= 0) throw ArgumentError('رقم الفترة غير صالح');
+    final normalizedReason = reason.trim();
+    if (normalizedReason.length > 500) {
+      throw ArgumentError('سبب القفل لا يتجاوز 500 حرف');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.lockPeriod,
+      );
+      final actor = await _requireAccountingPeriodActorTx(txn);
+      final period = await _accountingPeriodTx(txn, periodId);
+      if (period.status != 'open') {
+        throw StateError('لا يمكن قفل فترة ليست مفتوحة');
+      }
+      // Re-run the readiness checks inside this same transaction. A report
+      // loaded earlier in the UI is informational and cannot authorize a lock.
+      final report = await _financialCloseReadinessTx(
+        txn,
+        startDate: period.startDate,
+        endDate: period.endDate,
+      );
+      if (report.hasBlockingIssues) {
+        throw StateError(
+          'توجد قيود أو استثناءات مطابقة داخلية تحتاج معالجة يدوية؛ راجع الجاهزية أولًا',
+        );
+      }
+      if (report.requiresManualReviewAcknowledgement && normalizedReason.isEmpty) {
+        throw StateError(
+          'توجد استثناءات تتطلب إقرار مراجعة؛ أدخل سبب المراجعة أو الاعتماد قبل القفل',
+        );
+      }
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.lockPeriod,
+      );
+      final summary = <String, Object?>{
+        'start_date': period.startDate,
+        'end_date': period.endDate,
+        'unposted_count': report.unpostedEntries.length,
+        'unbalanced_posted_count': report.unbalancedPostedEntries.length,
+        'internal_reconciliation_blocking_count':
+            report.blockingReconciliationCount,
+        'internal_manual_review_ack_count':
+            report.manualReviewAcknowledgementCount,
+        'internal_legacy_review_count': report.legacyReviewCount,
+      };
+      final timestamp = DateTime.now().toIso8601String();
+      await _appendAccountingPeriodEventTx(
+        txn,
+        periodId: periodId,
+        action: 'locked',
+        actor: actor,
+        reason: normalizedReason.isEmpty ? null : normalizedReason,
+        readinessSummary: jsonEncode(summary),
+        timestamp: timestamp,
+      );
+      final updated = await txn.update(
+        'accounting_periods',
+        {'status': 'locked'},
+        where: 'id = ? AND status = ?',
+        whereArgs: [periodId, 'open'],
+      );
+      if (updated != 1) throw StateError('تغيرت حالة الفترة قبل القفل');
+      await _recordAuditTx(
+        txn,
+        action: 'ACCOUNTING_PERIOD_LOCKED',
+        entityType: 'accounting_period',
+        entityId: periodId,
+        details: {
+          ...summary,
+          if (normalizedReason.isNotEmpty) 'lock_review_reason': normalizedReason,
+        },
+        timestamp: timestamp,
+      );
+    });
+  }
+
+  Future<void> closeAccountingPeriod(
+    int periodId, {
+    String reason = '',
+  }) async {
+    PermissionRuntime.require(
+      'accounting_periods',
+      AppPermissionAction.closePeriod,
+    );
+    if (periodId <= 0) throw ArgumentError('رقم الفترة غير صالح');
+    final normalizedReason = reason.trim();
+    if (normalizedReason.length > 500) {
+      throw ArgumentError('سبب الإقفال لا يتجاوز 500 حرف');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.closePeriod,
+      );
+      final actor = await _requireAccountingPeriodActorTx(txn);
+      final period = await _accountingPeriodTx(txn, periodId);
+      if (period.status != 'locked') {
+        throw StateError('يجب قفل الفترة قبل اعتماد إقفالها النهائي');
+      }
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.closePeriod,
+      );
+      final timestamp = DateTime.now().toIso8601String();
+      await _appendAccountingPeriodEventTx(
+        txn,
+        periodId: periodId,
+        action: 'closed',
+        actor: actor,
+        reason: normalizedReason.isEmpty ? null : normalizedReason,
+        timestamp: timestamp,
+      );
+      final updated = await txn.update(
+        'accounting_periods',
+        {'status': 'closed'},
+        where: 'id = ? AND status = ?',
+        whereArgs: [periodId, 'locked'],
+      );
+      if (updated != 1) throw StateError('تغيرت حالة الفترة قبل الإقفال');
+      await _recordAuditTx(
+        txn,
+        action: 'ACCOUNTING_PERIOD_CLOSED',
+        entityType: 'accounting_period',
+        entityId: periodId,
+        details: {
+          'start_date': period.startDate,
+          'end_date': period.endDate,
+          if (normalizedReason.isNotEmpty) 'reason': normalizedReason,
+        },
+        timestamp: timestamp,
+      );
+    });
+  }
+
+  Future<void> reopenAccountingPeriod(
+    int periodId, {
+    required String reason,
+  }) async {
+    PermissionRuntime.require(
+      'accounting_periods',
+      AppPermissionAction.reopenPeriod,
+    );
+    if (periodId <= 0) throw ArgumentError('رقم الفترة غير صالح');
+    final normalizedReason = reason.trim();
+    if (normalizedReason.isEmpty || normalizedReason.length > 500) {
+      throw ArgumentError('سبب إعادة الفتح مطلوب ولا يتجاوز 500 حرف');
+    }
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.reopenPeriod,
+      );
+      final actor = await _requireAccountingPeriodActorTx(txn);
+      final period = await _accountingPeriodTx(txn, periodId);
+      if (period.status != 'locked' && period.status != 'closed') {
+        throw StateError('لا يمكن إعادة فتح فترة مفتوحة بالفعل');
+      }
+      PermissionRuntime.require(
+        'accounting_periods',
+        AppPermissionAction.reopenPeriod,
+      );
+      final timestamp = DateTime.now().toIso8601String();
+      await _appendAccountingPeriodEventTx(
+        txn,
+        periodId: periodId,
+        action: 'reopened',
+        actor: actor,
+        reason: normalizedReason,
+        timestamp: timestamp,
+      );
+      final updated = await txn.update(
+        'accounting_periods',
+        {'status': 'open'},
+        where: 'id = ? AND status = ?',
+        whereArgs: [periodId, period.status],
+      );
+      if (updated != 1) throw StateError('تغيرت حالة الفترة قبل إعادة الفتح');
+      await _recordAuditTx(
+        txn,
+        action: 'ACCOUNTING_PERIOD_REOPENED',
+        entityType: 'accounting_period',
+        entityId: periodId,
+        details: {
+          'start_date': period.startDate,
+          'end_date': period.endDate,
+          'previous_status': period.status,
+          'reason': normalizedReason,
+        },
+        timestamp: timestamp,
+      );
+    });
+  }
+
+  Future<AccountingPeriod> _accountingPeriodTx(
+    DatabaseExecutor txn,
+    int periodId,
+  ) async {
+    final rows = await txn.query(
+      'accounting_periods',
+      where: 'id = ?',
+      whereArgs: [periodId],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw StateError('الفترة المحاسبية غير موجودة');
+    return AccountingPeriod.fromMap(rows.single);
+  }
+
+  Future<({int id, String name})> _requireAccountingPeriodActorTx(
+    DatabaseExecutor txn,
+  ) async {
+    final userId = PermissionRuntime.userId;
+    if (userId == null) {
+      throw StateError('يلزم مستخدم مسجل لتوثيق إدارة الفترة');
+    }
+    final rows = await txn.query(
+      'users',
+      columns: ['id', 'full_name', 'username', 'is_active'],
+      where: 'id = ? AND is_active = 1',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw StateError('المستخدم غير موجود أو موقوف');
+    final fullName = rows.single['full_name']?.toString().trim() ?? '';
+    final username = rows.single['username']?.toString().trim() ?? '';
+    final actorName = fullName.isNotEmpty ? fullName : username;
+    if (actorName.isEmpty) throw StateError('تعذر تحديد اسم المستخدم للتدقيق');
+    return (id: userId, name: actorName);
+  }
+
+  Future<void> _appendAccountingPeriodEventTx(
+    DatabaseExecutor txn, {
+    required int periodId,
+    required String action,
+    required ({int id, String name}) actor,
+    String? reason,
+    String? readinessSummary,
+    String? timestamp,
+  }) async {
+    await txn.insert('accounting_period_events', {
+      'period_id': periodId,
+      'action': action,
+      'actor_user_id': actor.id,
+      'actor_name': actor.name,
+      'reason': reason,
+      'readiness_summary': readinessSummary,
+      'created_at': timestamp ?? DateTime.now().toIso8601String(),
+    });
+  }
+
+  String _exclusiveDateBoundAfter(String inclusiveEndDate) {
+    if (inclusiveEndDate == '9999-12-31') return '9999-12-32';
+    final parts = inclusiveEndDate.split('-').map(int.parse).toList();
+    final nextDay = DateTime.utc(parts[0], parts[1], parts[2]).add(
+      const Duration(days: 1),
+    );
+    return nextDay.toIso8601String().substring(0, 10);
+  }
+
+  Future<FinancialCloseReadinessReport> _financialCloseReadinessTx(
+    DatabaseExecutor txn, {
+    required String startDate,
+    required String endDate,
+  }) async {
+    final unpostedRows = await txn.rawQuery(
+      '''
+      SELECT
+        je.id AS journal_entry_id,
+        je.entry_date AS entry_date,
+        COALESCE(je.description, '') AS description,
+        CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+          AS debit_minor,
+        CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+          AS credit_minor,
+        COUNT(jl.id) AS line_count
+      FROM journal_entries je
+      LEFT JOIN journal_lines jl ON jl.journal_entry_id = je.id
+      WHERE COALESCE(je.is_posted, 0) != 1
+        AND substr(je.entry_date, 1, 10) BETWEEN ? AND ?
+      GROUP BY je.id, je.entry_date, je.description
+      ORDER BY je.entry_date, je.id
+      ''',
+      [startDate, endDate],
+    );
+    final unbalancedRows = await txn.rawQuery(
+      '''
+      SELECT
+        je.id AS journal_entry_id,
+        je.entry_date AS entry_date,
+        COALESCE(je.description, '') AS description,
+        CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+          AS debit_minor,
+        CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+          AS credit_minor,
+        COUNT(jl.id) AS line_count
+      FROM journal_entries je
+      LEFT JOIN journal_lines jl ON jl.journal_entry_id = je.id
+      WHERE je.is_posted = 1
+        AND substr(je.entry_date, 1, 10) BETWEEN ? AND ?
+      GROUP BY je.id, je.entry_date, je.description
+      HAVING COUNT(jl.id) = 0
+        OR CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+           != CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+      ORDER BY je.entry_date, je.id
+      ''',
+      [startDate, endDate],
+    );
+    final companyRows = await txn.query(
+      'company_info',
+      columns: ['default_currency'],
+      orderBy: 'id ASC',
+      limit: 1,
+    );
+    final configuredCurrency = companyRows.isEmpty
+        ? null
+        : companyRows.first['default_currency']?.toString().trim();
+    final currency = configuredCurrency == null || configuredCurrency.isEmpty
+        ? 'غير محددة'
+        : configuredCurrency;
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
+    final invoiceReport = await _loadInvoiceLedgerReconciliationReport(
+      db: txn,
+      startDate: startDate,
+      endDate: endDate,
+      exclusiveEndDate: exclusiveEndDate,
+      requireReportPermission: false,
+    );
+    final internalReconciliation =
+        await InternalSubledgerReconciliationService.load(
+          db: txn,
+          startDate: startDate,
+          endDate: endDate,
+          exclusiveEndDate: exclusiveEndDate,
+          currency: currency,
+          invoices: invoiceReport,
+        );
+    return FinancialCloseReadinessReport(
+      startDate: startDate,
+      endDate: endDate,
+      currency: currency,
+      unpostedEntries: unpostedRows
+          .map((row) => FinancialCloseEntryIssue.fromMap(row, isPosted: false))
+          .toList(growable: false),
+      unbalancedPostedEntries: unbalancedRows
+          .map((row) => FinancialCloseEntryIssue.fromMap(row, isPosted: true))
+          .toList(growable: false),
+      internalReconciliation: internalReconciliation,
+    );
   }
 
   Future<TrialBalanceReport> getTrialBalance({
@@ -9758,16 +10375,7 @@ class DatabaseHelper {
     if (startDate.compareTo(endDate) > 0) {
       throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
     }
-    final endParts = endDate.split('-').map(int.parse).toList();
-    final nextDay = DateTime.utc(
-      endParts[0],
-      endParts[1],
-      endParts[2],
-    ).add(const Duration(days: 1));
-    final exclusiveEndDate =
-        '${nextDay.year.toString().padLeft(4, '0')}-'
-        '${nextDay.month.toString().padLeft(2, '0')}-'
-        '${nextDay.day.toString().padLeft(2, '0')}';
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
 
     final db = await instance.database;
     return db.transaction(
@@ -9786,8 +10394,11 @@ class DatabaseHelper {
     required String startDate,
     required String endDate,
     required String exclusiveEndDate,
+    bool requireReportPermission = true,
   }) async {
-    PermissionRuntime.require('reports', AppPermissionAction.view);
+    if (requireReportPermission) {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+    }
     final rows = await db.rawQuery(
       '''
       WITH invoice_link_counts AS (
@@ -9924,7 +10535,9 @@ class DatabaseHelper {
     final currency = configuredCurrency == null || configuredCurrency.isEmpty
         ? 'غير محددة'
         : configuredCurrency;
-    PermissionRuntime.require('reports', AppPermissionAction.view);
+    if (requireReportPermission) {
+      PermissionRuntime.require('reports', AppPermissionAction.view);
+    }
     return InvoiceLedgerReconciliationReport(
       startDate: startDate,
       endDate: endDate,
@@ -9956,14 +10569,7 @@ class DatabaseHelper {
     if (startDate.compareTo(endDate) > 0) {
       throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
     }
-    final endParts = endDate.split('-').map(int.parse).toList();
-    final nextDay = DateTime.utc(endParts[0], endParts[1], endParts[2]).add(
-      const Duration(days: 1),
-    );
-    final exclusiveEndDate =
-        '${nextDay.year.toString().padLeft(4, '0')}-'
-        '${nextDay.month.toString().padLeft(2, '0')}-'
-        '${nextDay.day.toString().padLeft(2, '0')}';
+    final exclusiveEndDate = _exclusiveDateBoundAfter(endDate);
 
     final db = await instance.database;
     return db.transaction((txn) async {

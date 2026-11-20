@@ -1,6 +1,17 @@
 import 'package:flutter/foundation.dart';
 
-enum AppPermissionAction { view, add, edit, delete, print, post, reviewApprove }
+enum AppPermissionAction {
+  view,
+  add,
+  edit,
+  delete,
+  print,
+  post,
+  reviewApprove,
+  lockPeriod,
+  closePeriod,
+  reopenPeriod,
+}
 
 extension AppPermissionActionDetails on AppPermissionAction {
   String get databaseColumn => switch (this) {
@@ -11,6 +22,9 @@ extension AppPermissionActionDetails on AppPermissionAction {
     AppPermissionAction.print => 'can_print',
     AppPermissionAction.post => 'can_post',
     AppPermissionAction.reviewApprove => 'can_review_approve',
+    AppPermissionAction.lockPeriod => 'can_lock_period',
+    AppPermissionAction.closePeriod => 'can_close_period',
+    AppPermissionAction.reopenPeriod => 'can_reopen_period',
   };
 
   String get arabicLabel => switch (this) {
@@ -21,6 +35,9 @@ extension AppPermissionActionDetails on AppPermissionAction {
     AppPermissionAction.print => 'الطباعة',
     AppPermissionAction.post => 'الترحيل',
     AppPermissionAction.reviewApprove => 'مراجعة واعتماد طلب البيع',
+    AppPermissionAction.lockPeriod => 'قفل الفترة',
+    AppPermissionAction.closePeriod => 'إقفال الفترة',
+    AppPermissionAction.reopenPeriod => 'إعادة فتح الفترة',
   };
 }
 
@@ -44,6 +61,7 @@ class AppPermissionCatalog {
     AppPermissionModule('notices', 'إشعارات المستأجرين'),
     AppPermissionModule('tenant_financial', 'العمليات المالية للمستأجرين'),
     AppPermissionModule('accounting', 'الحسابات العامة والقيود'),
+    AppPermissionModule('accounting_periods', 'إدارة الفترات المحاسبية'),
     AppPermissionModule('reports', 'التقارير والاستعلامات'),
     AppPermissionModule('sms', 'الرسائل النصية'),
     AppPermissionModule('system_services', 'خدمات البرنامج'),
@@ -72,6 +90,7 @@ class AppPermissionCatalog {
     11 => 'notices',
     12 => 'property_sales',
     13 => 'audit_logs',
+    14 => 'accounting_periods',
     _ => null,
   };
 
@@ -80,11 +99,23 @@ class AppPermissionCatalog {
     String module,
     AppPermissionAction action,
   ) {
+    // Even SuperAdmin must receive a separate explicit user-level grant to
+    // reopen a locked or closed period.
+    if (action == AppPermissionAction.reopenPeriod) return false;
     if (role == 'SuperAdmin') return true;
     if (!_roleAllowsView(role, module)) return false;
     if (action == AppPermissionAction.view) return true;
     if (action == AppPermissionAction.reviewApprove) {
       return role == 'Accountant' && module == 'property_sales';
+    }
+    if (module == 'accounting_periods' &&
+        !const {
+          AppPermissionAction.view,
+          AppPermissionAction.add,
+          AppPermissionAction.lockPeriod,
+          AppPermissionAction.closePeriod,
+        }.contains(action)) {
+      return false;
     }
 
     if (role == 'Admin') return true;
@@ -100,7 +131,10 @@ class AppPermissionCatalog {
         AppPermissionAction.view ||
         AppPermissionAction.delete ||
         AppPermissionAction.post ||
-        AppPermissionAction.reviewApprove => false,
+        AppPermissionAction.reviewApprove ||
+        AppPermissionAction.lockPeriod ||
+        AppPermissionAction.closePeriod ||
+        AppPermissionAction.reopenPeriod => false,
       };
     }
     if (role == 'Accountant') {
@@ -120,6 +154,11 @@ class AppPermissionCatalog {
           AppPermissionAction.edit,
           AppPermissionAction.print,
           AppPermissionAction.post,
+        }.contains(action),
+        'accounting_periods' => const {
+          AppPermissionAction.add,
+          AppPermissionAction.lockPeriod,
+          AppPermissionAction.closePeriod,
         }.contains(action),
         'reports' || 'voucher_history' => action == AppPermissionAction.print,
         'sms' => action == AppPermissionAction.add,
@@ -146,6 +185,7 @@ class AppPermissionCatalog {
         'property_sales',
         'tenant_financial',
         'accounting',
+        'accounting_periods',
         'reports',
         'sms',
         'voucher_history',
@@ -227,6 +267,12 @@ class PermissionRuntime {
     final role = _role;
     if (role == null || AppPermissionCatalog.module(module) == null) {
       return false;
+    }
+    if (action == AppPermissionAction.reopenPeriod) {
+      final custom = _overrides[module];
+      return custom != null &&
+          custom[AppPermissionAction.view] == true &&
+          custom[AppPermissionAction.reopenPeriod] == true;
     }
     if (role == 'SuperAdmin') return true;
     final custom = _overrides[module];

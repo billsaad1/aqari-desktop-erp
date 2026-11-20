@@ -1,5 +1,6 @@
 import 'package:app/core/financial_close_readiness_pdf.dart';
 import 'package:app/models/financial_close_readiness_report_model.dart';
+import 'package:app/models/internal_subledger_reconciliation_report_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -32,6 +33,36 @@ void main() {
           isPosted: true,
         ),
       ],
+      internalReconciliation: InternalSubledgerReconciliationReport(
+        startDate: '2026-06-01',
+        endDate: '2026-06-30',
+        currency: 'SAR',
+        rows: const [
+          InternalSubledgerReconciliationRow(
+            source: InternalSubledgerSource.directJournal,
+            sourceId: 41,
+            sourceDate: '2026-06-12',
+            partyName: 'قيد على حساب ذمم بلا مستند',
+            amountMinor: 5000,
+            state: InternalSubledgerRowState.needsReview,
+            issueSummary: 'لا يوجد ربط صريح بمستند فرعي',
+            journalEntryId: 41,
+            journalDate: '2026-06-12',
+            journalPosted: true,
+            journalDebitMinor: 5000,
+            journalCreditMinor: 5000,
+          ),
+          InternalSubledgerReconciliationRow(
+            source: InternalSubledgerSource.legacyOwnerVoucher,
+            sourceId: 42,
+            sourceDate: '2026-06-18',
+            partyName: 'سند تاريخي',
+            amountMinor: 2500,
+            state: InternalSubledgerRowState.legacyReview,
+            issueSummary: 'يحتاج مراجعة دون تخمين روابطه',
+          ),
+        ],
+      ),
     );
 
     final bytes = await FinancialCloseReadinessPdf.build(
@@ -43,5 +74,8 @@ void main() {
     expect(bytes, isNotEmpty);
     expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
     expect(report.hasBlockingIssues, isTrue);
+    expect(report.blockingReconciliationCount, 0);
+    expect(report.legacyReviewCount, 1);
+    expect(report.manualReviewAcknowledgementCount, 2);
   });
 }

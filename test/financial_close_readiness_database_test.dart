@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:app/core/permission_policy.dart';
 import 'package:app/database/database_helper.dart';
+import 'package:app/models/internal_subledger_reconciliation_report_model.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -64,6 +65,25 @@ void main() {
       )).single;
       final cashId = (cash['id'] as num).toInt();
       final revenueId = (revenue['id'] as num).toInt();
+      final receivables = (await db.query(
+        'accounts',
+        columns: ['id'],
+        where: 'code = ?',
+        whereArgs: ['1201'],
+        limit: 1,
+      )).single;
+      final tenantId = await db.insert('tenants', {
+        'name': 'مستأجر بلا ربط قبض',
+        'account_id': (receivables['id'] as num).toInt(),
+      });
+      await db.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': '2026-06-05',
+        'amount': 15.0,
+        'tenant_id': tenantId,
+        'party_name': 'مستأجر بلا ربط قبض',
+        'description': 'قبض يحتاج مراجعة ربط',
+      });
 
       Future<int> createEntry({
         required String date,
@@ -159,6 +179,15 @@ void main() {
       );
       expect(report.hasBlockingIssues, isTrue);
       expect(report.isReadyForManualReview, isFalse);
+      expect(report.blockingReconciliationCount, 1);
+      expect(
+        report.internalReconciliation.rows
+            .where(
+              (row) => row.source == InternalSubledgerSource.tenantReceipt,
+            )
+            .length,
+        1,
+      );
     },
   );
 

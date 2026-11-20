@@ -120,7 +120,9 @@ void main() {
     expect(find.text('قيد غير مرحّل'), findsOneWidget);
     expect(find.text('قيد مرحّل غير متوازن'), findsOneWidget);
     expect(
-      find.text('توجد قيود تحتاج مراجعة يدوية قبل أي إقفال.'),
+      find.text(
+        'توجد قيود أو استثناءات مطابقة داخلية تحتاج معالجة يدوية قبل القفل.',
+      ),
       findsOneWidget,
     );
     expect(
