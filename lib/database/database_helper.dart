@@ -19,12 +19,13 @@ import '../models/tenant_collection_report_model.dart';
 import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
+import 'owner_settlement_schema.dart';
 import 'property_sale_schema.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 26;
+  static const int _schemaVersion = 27;
 
   /// Current schema version, exposed so tests and diagnostics assert against a
   /// single source of truth instead of hardcoding a number that drifts.
@@ -634,6 +635,26 @@ class DatabaseHelper {
         'approved_by',
         'approved_at',
       ],
+      'owner_settlements': [
+        'id',
+        'voucher_id',
+        'owner_id',
+        'owner_account_id',
+        'cash_account_id',
+        'journal_entry_id',
+        'amount_minor',
+        'settlement_date',
+        'owner_name_snapshot',
+        'description',
+        'created_by',
+        'created_at',
+      ],
+      'owner_settlement_journal_intents': [
+        'journal_entry_id',
+        'owner_id',
+        'owner_account_id',
+        'amount_minor',
+      ],
     };
     final missingSchema = <String>[];
     for (final entry in requiredColumns.entries) {
@@ -691,6 +712,19 @@ class DatabaseHelper {
       'property_sale_accounting_records_no_delete',
       'property_sale_execution_events_no_update',
       'property_sale_execution_events_no_delete',
+      'owner_account_general_disbursement_block',
+      'owner_settlement_journal_intent_valid_insert',
+      'owner_settlement_journal_lines_owner_debit_requires_link',
+      'owner_settlement_valid_insert',
+      'owner_settlement_consume_journal_intent',
+      'owner_settlements_no_update',
+      'owner_settlements_no_delete',
+      'owner_settlement_vouchers_no_update',
+      'owner_settlement_vouchers_no_delete',
+      'owner_settlement_journal_entries_no_update',
+      'owner_settlement_journal_entries_no_delete',
+      'owner_settlement_journal_lines_no_update',
+      'owner_settlement_journal_lines_no_delete',
       'audit_logs_no_update',
       'audit_logs_no_delete',
     ];
@@ -700,6 +734,97 @@ class DatabaseHelper {
     if (missingTriggers.isNotEmpty) {
       throw StateError(
         'مخطط النسخة يفتقد حواجز سلامة الوحدات والاستردادات والإشعارات: ${missingTriggers.join('، ')}',
+      );
+    }
+    final triggerDefinitions = await db.rawQuery(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'",
+    );
+    final triggerSqlByName = <String, String>{
+      for (final row in triggerDefinitions)
+        row['name'].toString(): (row['sql']?.toString() ?? '')
+            .toLowerCase()
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim(),
+    };
+    const requiredOwnerTriggerFragments = <String, List<String>>{
+      'owner_account_general_disbursement_block': [
+        'before insert on vouchers',
+        "new.voucher_type = 'صرف عام'",
+        'from journal_lines jl',
+        'raise(abort',
+      ],
+      'owner_settlement_journal_intent_valid_insert': [
+        'before insert on owner_settlement_journal_intents',
+        'owner_parent.code = \'2101\'',
+        'new.amount_minor > 0',
+        'raise(abort',
+      ],
+      'owner_settlement_journal_lines_owner_debit_requires_link': [
+        'before insert on journal_lines',
+        'new.debit > 0',
+        'from owner_settlement_journal_intents intent',
+        'raise(abort',
+      ],
+      'owner_settlement_valid_insert': [
+        'before insert on owner_settlements',
+        "v.voucher_type = 'صرف مستحقات مالك'",
+        'owner settlement exceeds the posted owner payable balance',
+        'owner settlement exceeds the posted cash balance',
+        'raise(abort',
+      ],
+      'owner_settlement_consume_journal_intent': [
+        'after insert on owner_settlements',
+        'delete from owner_settlement_journal_intents',
+      ],
+      'owner_settlements_no_update': [
+        'before update on owner_settlements',
+        'raise(abort',
+      ],
+      'owner_settlements_no_delete': [
+        'before delete on owner_settlements',
+        'raise(abort',
+      ],
+      'owner_settlement_vouchers_no_update': [
+        'before update on vouchers',
+        'from owner_settlements s where s.voucher_id = old.id',
+        'raise(abort',
+      ],
+      'owner_settlement_vouchers_no_delete': [
+        'before delete on vouchers',
+        'from owner_settlements s where s.voucher_id = old.id',
+        'raise(abort',
+      ],
+      'owner_settlement_journal_entries_no_update': [
+        'before update on journal_entries',
+        'from owner_settlements s where s.journal_entry_id = old.id',
+        'raise(abort',
+      ],
+      'owner_settlement_journal_entries_no_delete': [
+        'before delete on journal_entries',
+        'from owner_settlements s where s.journal_entry_id = old.id',
+        'raise(abort',
+      ],
+      'owner_settlement_journal_lines_no_update': [
+        'before update on journal_lines',
+        'from owner_settlements s where s.journal_entry_id = old.journal_entry_id',
+        'raise(abort',
+      ],
+      'owner_settlement_journal_lines_no_delete': [
+        'before delete on journal_lines',
+        'from owner_settlements s where s.journal_entry_id = old.journal_entry_id',
+        'raise(abort',
+      ],
+    };
+    final invalidOwnerTriggerDefinitions = <String>[];
+    for (final entry in requiredOwnerTriggerFragments.entries) {
+      final definition = triggerSqlByName[entry.key] ?? '';
+      if (entry.value.any((fragment) => !definition.contains(fragment))) {
+        invalidOwnerTriggerDefinitions.add(entry.key);
+      }
+    }
+    if (invalidOwnerTriggerDefinitions.isNotEmpty) {
+      throw StateError(
+        'تعريف حواجز سداد المالك في النسخة غير مطابق أو معطل: ${invalidOwnerTriggerDefinitions.join('، ')}',
       );
     }
     final views = (await db.rawQuery(
@@ -729,6 +854,8 @@ class DatabaseHelper {
       'property_sale_execution_events_execution_idx',
       'property_sale_accounting_root_unique',
       'property_sale_accounting_successor_unique',
+      'owner_settlements_owner_date_idx',
+      'owner_settlements_cash_date_idx',
     ];
     final missingIndexes = requiredIndexes
         .where((index) => !indexes.contains(index))
@@ -1218,6 +1345,9 @@ class DatabaseHelper {
         WHERE proposed_buyer_owner_id IS NOT NULL
       ''');
       await createPropertySaleExecutionSchema(db);
+    }
+    if (oldVersion < 27) {
+      await createOwnerSettlementSchema(db);
     }
   }
 
@@ -2454,6 +2584,7 @@ class DatabaseHelper {
     await createPropertySaleExecutionSchema(db);
     await _createContractRenewalSchema(db);
     await _createAuditTrailSchema(db);
+    await createOwnerSettlementSchema(db);
     await _insertSeedData(db);
   }
 
@@ -3610,6 +3741,20 @@ class DatabaseHelper {
           !allowedCounterpartTypes.contains(oppositeAccount['account_type'])) {
         throw ArgumentError('الحساب المقابل غير صالح');
       }
+      if (voucherType == 'صرف عام') {
+        final linkedOwners = await txn.query(
+          'owners',
+          columns: ['id'],
+          where: 'account_id = ?',
+          whereArgs: [oppositeAccountId],
+          limit: 1,
+        );
+        if (linkedOwners.isNotEmpty) {
+          throw StateError(
+            'سداد حساب المالك يتم من تبويب «سداد مستحقات المالك» لضبط الرصيد والربط المحاسبي',
+          );
+        }
+      }
       await _requireCostCenterTx(txn, costCenterId);
       final amount = (voucher['amount'] as num).toDouble();
       final date = voucher['voucher_date'];
@@ -3699,6 +3844,388 @@ class DatabaseHelper {
           'cost_center_id': costCenterId,
         },
       );
+      return voucherId;
+    });
+  }
+
+  Future<Map<String, dynamic>> _requireOwnerSettlementOwnerTx(
+    DatabaseExecutor executor,
+    int ownerId,
+  ) async {
+    final rows = await executor.rawQuery(
+      '''
+      SELECT o.id AS owner_id, o.name AS owner_name, o.account_id,
+             a.code AS owner_account_code, a.name AS owner_account_name,
+             a.parent_id, parent.code AS parent_code
+      FROM owners o
+      LEFT JOIN accounts a ON a.id = o.account_id
+      LEFT JOIN accounts parent ON parent.id = a.parent_id
+      WHERE o.id = ?
+      LIMIT 1
+      ''',
+      [ownerId],
+    );
+    if (rows.isEmpty) throw StateError('المالك المحدد غير موجود');
+    final owner = rows.first;
+    final accountId = (owner['account_id'] as num?)?.toInt();
+    if (accountId == null || owner['parent_code'] != '2101') {
+      throw StateError('المالك لا يملك حساب التزامات صالحًا تحت الحساب 2101');
+    }
+    final linkedOwners = await executor.query(
+      'owners',
+      columns: ['id'],
+      where: 'account_id = ?',
+      whereArgs: [accountId],
+    );
+    if (linkedOwners.length != 1 ||
+        (linkedOwners.single['id'] as num).toInt() != ownerId) {
+      throw StateError('حساب المالك مرتبط بأكثر من مالك؛ أوقف السداد للمراجعة');
+    }
+    await _requireLeafAccountTx(executor, accountId, expectedType: 'Liability');
+    return owner;
+  }
+
+  Future<int> _postedAccountBalanceMinorTx(
+    DatabaseExecutor executor,
+    int accountId, {
+    required bool creditNormal,
+    String? throughDate,
+  }) async {
+    final rows = await executor.rawQuery(
+      '''
+      SELECT
+        je.id AS journal_entry_id,
+        je.entry_date,
+        COUNT(jl.id) AS line_count,
+        SUM(CAST(ROUND(COALESCE(jl.debit, 0) * 100) AS INTEGER))
+          AS journal_debit_minor,
+        SUM(CAST(ROUND(COALESCE(jl.credit, 0) * 100) AS INTEGER))
+          AS journal_credit_minor,
+        MAX(CASE WHEN COALESCE(jl.debit, 0) < 0
+          OR COALESCE(jl.credit, 0) < 0
+          OR (COALESCE(jl.debit, 0) > 0 AND COALESCE(jl.credit, 0) > 0)
+          OR (COALESCE(jl.debit, 0) = 0 AND COALESCE(jl.credit, 0) = 0)
+          OR ABS(COALESCE(jl.debit, 0) * 100 - ROUND(COALESCE(jl.debit, 0) * 100)) > 0.000001
+          OR ABS(COALESCE(jl.credit, 0) * 100 - ROUND(COALESCE(jl.credit, 0) * 100)) > 0.000001
+          THEN 1 ELSE 0 END) AS invalid_line,
+        SUM(CASE WHEN jl.account_id = ?
+          THEN CAST(ROUND(COALESCE(jl.debit, 0) * 100) AS INTEGER)
+          ELSE 0 END) AS account_debit_minor,
+        SUM(CASE WHEN jl.account_id = ?
+          THEN CAST(ROUND(COALESCE(jl.credit, 0) * 100) AS INTEGER)
+          ELSE 0 END) AS account_credit_minor
+      FROM journal_entries je
+      JOIN journal_lines jl ON jl.journal_entry_id = je.id
+      WHERE je.is_posted = 1
+        AND EXISTS (
+          SELECT 1 FROM journal_lines focus
+          WHERE focus.journal_entry_id = je.id AND focus.account_id = ?
+        )
+      GROUP BY je.id, je.entry_date
+      ORDER BY je.entry_date, je.id
+      ''',
+      [accountId, accountId, accountId],
+    );
+    var balanceMinor = 0;
+    for (final row in rows) {
+      final lineCount = (row['line_count'] as num?)?.toInt() ?? 0;
+      final debitMinor = (row['journal_debit_minor'] as num?)?.toInt() ?? 0;
+      final creditMinor = (row['journal_credit_minor'] as num?)?.toInt() ?? 0;
+      final invalidLine = (row['invalid_line'] as num?)?.toInt() == 1;
+      final dateValue = row['entry_date']?.toString() ?? '';
+      final parsedDate = DateTime.tryParse(dateValue);
+      final dateOnly = dateValue.length >= 10 ? dateValue.substring(0, 10) : '';
+      if (lineCount < 2 ||
+          debitMinor <= 0 ||
+          debitMinor != creditMinor ||
+          invalidLine ||
+          parsedDate == null ||
+          parsedDate.toIso8601String().substring(0, 10) != dateOnly) {
+        throw StateError(
+          'يوجد قيد مرحّل غير سليم على الحساب؛ أوقف السداد حتى تتم مراجعته',
+        );
+      }
+      if (throughDate != null && dateOnly.compareTo(throughDate) > 0) {
+        continue;
+      }
+      final accountDebit = (row['account_debit_minor'] as num?)?.toInt() ?? 0;
+      final accountCredit = (row['account_credit_minor'] as num?)?.toInt() ?? 0;
+      balanceMinor += creditNormal
+          ? accountCredit - accountDebit
+          : accountDebit - accountCredit;
+    }
+    return balanceMinor;
+  }
+
+  Future<List<Map<String, dynamic>>> getOwnerSettlementOwners() async {
+    PermissionRuntime.require('accounting', AppPermissionAction.view);
+    final db = await instance.database;
+    final rows = await db.rawQuery('''
+      SELECT o.id, o.name, o.account_id,
+             a.code AS owner_account_code, a.name AS owner_account_name
+      FROM owners o
+      JOIN accounts a ON a.id = o.account_id
+      JOIN accounts parent ON parent.id = a.parent_id
+      WHERE a.account_type = 'Liability'
+        AND parent.code = '2101'
+        AND NOT EXISTS (SELECT 1 FROM accounts child WHERE child.parent_id = a.id)
+        AND (SELECT COUNT(*) FROM owners linked WHERE linked.account_id = a.id) = 1
+      ORDER BY o.name COLLATE NOCASE, o.id
+    ''');
+    PermissionRuntime.require('accounting', AppPermissionAction.view);
+    return rows;
+  }
+
+  Future<List<Map<String, dynamic>>> getOwnerSettlementCashAccounts() async {
+    PermissionRuntime.require('accounting', AppPermissionAction.view);
+    final db = await instance.database;
+    final rows = await db.rawQuery('''
+      SELECT id, code, name
+      FROM accounts
+      WHERE account_type = 'Asset'
+        AND code LIKE '11%'
+        AND parent_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM accounts child WHERE child.parent_id = accounts.id)
+      ORDER BY code, id
+    ''');
+    final validRows = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      try {
+        final account = await _requireOwnerSettlementCashAccountTx(
+          db,
+          (row['id'] as num).toInt(),
+        );
+        validRows.add({
+          'id': account['id'],
+          'code': account['code'],
+          'name': account['name'],
+        });
+      } on ArgumentError {
+        continue;
+      } on StateError {
+        continue;
+      }
+    }
+    PermissionRuntime.require('accounting', AppPermissionAction.view);
+    return validRows;
+  }
+
+  Future<int> getOwnerSettlementBalanceMinor(int ownerId) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.view);
+    final db = await instance.database;
+    final owner = await _requireOwnerSettlementOwnerTx(db, ownerId);
+    final accountId = (owner['account_id'] as num).toInt();
+    final balance = await _postedAccountBalanceMinorTx(
+      db,
+      accountId,
+      creditNormal: true,
+    );
+    PermissionRuntime.require('accounting', AppPermissionAction.view);
+    return balance;
+  }
+
+  Future<Map<String, dynamic>> _requireOwnerSettlementCashAccountTx(
+    DatabaseExecutor executor,
+    int cashAccountId,
+  ) async {
+    var account = await _requireLeafAccountTx(
+      executor,
+      cashAccountId,
+      expectedType: 'Asset',
+    );
+    var parentId = account['parent_id'] as int?;
+    var foundCashRoot = account['code']?.toString() == '11';
+    final visited = <int>{cashAccountId};
+    while (parentId != null) {
+      if (!visited.add(parentId)) {
+        throw StateError('تسلسل حساب النقدية يحتوي دورة');
+      }
+      final parentRows = await executor.query(
+        'accounts',
+        columns: ['id', 'code', 'parent_id', 'account_type'],
+        where: 'id = ?',
+        whereArgs: [parentId],
+        limit: 1,
+      );
+      if (parentRows.isEmpty || parentRows.single['account_type'] != 'Asset') {
+        throw StateError('تسلسل حساب النقدية غير صالح');
+      }
+      account = parentRows.single;
+      foundCashRoot = foundCashRoot || account['code']?.toString() == '11';
+      parentId = account['parent_id'] as int?;
+    }
+    if (!foundCashRoot) {
+      throw ArgumentError('حساب الصندوق أو البنك يجب أن يقع تحت الأصل 11');
+    }
+    return await _requireLeafAccountTx(
+      executor,
+      cashAccountId,
+      expectedType: 'Asset',
+    );
+  }
+
+  Future<int> insertOwnerSettlementVoucher({
+    required int ownerId,
+    required int amountMinor,
+    required String settlementDate,
+    required int cashAccountId,
+    required String description,
+  }) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.post);
+    final reason = description.trim();
+    if (ownerId <= 0 || cashAccountId <= 0 || amountMinor <= 0) {
+      throw ArgumentError('اختر المالك وحساب الصندوق وأدخل مبلغًا موجبًا');
+    }
+    if (reason.isEmpty || reason.length > 1000) {
+      throw ArgumentError('بيان سند السداد مطلوب ولا يتجاوز 1000 حرف');
+    }
+    final date = settlementDate.trim();
+    final parsedDate = DateTime.tryParse(date);
+    if (date.length != 10 ||
+        parsedDate == null ||
+        parsedDate.toIso8601String().substring(0, 10) != date) {
+      throw ArgumentError('تاريخ سند السداد غير صحيح');
+    }
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    if (parsedDate.isAfter(today)) {
+      throw ArgumentError('لا يمكن ترحيل سند سداد بتاريخ مستقبلي');
+    }
+    final actorId = PermissionRuntime.userId;
+    final actorRole = PermissionRuntime.role;
+    if (actorId == null || actorId <= 0) {
+      throw StateError('لا توجد جلسة مستخدم صالحة لترحيل السند');
+    }
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('accounting', AppPermissionAction.post);
+      if (PermissionRuntime.userId != actorId ||
+          PermissionRuntime.role != actorRole) {
+        throw StateError('تغيرت الجلسة أثناء الترحيل؛ أُلغيت العملية');
+      }
+      final owner = await _requireOwnerSettlementOwnerTx(txn, ownerId);
+      final ownerAccountId = (owner['account_id'] as num).toInt();
+      final cashAccount = await _requireOwnerSettlementCashAccountTx(
+        txn,
+        cashAccountId,
+      );
+      final cashCode = cashAccount['code']?.toString() ?? '';
+      if (!cashCode.startsWith('11') || cashAccountId == ownerAccountId) {
+        throw ArgumentError('اختر حساب صندوق أو بنك تفصيليًا صالحًا');
+      }
+
+      final ownerBalanceNow = await _postedAccountBalanceMinorTx(
+        txn,
+        ownerAccountId,
+        creditNormal: true,
+      );
+      final ownerBalanceAtDate = await _postedAccountBalanceMinorTx(
+        txn,
+        ownerAccountId,
+        creditNormal: true,
+        throughDate: date,
+      );
+      if (amountMinor > ownerBalanceNow || amountMinor > ownerBalanceAtDate) {
+        throw StateError(
+          'مبلغ السداد يتجاوز الرصيد الدائن المتاح للمالك في دفتر الأستاذ',
+        );
+      }
+
+      final cashBalanceNow = await _postedAccountBalanceMinorTx(
+        txn,
+        cashAccountId,
+        creditNormal: false,
+      );
+      final cashBalanceAtDate = await _postedAccountBalanceMinorTx(
+        txn,
+        cashAccountId,
+        creditNormal: false,
+        throughDate: date,
+      );
+      if (amountMinor > cashBalanceNow || amountMinor > cashBalanceAtDate) {
+        throw StateError(
+          'مبلغ السداد يتجاوز الرصيد المرحّل المتاح في حساب الصندوق أو البنك',
+        );
+      }
+
+      final amount = amountMinor / 100.0;
+      final ownerName = owner['owner_name']?.toString().trim() ?? '';
+      if (ownerName.isEmpty) throw StateError('اسم المالك غير صالح');
+      final journalId = await txn.insert('journal_entries', {
+        'entry_date': date,
+        'description': reason,
+        'is_posted': 1,
+      });
+      await txn.insert('owner_settlement_journal_intents', {
+        'journal_entry_id': journalId,
+        'owner_id': ownerId,
+        'owner_account_id': ownerAccountId,
+        'amount_minor': amountMinor,
+      });
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': ownerAccountId,
+        'debit': amount,
+        'credit': 0.0,
+        'cost_center_id': null,
+        'description': reason,
+      });
+      await txn.insert('journal_lines', {
+        'journal_entry_id': journalId,
+        'account_id': cashAccountId,
+        'debit': 0.0,
+        'credit': amount,
+        'cost_center_id': null,
+        'description': reason,
+      });
+      await _updateBalanceTx(txn, ownerAccountId, amount, 0.0);
+      await _updateBalanceTx(txn, cashAccountId, 0.0, amount);
+
+      final voucherId = await txn.insert('vouchers', {
+        'voucher_type': 'صرف مستحقات مالك',
+        'voucher_date': date,
+        'amount': amount,
+        'tenant_id': null,
+        'party_name': ownerName,
+        'journal_entry_id': journalId,
+        'description': reason,
+        'period_from_date': null,
+        'period_to_date': null,
+      });
+      final settlementId = await txn.insert('owner_settlements', {
+        'voucher_id': voucherId,
+        'owner_id': ownerId,
+        'owner_account_id': ownerAccountId,
+        'cash_account_id': cashAccountId,
+        'journal_entry_id': journalId,
+        'amount_minor': amountMinor,
+        'settlement_date': date,
+        'owner_name_snapshot': ownerName,
+        'description': reason,
+        'created_by': actorId,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+      await _recordAuditTx(
+        txn,
+        action: 'OWNER_SETTLEMENT_POSTED',
+        entityType: 'owner_settlement',
+        entityId: settlementId,
+        amountMinor: amountMinor,
+        details: {
+          'voucher_id': voucherId,
+          'journal_entry_id': journalId,
+          'owner_id': ownerId,
+          'owner_account_id': ownerAccountId,
+          'cash_account_id': cashAccountId,
+          'settlement_date': date,
+        },
+      );
+      PermissionRuntime.require('accounting', AppPermissionAction.post);
+      if (PermissionRuntime.userId != actorId ||
+          PermissionRuntime.role != actorRole) {
+        throw StateError('تغيرت الجلسة أثناء الترحيل؛ أُلغيت العملية');
+      }
       return voucherId;
     });
   }
@@ -6777,6 +7304,23 @@ class DatabaseHelper {
       ''',
       [voucherId],
     );
+    final ownerSettlementRows = await db.rawQuery(
+      '''
+      SELECT s.id AS settlement_id, s.owner_id, s.owner_account_id,
+             owner_account.code AS owner_account_code,
+             owner_account.name AS owner_account_name,
+             s.cash_account_id, cash_account.code AS cash_account_code,
+             cash_account.name AS cash_account_name,
+             s.journal_entry_id, s.amount_minor, s.settlement_date,
+             s.owner_name_snapshot, s.description, s.created_by, s.created_at
+      FROM owner_settlements s
+      JOIN accounts owner_account ON owner_account.id = s.owner_account_id
+      JOIN accounts cash_account ON cash_account.id = s.cash_account_id
+      WHERE s.voucher_id = ?
+      LIMIT 1
+      ''',
+      [voucherId],
+    );
     final refunds = await db.rawQuery(
       '''
       SELECT
@@ -6807,6 +7351,9 @@ class DatabaseHelper {
       'installments': installments,
       'invoices': invoices,
       'refunds': refunds,
+      'owner_settlement': ownerSettlementRows.isEmpty
+          ? null
+          : ownerSettlementRows.first,
     };
   }
 

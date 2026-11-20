@@ -3,6 +3,7 @@ import '../../core/app_theme.dart';
 import 'chart_of_accounts_screen.dart';
 import 'journal_entry_screen.dart';
 import 'general_voucher_screen.dart';
+import 'owner_settlement_screen.dart';
 
 class AccountingMainScreen extends StatefulWidget {
   const AccountingMainScreen({super.key});
@@ -18,7 +19,7 @@ class _AccountingMainScreenState extends State<AccountingMainScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
   }
 
   @override
@@ -33,6 +34,7 @@ class _AccountingMainScreenState extends State<AccountingMainScreen>
       children: [
         TabBar(
           controller: _tabController,
+          isScrollable: true,
           labelColor: AppPalette.navy,
           unselectedLabelColor: Colors.grey,
           tabs: const [
@@ -40,6 +42,7 @@ class _AccountingMainScreenState extends State<AccountingMainScreen>
             Tab(text: 'قيد يومية يدوي'),
             Tab(text: 'سند قبض عام'),
             Tab(text: 'سند صرف عام'),
+            Tab(text: 'سداد مستحقات المالك'),
           ],
         ),
         Expanded(
@@ -50,6 +53,7 @@ class _AccountingMainScreenState extends State<AccountingMainScreen>
               JournalEntryScreen(),
               GeneralVoucherScreen(voucherType: 'قبض عام'),
               GeneralVoucherScreen(voucherType: 'صرف عام'),
+              OwnerSettlementScreen(),
             ],
           ),
         ),

@@ -21,6 +21,7 @@ class _VoucherHistoryScreenState extends State<VoucherHistoryScreen> {
     'صرف عام',
     'قبض مستأجر',
     'صرف مستأجر',
+    'صرف مستحقات مالك',
   ];
 
   final _searchController = TextEditingController();
@@ -145,14 +146,21 @@ class _VoucherHistoryScreenState extends State<VoucherHistoryScreen> {
               Expanded(
                 child: DropdownButtonFormField<String>(
                   initialValue: _selectedType,
+                  isExpanded: true,
                   decoration: const InputDecoration(
                     labelText: 'نوع السند',
                     border: OutlineInputBorder(),
                   ),
                   items: _types
                       .map(
-                        (type) =>
-                            DropdownMenuItem(value: type, child: Text(type)),
+                        (type) => DropdownMenuItem(
+                          value: type,
+                          child: Text(
+                            type == 'صرف مستحقات مالك' ? 'سداد المالك' : type,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
                       )
                       .toList(),
                   onChanged: (type) {
@@ -501,6 +509,10 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
               .map((refund) => Map<String, dynamic>.from(refund))
               .toList()
         : <Map<String, dynamic>>[];
+    final rawOwnerSettlement = _data!['owner_settlement'];
+    final ownerSettlement = rawOwnerSettlement is Map
+        ? Map<String, dynamic>.from(rawOwnerSettlement)
+        : null;
     final invoicedInstallmentIds = invoices
         .map((invoice) => invoice['installment_id'])
         .whereType<num>()
@@ -526,6 +538,20 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         voucher['journal_entry_id']?.toString() ?? '—',
       ),
       _detailTile('البيان', voucher['description']?.toString() ?? '—'),
+      if (ownerSettlement != null) ...[
+        _detailTile(
+          'رقم سجل سداد المالك',
+          ownerSettlement['settlement_id']?.toString() ?? '—',
+        ),
+        _detailTile(
+          'حساب التزامات المالك',
+          '${ownerSettlement['owner_account_code'] ?? '—'} — ${ownerSettlement['owner_account_name'] ?? '—'}',
+        ),
+        _detailTile(
+          'حساب الصندوق / البنك',
+          '${ownerSettlement['cash_account_code'] ?? '—'} — ${ownerSettlement['cash_account_name'] ?? '—'}',
+        ),
+      ],
       if ((voucher['period_from_date']?.toString().trim().isNotEmpty ??
               false) ||
           (voucher['period_to_date']?.toString().trim().isNotEmpty ?? false))

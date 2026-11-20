@@ -1710,6 +1710,12 @@ void main() {
       final missingSaleTriggerBackupPath =
           '$testDocuments/missing-sale-trigger.db';
       final missingSaleIndexBackupPath = '$testDocuments/missing-sale-index.db';
+      final missingOwnerSettlementTriggerBackupPath =
+          '$testDocuments/missing-owner-settlement-trigger.db';
+      final brokenOwnerSettlementTriggerBackupPath =
+          '$testDocuments/broken-owner-settlement-trigger.db';
+      final missingOwnerSettlementIndexBackupPath =
+          '$testDocuments/missing-owner-settlement-index.db';
       await DatabaseHelper.instance.backupToFile(completeBackupPath);
       await File(completeBackupPath).copy(incompleteBackupPath);
       final incompleteDb = await databaseFactory.openDatabase(
@@ -1780,6 +1786,78 @@ void main() {
         reason: 'غياب قيد سلسلة التصحيح لا يستبدل قاعدة التشغيل',
       );
 
+      await File(
+        completeBackupPath,
+      ).copy(missingOwnerSettlementTriggerBackupPath);
+      final missingOwnerSettlementTriggerDb = await databaseFactory
+          .openDatabase(missingOwnerSettlementTriggerBackupPath);
+      await missingOwnerSettlementTriggerDb.execute(
+        'DROP TRIGGER owner_settlements_no_delete',
+      );
+      await missingOwnerSettlementTriggerDb.close();
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(
+          missingOwnerSettlementTriggerBackupPath,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+        reason: 'غياب حاجز عدم الحذف لسداد المالك لا يستبدل قاعدة التشغيل',
+      );
+
+      await File(
+        completeBackupPath,
+      ).copy(brokenOwnerSettlementTriggerBackupPath);
+      final brokenOwnerSettlementTriggerDb = await databaseFactory.openDatabase(
+        brokenOwnerSettlementTriggerBackupPath,
+      );
+      await brokenOwnerSettlementTriggerDb.execute(
+        'DROP TRIGGER owner_settlement_valid_insert',
+      );
+      await brokenOwnerSettlementTriggerDb.execute('''
+        CREATE TRIGGER owner_settlement_valid_insert
+        BEFORE INSERT ON owner_settlements
+        BEGIN
+          SELECT 1;
+        END
+      ''');
+      await brokenOwnerSettlementTriggerDb.close();
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(
+          brokenOwnerSettlementTriggerBackupPath,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+        reason: 'تعريف حاجز خامل لا يستبدل قاعدة التشغيل',
+      );
+
+      await File(
+        completeBackupPath,
+      ).copy(missingOwnerSettlementIndexBackupPath);
+      final missingOwnerSettlementIndexDb = await databaseFactory.openDatabase(
+        missingOwnerSettlementIndexBackupPath,
+      );
+      await missingOwnerSettlementIndexDb.execute(
+        'DROP INDEX owner_settlements_owner_date_idx',
+      );
+      await missingOwnerSettlementIndexDb.close();
+      await expectLater(
+        DatabaseHelper.instance.restoreFromFile(
+          missingOwnerSettlementIndexBackupPath,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        (await DatabaseHelper.instance.getCompanyInfo())?['name_ar'],
+        originalName,
+        reason: 'غياب فهرس سجل سداد المالك لا يستبدل قاعدة التشغيل',
+      );
+
       final walBackupPath = '$testDocuments/wal-pending-backup.db';
       await DatabaseHelper.instance.backupToFile(walBackupPath);
       final walDatabase = await databaseFactory.openDatabase(walBackupPath);
@@ -1806,6 +1884,8 @@ void main() {
         missingColumnBackupPath,
         missingSaleTriggerBackupPath,
         missingSaleIndexBackupPath,
+        missingOwnerSettlementTriggerBackupPath,
+        missingOwnerSettlementIndexBackupPath,
         walBackupPath,
       ]) {
         for (final suffix in ['', '-wal', '-shm']) {
@@ -3342,12 +3422,19 @@ void main() {
     await tester.pumpWidget(
       const MaterialApp(home: Scaffold(body: VoucherHistoryScreen())),
     );
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(seconds: 1)),
-    );
-    await tester.pump();
+    final tenantDisbursement = find.textContaining('سند صرف مستأجر رقم');
+    for (
+      var attempt = 0;
+      attempt < 30 && tenantDisbursement.evaluate().isEmpty;
+      attempt++
+    ) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+    }
     expect(find.text('سجل السندات'), findsOneWidget);
-    expect(find.textContaining('سند صرف مستأجر رقم'), findsWidgets);
+    expect(tenantDisbursement, findsWidgets);
     await tester.drag(find.byType(ListView), const Offset(0, -500));
     await tester.pump();
     expect(find.textContaining('سند قبض مستأجر رقم'), findsWidgets);

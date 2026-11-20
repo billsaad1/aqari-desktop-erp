@@ -249,6 +249,13 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                           color: primaryColor,
                         ),
                       ),
+                      if (!isReceipt) ...[
+                        const SizedBox(height: 10),
+                        const Text(
+                          'لسداد التزامات الملاك استخدم تبويب «سداد مستحقات المالك»؛ لا تسجلها كسند صرف عام.',
+                          style: TextStyle(color: Colors.black54),
+                        ),
+                      ],
                       const SizedBox(height: 32),
                       Row(
                         children: [
