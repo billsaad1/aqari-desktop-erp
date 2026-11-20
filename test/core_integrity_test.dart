@@ -1955,6 +1955,57 @@ void main() {
   );
 
   test(
+    'rolls back the live database when restore fails after file replacement',
+    () async {
+      final helper = DatabaseHelper.instance;
+      await helper.database;
+      final originalName = (await helper.getCompanyInfo())?['name_ar'];
+      final sourcePath = '$testDocuments/failure-after-replacement.db';
+      await helper.backupToFile(sourcePath);
+
+      final replacement = await databaseFactory.openDatabase(sourcePath);
+      await replacement.update('company_info', {
+        'name_ar': 'نسخة بديلة للاختبار',
+      }, where: 'id = 1');
+      await replacement.close();
+
+      DatabaseHelper.restorePostReplacementHookForTesting = () async {
+        throw StateError('فشل محقون بعد تبديل الملف');
+      };
+      try {
+        await expectLater(
+          helper.restoreFromFile(sourcePath),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'rollback confirmation',
+              allOf(
+                contains('لكن أُعيدت قاعدة التشغيل'),
+                contains('فشل محقون بعد تبديل الملف'),
+              ),
+            ),
+          ),
+        );
+      } finally {
+        DatabaseHelper.restorePostReplacementHookForTesting = null;
+      }
+
+      final restoredLive = await helper.database;
+      expect(
+        (await helper.getCompanyInfo())?['name_ar'],
+        originalName,
+        reason:
+            'يجب أن تبقى قاعدة التشغيل الأصلية عند فشل الاستعادة بعد التبديل',
+      );
+      expect(await restoredLive.rawQuery('PRAGMA integrity_check'), [
+        {'integrity_check': 'ok'},
+      ]);
+      expect(await File(sourcePath).exists(), isTrue);
+      await File(sourcePath).delete();
+    },
+  );
+
+  test(
     'unit rent period is explicit and legacy rows are not guessed',
     () async {
       final db = await DatabaseHelper.instance.database;
