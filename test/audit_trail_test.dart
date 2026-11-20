@@ -90,7 +90,7 @@ void main() {
       'tenant_id': tenantId,
       'unit_id': unitId,
       'start_date': '2026-11-10',
-      'end_date': '2027-11-10',
+      'end_date': '2027-11-09',
       'rent_amount': 200.0,
       'payment_method': 'شهري',
       'status': 'Active',
@@ -607,7 +607,7 @@ void main() {
     });
   });
 
-  group('v22 to v23 upgrade', () {
+  group('v22 to v24 upgrade', () {
     test('rebuilds audit_logs, keeps rows and backfills the actor', () async {
       final db = await helper.database;
       await db.execute('DROP TABLE audit_logs');
@@ -669,6 +669,7 @@ void main() {
           .toSet();
 
       expect(codes, isNotEmpty);
+      expect(AuditTrailScreen.actionLabel('CONTRACT_RENEWED'), 'تجديد عقد');
       final unlabelled = codes.where((code) {
         final label = AuditTrailScreen.actionLabel(code);
         return label == code || !RegExp(r'[\u0600-\u06FF]').hasMatch(label);

@@ -93,6 +93,21 @@ class LeasingProvider with ChangeNotifier {
     return contractId;
   }
 
+  Future<int> renewContract(
+    int previousContractId,
+    Map<String, dynamic> contract,
+    List<Map<String, dynamic>> installments,
+  ) async {
+    final contractId = await DatabaseHelper.instance
+        .insertContractWithInstallments(
+          contract,
+          installments,
+          renewedFromContractId: previousContractId,
+        );
+    await loadInitialData();
+    return contractId;
+  }
+
   Future<void> cancelContract(int contractId, {required String reason}) async {
     await DatabaseHelper.instance.cancelContract(contractId, reason: reason);
     await loadInitialData();

@@ -4,6 +4,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart';
 import 'dart:io';
 
+import '../core/contract_term.dart';
 import '../core/internal_tax.dart';
 import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
@@ -22,7 +23,7 @@ import 'database_integrity_migrations.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 23;
+  static const int _schemaVersion = 24;
 
   /// Current schema version, exposed so tests and diagnostics assert against a
   /// single source of truth instead of hardcoding a number that drifts.
@@ -1127,6 +1128,15 @@ class DatabaseHelper {
       await _rebuildAuditLogsTable(db);
       await _createAuditTrailSchema(db);
     }
+    if (oldVersion < 24) {
+      await _ensureColumn(
+        db,
+        'contracts',
+        'renewed_from_contract_id',
+        'INTEGER REFERENCES contracts (id)',
+      );
+      await _createContractRenewalSchema(db);
+    }
   }
 
   /// Rebuilds `audit_logs` without a foreign key on `user_id`.
@@ -1949,6 +1959,37 @@ class DatabaseHelper {
     ''');
   }
 
+  Future<void> _createContractRenewalSchema(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS contracts_live_renewal_source_unique
+      ON contracts(renewed_from_contract_id)
+      WHERE renewed_from_contract_id IS NOT NULL AND status != 'Cancelled'
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS contracts_renewal_link_valid_insert
+      BEFORE INSERT ON contracts
+      WHEN NEW.renewed_from_contract_id IS NOT NULL
+      BEGIN
+        SELECT CASE WHEN NOT EXISTS (
+          SELECT 1 FROM contracts source
+          WHERE source.id = NEW.renewed_from_contract_id
+            AND source.status = 'Active'
+            AND source.unit_id = NEW.unit_id
+            AND source.tenant_id = NEW.tenant_id
+            AND DATE(NEW.start_date) = DATE(source.end_date, '+1 day')
+        ) THEN RAISE(ABORT, 'invalid contract renewal link') END;
+      END
+    ''');
+    await db.execute('''
+      CREATE TRIGGER IF NOT EXISTS contracts_renewal_link_immutable
+      BEFORE UPDATE OF renewed_from_contract_id ON contracts
+      WHEN OLD.renewed_from_contract_id IS NOT NEW.renewed_from_contract_id
+      BEGIN
+        SELECT RAISE(ABORT, 'contract renewal links are immutable');
+      END
+    ''');
+  }
+
   Future _createDB(Database db, int version) async {
     // 1. Company Info
     await db.execute('''
@@ -2169,6 +2210,7 @@ class DatabaseHelper {
         status TEXT DEFAULT 'Active',
         cancellation_reason TEXT,
         cancelled_at TEXT,
+        renewed_from_contract_id INTEGER REFERENCES contracts (id),
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (unit_id) REFERENCES units (id)
       )
@@ -2318,6 +2360,7 @@ class DatabaseHelper {
     await _createRefundSchema(db);
     await _createTenantNoticeSchema(db);
     await _createPropertySaleReviewSchema(db);
+    await _createContractRenewalSchema(db);
     await _createAuditTrailSchema(db);
     await _insertSeedData(db);
   }
@@ -4445,11 +4488,10 @@ class DatabaseHelper {
     };
   }
 
-  Future<int> insertContractWithInstallments(
+  void _validateContractAndInstallments(
     Map<String, dynamic> contract,
     List<Map<String, dynamic>> installments,
-  ) async {
-    PermissionRuntime.require('leasing', AppPermissionAction.add);
+  ) {
     final rent = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
     final startDate = DateTime.tryParse(
       contract['start_date']?.toString() ?? '',
@@ -4459,11 +4501,15 @@ class DatabaseHelper {
         !_hasCentPrecision(rent) ||
         startDate == null ||
         endDate == null ||
-        startDate.isAfter(endDate)) {
-      throw ArgumentError('بيانات العقد أو مدة الإيجار غير صحيحة');
+        ContractTerm.wholeMonths(startDate, endDate) == null) {
+      throw ArgumentError(
+        'بيانات العقد غير صحيحة؛ المدة يجب أن تكون شهرًا أو عددًا صحيحًا من الشهور دون أيام جزئية',
+      );
     }
-    if (installments.isEmpty)
+    if (installments.isEmpty) {
       throw ArgumentError('يجب إضافة قسط واحد على الأقل');
+    }
+
     var installmentCents = 0;
     for (final installment in installments) {
       final amount = (installment['amount'] as num?)?.toDouble() ?? 0;
@@ -4484,6 +4530,20 @@ class DatabaseHelper {
     if (installmentCents != (rent * 100).round()) {
       throw ArgumentError('مجموع الأقساط لا يساوي قيمة العقد');
     }
+  }
+
+  Future<int> insertContractWithInstallments(
+    Map<String, dynamic> contract,
+    List<Map<String, dynamic>> installments, {
+    int? renewedFromContractId,
+  }) async {
+    PermissionRuntime.require('leasing', AppPermissionAction.add);
+    final rent = (contract['rent_amount'] as num?)?.toDouble() ?? 0;
+    final startDate = DateTime.tryParse(
+      contract['start_date']?.toString() ?? '',
+    );
+    _validateContractAndInstallments(contract, installments);
+    final validatedStartDate = startDate!;
 
     final db = await instance.database;
     return db.transaction((txn) async {
@@ -4510,8 +4570,16 @@ class DatabaseHelper {
         whereArgs: [unitId],
         limit: 1,
       );
-      if (unitRows.isEmpty || unitRows.first['status'] != 'شاغرة') {
-        throw StateError('الوحدة لم تعد شاغرة؛ حدّث القائمة واختر وحدة أخرى');
+      if (unitRows.isEmpty) throw ArgumentError('الوحدة المحددة غير موجودة');
+      final expectedUnitStatus = renewedFromContractId == null
+          ? 'شاغرة'
+          : 'مؤجرة';
+      if (unitRows.first['status'] != expectedUnitStatus) {
+        throw StateError(
+          renewedFromContractId == null
+              ? 'الوحدة لم تعد شاغرة؛ حدّث القائمة واختر وحدة أخرى'
+              : 'الوحدة لم تعد مرتبطة بعقد ساري؛ تعذر تجديده',
+        );
       }
       final unitRentPeriod = unitRows.first['default_rent_period'];
       final unitRent = unitRows.first['default_rent'] as num?;
@@ -4528,14 +4596,79 @@ class DatabaseHelper {
           'سعر الوحدة الافتراضي غير صالح؛ حدّث بيانات الوحدة قبل إنشاء العقد',
         );
       }
-      final activeContracts = await txn.query(
-        'contracts',
-        columns: ['id'],
-        where: "unit_id = ? AND status = 'Active'",
-        whereArgs: [unitId],
-        limit: 1,
-      );
-      if (activeContracts.isNotEmpty) throw StateError('للوحدة عقد نشط بالفعل');
+      if (renewedFromContractId == null) {
+        final activeContracts = await txn.query(
+          'contracts',
+          columns: ['id'],
+          where: "unit_id = ? AND status = 'Active'",
+          whereArgs: [unitId],
+          limit: 1,
+        );
+        if (activeContracts.isNotEmpty) {
+          throw StateError('للوحدة عقد نشط بالفعل');
+        }
+      } else {
+        final previousRows = await txn.query(
+          'contracts',
+          where: "id = ? AND status = 'Active'",
+          whereArgs: [renewedFromContractId],
+          limit: 1,
+        );
+        if (previousRows.isEmpty) {
+          throw StateError('العقد السابق غير موجود أو غير قابل للتجديد');
+        }
+        final previous = previousRows.first;
+        if (previous['unit_id'] != unitId ||
+            previous['tenant_id'] != tenantId) {
+          throw StateError('يجب أن يحافظ التجديد على المستأجر والوحدة نفسيهما');
+        }
+        final previousEnd = DateTime.tryParse(
+          previous['end_date']?.toString() ?? '',
+        );
+        if (previousEnd == null) {
+          throw StateError('نهاية العقد السابق غير صالحة؛ يلزم تصحيحها يدويًا');
+        }
+        final expectedStart = DateTime(
+          previousEnd.year,
+          previousEnd.month,
+          previousEnd.day,
+        ).add(const Duration(days: 1));
+        if (validatedStartDate.year != expectedStart.year ||
+            validatedStartDate.month != expectedStart.month ||
+            validatedStartDate.day != expectedStart.day) {
+          throw StateError(
+            'يبدأ عقد التجديد في اليوم التالي لنهاية العقد السابق',
+          );
+        }
+        final existingSuccessor = await txn.query(
+          'contracts',
+          columns: ['id'],
+          where: "renewed_from_contract_id = ? AND status != 'Cancelled'",
+          whereArgs: [renewedFromContractId],
+          limit: 1,
+        );
+        if (existingSuccessor.isNotEmpty) {
+          throw StateError('سبق إنشاء عقد تجديد لهذا العقد');
+        }
+        final overlaps = await txn.rawQuery(
+          '''
+          SELECT id FROM contracts
+          WHERE unit_id = ? AND status = 'Active' AND id != ?
+            AND DATE(start_date) <= DATE(?)
+            AND DATE(end_date) >= DATE(?)
+          LIMIT 1
+          ''',
+          [
+            unitId,
+            renewedFromContractId,
+            contract['end_date'],
+            contract['start_date'],
+          ],
+        );
+        if (overlaps.isNotEmpty) {
+          throw StateError('توجد مدة عقد أخرى متداخلة لهذه الوحدة');
+        }
+      }
 
       final partySnapshot = await _captureContractPartySnapshot(
         txn,
@@ -4545,6 +4678,7 @@ class DatabaseHelper {
 
       final contractId = await txn.insert('contracts', {
         ...contract,
+        'renewed_from_contract_id': renewedFromContractId,
         'unit_rent_amount': unitRent?.toDouble(),
         'unit_rent_period': unitRentPeriod,
         'party_snapshot': jsonEncode(partySnapshot),
@@ -4554,16 +4688,22 @@ class DatabaseHelper {
           ..['contract_id'] = contractId;
         await txn.insert('contract_installments', installment);
       }
-      final updated = await txn.update(
-        'units',
-        {'status': 'مؤجرة'},
-        where: "id = ? AND status = 'شاغرة'",
-        whereArgs: [unitId],
-      );
-      if (updated != 1) throw StateError('تعذر اعتماد الوحدة؛ أُلغيت المعاملة');
+      if (renewedFromContractId == null) {
+        final updated = await txn.update(
+          'units',
+          {'status': 'مؤجرة'},
+          where: "id = ? AND status = 'شاغرة'",
+          whereArgs: [unitId],
+        );
+        if (updated != 1) {
+          throw StateError('تعذر اعتماد الوحدة؛ أُلغيت المعاملة');
+        }
+      }
       await _recordAuditTx(
         txn,
-        action: 'CONTRACT_CREATED',
+        action: renewedFromContractId == null
+            ? 'CONTRACT_CREATED'
+            : 'CONTRACT_RENEWED',
         entityType: 'contract',
         entityId: contractId,
         amountMinor: (rent * 100).round(),
@@ -4574,6 +4714,7 @@ class DatabaseHelper {
           'end_date': contract['end_date']?.toString(),
           'rent_amount_minor': (rent * 100).round(),
           'installment_count': installments.length,
+          'renewed_from_contract_id': renewedFromContractId,
         },
       );
       return contractId;
@@ -4589,7 +4730,15 @@ class DatabaseHelper {
   Future<List<Map<String, dynamic>>> getAllContracts() async {
     PermissionRuntime.require('leasing', AppPermissionAction.view);
     final db = await instance.database;
-    return await db.query('contracts');
+    return db.rawQuery('''
+      SELECT c.*,
+        (SELECT successor.id FROM contracts successor
+          WHERE successor.renewed_from_contract_id = c.id
+            AND successor.status != 'Cancelled'
+          ORDER BY successor.id DESC LIMIT 1) AS renewed_to_contract_id
+      FROM contracts c
+      ORDER BY c.id DESC
+    ''');
   }
 
   Future<List<Map<String, dynamic>>>
@@ -6825,6 +6974,17 @@ class DatabaseHelper {
       if (contractResult.isEmpty) throw StateError('العقد غير موجود');
       if (contractResult.first['status'] == 'Cancelled') return;
 
+      final liveSuccessors = await txn.query(
+        'contracts',
+        columns: ['id'],
+        where: "renewed_from_contract_id = ? AND status != 'Cancelled'",
+        whereArgs: [contractId],
+        limit: 1,
+      );
+      if (liveSuccessors.isNotEmpty) {
+        throw StateError('لا يمكن إلغاء عقد له عقد تجديد غير ملغى');
+      }
+
       // Never erase a financial schedule or leave an invoice without reversal.
       final installments = await txn.query(
         'contract_installments',
@@ -6886,8 +7046,12 @@ class DatabaseHelper {
       );
 
       final otherActiveContracts = await txn.rawQuery(
-        "SELECT COUNT(*) AS count FROM contracts WHERE unit_id = ? AND status = 'Active'",
-        [unitId],
+        '''
+        SELECT COUNT(*) AS count FROM contracts
+        WHERE unit_id = ? AND status = 'Active'
+          AND DATE(end_date) >= DATE(?)
+        ''',
+        [unitId, cancelledAt],
       );
       if ((otherActiveContracts.first['count'] as int) == 0) {
         await txn.update(
@@ -6913,7 +7077,11 @@ class DatabaseHelper {
         (SELECT COUNT(*) FROM units WHERE status = 'مؤجرة') AS rented_units_count,
         (SELECT COUNT(*) FROM units WHERE status = 'شاغرة') AS vacant_units_count,
         (SELECT COUNT(*) FROM tenants) AS tenants_count,
-        (SELECT COUNT(*) FROM contracts WHERE status = 'Active') AS active_contracts_count,
+        (SELECT COUNT(*) FROM contracts
+          WHERE status = 'Active'
+            AND DATE(start_date) <= DATE('now', 'localtime')
+            AND DATE(end_date) >= DATE('now', 'localtime'))
+          AS active_contracts_count,
         (SELECT COALESCE(SUM(
           CASE WHEN ti.id IS NOT NULL
             THEN MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0)
