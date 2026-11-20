@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart';
@@ -26,6 +27,8 @@ class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
   static const int _schemaVersion = 27;
+  @visibleForTesting
+  static Future<void> Function()? restorePostReplacementHookForTesting;
 
   /// Current schema version, exposed so tests and diagnostics assert against a
   /// single source of truth instead of hardcoding a number that drifts.
@@ -206,6 +209,7 @@ class DatabaseHelper {
       liveReplacementStarted = true;
       await _deleteSqliteSidecars(livePath.path);
       await staged.rename(livePath.path);
+      await restorePostReplacementHookForTesting?.call();
       _database = await _initDB('desktop_erp.db');
       await _validateOpenDatabase(_database!, requireCurrentSchema: true);
       return rollback.path;
