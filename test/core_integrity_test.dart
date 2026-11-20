@@ -682,12 +682,15 @@ void main() {
       }
     });
 
-    test('restores and upgrades a v27 SMS schema to v28', () async {
+    test('restores and upgrades a v27 backup to the current schema', () async {
       final sourcePath = '$testDocuments/aqari-v27-sms-schema.db';
       await DatabaseHelper.instance.backupToFile(sourcePath);
       final legacy = await databaseFactory.openDatabase(
         sourcePath,
         options: OpenDatabaseOptions(readOnly: false),
+      );
+      await legacy.execute(
+        'ALTER TABLE contracts DROP COLUMN terms_conditions_snapshot',
       );
       await legacy.execute(
         'ALTER TABLE sms_settings DROP COLUMN api_key_secret_id',
@@ -702,12 +705,24 @@ void main() {
         );
         final upgraded = await DatabaseHelper.instance.database;
         final version = await upgraded.rawQuery('PRAGMA user_version');
-        expect((version.single.values.single as num).toInt(), 28);
+        expect(
+          (version.single.values.single as num).toInt(),
+          DatabaseHelper.schemaVersion,
+        );
         final columns = await upgraded.rawQuery(
           'PRAGMA table_info(sms_settings)',
         );
         expect(
           columns.any((column) => column['name'] == 'api_key_secret_id'),
+          isTrue,
+        );
+        final contractColumns = await upgraded.rawQuery(
+          'PRAGMA table_info(contracts)',
+        );
+        expect(
+          contractColumns.any(
+            (column) => column['name'] == 'terms_conditions_snapshot',
+          ),
           isTrue,
         );
       } finally {
@@ -1859,6 +1874,20 @@ void main() {
       'بند مرقم بالأرقام العربية',
     ]);
     expect(LeaseContractTerms.resolve('  '), LeaseContractTerms.defaultClauses);
+    expect(
+      LeaseContractTerms.resolveForContract(
+        contract: {'terms_conditions_snapshot': 'شروط وقت إنشاء العقد'},
+        companyInfo: {'terms_conditions': 'شروط المنشأة الحالية'},
+      ),
+      ['شروط وقت إنشاء العقد'],
+    );
+    expect(
+      LeaseContractTerms.resolveForContract(
+        contract: {'terms_conditions_snapshot': null},
+        companyInfo: {'terms_conditions': 'شروط المنشأة الحالية'},
+      ),
+      ['شروط المنشأة الحالية'],
+    );
   });
 
   test(
@@ -2893,6 +2922,10 @@ void main() {
     'posts leasing receipts and invoices atomically and rejects invalid duplicates',
     () async {
       final db = await DatabaseHelper.instance.database;
+      final termsAtContractCreation =
+          (await DatabaseHelper.instance.getCompanyInfo())?['terms_conditions']
+              ?.toString() ??
+          LeaseContractTerms.defaultText;
       await DatabaseHelper.instance.updateCompanyInfo({
         'name_ar': 'منشأة اختبار الفاتورة',
         'tax_rate': 15.0,
@@ -2948,6 +2981,28 @@ void main() {
       expect(storedContract['rent_amount'], 1200.0);
       expect(storedContract['unit_rent_amount'], 100.0);
       expect(storedContract['unit_rent_period'], 'monthly');
+      expect(
+        storedContract['terms_conditions_snapshot'],
+        termsAtContractCreation,
+      );
+      try {
+        await DatabaseHelper.instance.updateCompanyInfo({
+          'terms_conditions': 'شروط أحدث لا تخص العقد المحفوظ',
+        });
+        final currentCompanyInfo = await DatabaseHelper.instance
+            .getCompanyInfo();
+        expect(
+          LeaseContractTerms.resolveForContract(
+            contract: storedContract,
+            companyInfo: currentCompanyInfo,
+          ),
+          LeaseContractTerms.resolve(termsAtContractCreation),
+        );
+      } finally {
+        await DatabaseHelper.instance.updateCompanyInfo({
+          'terms_conditions': termsAtContractCreation,
+        });
+      }
       final partySnapshot = ContractPartySnapshot.decode(storedContract);
       expect(
         ContractPartySnapshot.section(partySnapshot, 'tenant')['name'],

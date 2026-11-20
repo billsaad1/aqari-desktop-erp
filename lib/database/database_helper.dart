@@ -29,7 +29,7 @@ import 'property_sale_schema.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 28;
+  static const int _schemaVersion = 29;
   @visibleForTesting
   static Future<void> Function()? restorePostReplacementHookForTesting;
 
@@ -553,6 +553,7 @@ class DatabaseHelper {
         'unit_rent_amount',
         'unit_rent_period',
         'party_snapshot',
+        'terms_conditions_snapshot',
         'payment_method',
         'purpose',
         'electricity_reading',
@@ -1494,6 +1495,9 @@ class DatabaseHelper {
     }
     if (oldVersion < 28) {
       await _ensureColumn(db, 'sms_settings', 'api_key_secret_id', 'TEXT');
+    }
+    if (oldVersion < 29) {
+      await _ensureColumn(db, 'contracts', 'terms_conditions_snapshot', 'TEXT');
     }
   }
 
@@ -2571,6 +2575,7 @@ class DatabaseHelper {
         unit_rent_amount REAL,
         unit_rent_period TEXT CHECK (unit_rent_period IN ('monthly', 'annual') OR unit_rent_period IS NULL),
         party_snapshot TEXT,
+        terms_conditions_snapshot TEXT,
         payment_method TEXT,
         purpose TEXT,
         electricity_reading TEXT,
@@ -5441,6 +5446,15 @@ class DatabaseHelper {
         tenantRows.first,
         unitRows.first,
       );
+      final companyRows = await txn.query(
+        'company_info',
+        columns: ['terms_conditions'],
+        limit: 1,
+      );
+      final termsSnapshot = companyRows.isEmpty
+          ? LeaseContractTerms.defaultText
+          : companyRows.first['terms_conditions']?.toString() ??
+                LeaseContractTerms.defaultText;
 
       final contractId = await txn.insert('contracts', {
         ...contract,
@@ -5448,6 +5462,7 @@ class DatabaseHelper {
         'unit_rent_amount': unitRent?.toDouble(),
         'unit_rent_period': unitRentPeriod,
         'party_snapshot': jsonEncode(partySnapshot),
+        'terms_conditions_snapshot': termsSnapshot,
       });
       for (final item in installments) {
         final installment = Map<String, dynamic>.from(item)

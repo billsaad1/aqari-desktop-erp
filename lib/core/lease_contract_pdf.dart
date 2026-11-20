@@ -33,8 +33,9 @@ class LeaseContractPdf {
     );
     final purpose = _value(contract['purpose'], fallback: 'غير محدد');
     final unitType = _value(unitTypeName, fallback: 'غير محدد');
-    final clauses = LeaseContractTerms.resolve(
-      companyInfo?['terms_conditions'],
+    final clauses = LeaseContractTerms.resolveForContract(
+      contract: contract,
+      companyInfo: companyInfo,
     );
     final electricityReading = _value(
       contract['electricity_reading'],
