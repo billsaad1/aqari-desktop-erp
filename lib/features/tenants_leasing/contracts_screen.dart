@@ -1,6 +1,7 @@
 import '../../core/pdf_preview_dialog.dart';
 import '../../core/lease_contract_pdf.dart';
 import '../../core/contract_party_snapshot.dart';
+import '../../core/contract_term.dart';
 import '../../core/rent_period.dart';
 import '../../core/permission_policy.dart';
 import 'package:flutter/material.dart';
@@ -23,6 +24,8 @@ class _ContractsScreenState extends State<ContractsScreen> {
 
   int? _selectedTenantId;
   int? _selectedUnitId;
+  int? _renewalSourceContractId;
+  Map<String, dynamic>? _renewalUnit;
   bool _isSavingContract = false;
 
   final _startDateController = TextEditingController(
@@ -31,7 +34,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
   final _endDateController = TextEditingController(
     text: DateFormat(
       'yyyy-MM-dd',
-    ).format(DateTime.now().add(const Duration(days: 365))),
+    ).format(ContractTerm.endDateForMonths(DateTime.now(), 12)),
   );
   final _totalRentController = TextEditingController();
   final _purposeController = TextEditingController();
@@ -41,6 +44,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
 
   Map<String, dynamic>? _selectedVacantUnit() {
     if (_selectedUnitId == null) return null;
+    if (_renewalUnit?['id'] == _selectedUnitId) return _renewalUnit;
     final units = Provider.of<LeasingProvider>(
       context,
       listen: false,
@@ -49,6 +53,13 @@ class _ContractsScreenState extends State<ContractsScreen> {
       if (unit['id'] == _selectedUnitId) return unit;
     }
     return null;
+  }
+
+  int? _draftDurationMonths() {
+    final startDate = DateTime.tryParse(_startDateController.text);
+    final endDate = DateTime.tryParse(_endDateController.text);
+    if (startDate == null || endDate == null) return null;
+    return ContractTerm.wholeMonths(startDate, endDate);
   }
 
   // Custom structure to hold manual edit controllers for each installment
@@ -105,6 +116,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
 
   Future<void> _pickContractDate(bool start) async {
     final controller = start ? _startDateController : _endDateController;
+    final currentDuration = start ? (_draftDurationMonths() ?? 12) : null;
     final current = DateTime.tryParse(controller.text) ?? DateTime.now();
     final picked = await showDatePicker(
       context: context,
@@ -116,9 +128,9 @@ class _ContractsScreenState extends State<ContractsScreen> {
     setState(() {
       controller.text = DateFormat('yyyy-MM-dd').format(picked);
       if (start) {
-        final currentEnd = DateTime.tryParse(_endDateController.text);
-        if (currentEnd == null || picked.isAfter(currentEnd))
-          _endDateController.text = controller.text;
+        _endDateController.text = DateFormat(
+          'yyyy-MM-dd',
+        ).format(ContractTerm.endDateForMonths(picked, currentDuration!));
       }
     });
   }
@@ -148,6 +160,109 @@ class _ContractsScreenState extends State<ContractsScreen> {
     }
   }
 
+  Future<void> _beginRenewal(Map<String, dynamic> contract) async {
+    if (!PermissionRuntime.allows('leasing', AppPermissionAction.add)) return;
+    if (contract['status'] != 'Active' ||
+        contract['renewed_to_contract_id'] != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('هذا العقد غير متاح للتجديد')),
+      );
+      return;
+    }
+    final contractId = (contract['id'] as num?)?.toInt();
+    final unitId = (contract['unit_id'] as num?)?.toInt();
+    final tenantId = (contract['tenant_id'] as num?)?.toInt();
+    final previousEnd = DateTime.tryParse(
+      contract['end_date']?.toString() ?? '',
+    );
+    if (contractId == null ||
+        unitId == null ||
+        tenantId == null ||
+        previousEnd == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('بيانات العقد السابق غير مكتملة')),
+      );
+      return;
+    }
+
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final unitRows = await db.query(
+        'units',
+        where: 'id = ?',
+        whereArgs: [unitId],
+        limit: 1,
+      );
+      if (unitRows.isEmpty)
+        throw StateError('الوحدة المرتبطة بالعقد غير موجودة');
+      final nextStart = DateTime(
+        previousEnd.year,
+        previousEnd.month,
+        previousEnd.day,
+      ).add(const Duration(days: 1));
+      final previousStart =
+          DateTime.tryParse(contract['start_date']?.toString() ?? '') ??
+          previousEnd;
+      final durationMonths =
+          ContractTerm.wholeMonths(previousStart, previousEnd) ?? 12;
+      final nextEnd = ContractTerm.endDateForMonths(nextStart, durationMonths);
+      if (!mounted) return;
+
+      _disposeInstallmentControllers();
+      setState(() {
+        _renewalSourceContractId = contractId;
+        _renewalUnit = Map<String, dynamic>.from(unitRows.first);
+        _selectedTenantId = tenantId;
+        _selectedUnitId = unitId;
+        _startDateController.text = DateFormat('yyyy-MM-dd').format(nextStart);
+        _endDateController.text = DateFormat('yyyy-MM-dd').format(nextEnd);
+        final previousRent = contract['rent_amount'] as num?;
+        _totalRentController.text = previousRent == null
+            ? ''
+            : previousRent.toStringAsFixed(2);
+        final previousPaymentMethod = contract['payment_method']?.toString();
+        _paymentMethod =
+            const [
+              'شهري',
+              'ربع سنوي',
+              'نصف سنوي',
+              'سنوي',
+              'دفعة واحدة',
+            ].contains(previousPaymentMethod)
+            ? previousPaymentMethod!
+            : 'شهري';
+        _purposeController.text = contract['purpose']?.toString() ?? '';
+        _electricityReadingController.text =
+            contract['electricity_reading']?.toString() ?? '';
+        _generatedInstallments.clear();
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('تعذر تجهيز التجديد: $error')));
+      }
+    }
+  }
+
+  void _clearDraft() {
+    _disposeInstallmentControllers();
+    _selectedTenantId = null;
+    _selectedUnitId = null;
+    _renewalSourceContractId = null;
+    _renewalUnit = null;
+    _totalRentController.clear();
+    _purposeController.clear();
+    _electricityReadingController.clear();
+    _generatedInstallments.clear();
+    _paymentMethod = 'شهري';
+    final today = DateTime.now();
+    _startDateController.text = DateFormat('yyyy-MM-dd').format(today);
+    _endDateController.text = DateFormat(
+      'yyyy-MM-dd',
+    ).format(ContractTerm.endDateForMonths(today, 12));
+  }
+
   void _generateInstallments() {
     final unit = _selectedVacantUnit();
     if (unit == null) {
@@ -164,71 +279,63 @@ class _ContractsScreenState extends State<ContractsScreen> {
       );
       return;
     }
-    if (_totalRentController.text.isEmpty) return;
-
-    double totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
-    if (totalRent <= 0) return;
+    final totalRent = double.tryParse(_totalRentController.text) ?? 0.0;
+    if (!totalRent.isFinite ||
+        totalRent <= 0 ||
+        (totalRent * 100 - (totalRent * 100).round()).abs() > 0.000001) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('أدخل إجماليًا موجبًا بدقة منزلتين عشريتين'),
+        ),
+      );
+      return;
+    }
 
     final startDate = DateTime.tryParse(_startDateController.text);
     final endDate = DateTime.tryParse(_endDateController.text);
-    if (startDate == null || endDate == null || startDate.isAfter(endDate)) {
+    if (startDate == null || endDate == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('تاريخ بداية أو نهاية العقد غير صحيح')),
       );
       return;
     }
-    final monthsDifference =
-        ((endDate.year - startDate.year) * 12 + endDate.month - startDate.month)
-            .clamp(1, 600)
-            .toInt();
-
-    int numInstallments = 1;
-    int monthsPerInstallment = 12;
-
-    switch (_paymentMethod) {
-      case 'شهري':
-        numInstallments = monthsDifference;
-        monthsPerInstallment = 1;
-        break;
-      case 'ربع سنوي':
-        numInstallments = (monthsDifference / 3).ceil();
-        if (numInstallments == 0) numInstallments = 1;
-        monthsPerInstallment = 3;
-        break;
-      case 'نصف سنوي':
-        numInstallments = (monthsDifference / 6).ceil();
-        if (numInstallments == 0) numInstallments = 1;
-        monthsPerInstallment = 6;
-        break;
-      case 'سنوي':
-        numInstallments = (monthsDifference / 12).ceil();
-        if (numInstallments == 0) numInstallments = 1;
-        monthsPerInstallment = 12;
-        break;
-      case 'دفعة واحدة':
-        numInstallments = 1;
-        monthsPerInstallment = monthsDifference;
-        break;
+    final durationMonths = ContractTerm.wholeMonths(startDate, endDate);
+    if (durationMonths == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'مدة العقد يجب أن تكون شهرًا أو عددًا صحيحًا من الشهور؛ لا تُحسب أيام جزئية.',
+          ),
+        ),
+      );
+      return;
     }
 
-    final amountPerInstallment = double.parse(
-      (totalRent / numInstallments).toStringAsFixed(2),
-    );
-
-    // Adjust last installment to account for rounding issues
-    final totalCalculated = amountPerInstallment * (numInstallments - 1);
-    final lastInstallmentAmount = double.parse(
-      (totalRent - totalCalculated).toStringAsFixed(2),
-    );
+    late final List<int> weights;
+    late final List<int> amountsMinor;
+    try {
+      weights = ContractTerm.paymentMonthWeights(
+        durationMonths,
+        _paymentMethod,
+      );
+      amountsMinor = ContractTerm.allocateMinorUnits(
+        (totalRent * 100).round(),
+        weights,
+      );
+    } on ArgumentError catch (error) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('$error')));
+      return;
+    }
 
     List<Map<String, dynamic>> newInstallments = [];
     _disposeInstallmentControllers(); // Clear old controllers
 
-    for (int i = 0; i < numInstallments; i++) {
-      final dueDate = _addMonthsClamped(startDate, i * monthsPerInstallment);
-      double currentAmount = (i == numInstallments - 1)
-          ? lastInstallmentAmount
-          : amountPerInstallment;
+    var elapsedMonths = 0;
+    for (var i = 0; i < weights.length; i++) {
+      final dueDate = ContractTerm.addMonthsClamped(startDate, elapsedMonths);
+      final currentAmount = amountsMinor[i] / 100.0;
 
       String dateStr = DateFormat('yyyy-MM-dd').format(dueDate);
 
@@ -243,21 +350,12 @@ class _ContractsScreenState extends State<ContractsScreen> {
         TextEditingController(text: currentAmount.toString()),
       );
       _instDateControllers.add(TextEditingController(text: dateStr));
+      elapsedMonths += weights[i];
     }
 
     setState(() {
       _generatedInstallments = newInstallments;
     });
-  }
-
-  DateTime _addMonthsClamped(DateTime date, int months) {
-    final firstOfMonth = DateTime(date.year, date.month + months, 1);
-    final lastDay = DateTime(firstOfMonth.year, firstOfMonth.month + 1, 0).day;
-    return DateTime(
-      firstOfMonth.year,
-      firstOfMonth.month,
-      date.day > lastDay ? lastDay : date.day,
-    );
   }
 
   void _saveContract() async {
@@ -288,10 +386,29 @@ class _ContractsScreenState extends State<ContractsScreen> {
         0,
         (sum, item) => sum + ((item['amount'] as num?)?.toDouble() ?? 0),
       );
+      final amountsValid =
+          totalRent.isFinite &&
+          totalRent > 0 &&
+          sumInstallments.isFinite &&
+          _generatedInstallments.every((item) {
+            final amount = (item['amount'] as num?)?.toDouble() ?? 0;
+            return amount.isFinite && amount > 0;
+          });
+      if (!amountsValid) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'إجمالي العقد وكل قسط يجب أن يكونا مبالغ موجبة وصالحة',
+            ),
+          ),
+        );
+        return;
+      }
       final datesValid =
           startDate != null &&
           endDate != null &&
           !startDate.isAfter(endDate) &&
+          ContractTerm.wholeMonths(startDate, endDate) != null &&
           _generatedInstallments.every((item) {
             final due = DateTime.tryParse(item['due_date']?.toString() ?? '');
             return (item['amount'] as num? ?? 0) > 0 &&
@@ -302,7 +419,11 @@ class _ContractsScreenState extends State<ContractsScreen> {
 
       if (!datesValid) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تحقق من تواريخ الأقساط والمبالغ')),
+          const SnackBar(
+            content: Text(
+              'تحقق من أن مدة العقد شهور كاملة ومن تواريخ الأقساط ومبالغها',
+            ),
+          ),
         );
         return;
       }
@@ -331,25 +452,26 @@ class _ContractsScreenState extends State<ContractsScreen> {
 
       setState(() => _isSavingContract = true);
       try {
-        final contractId = await Provider.of<LeasingProvider>(
-          context,
-          listen: false,
-        ).addContract(contract, _generatedInstallments);
+        final provider = Provider.of<LeasingProvider>(context, listen: false);
+        final contractId = _renewalSourceContractId == null
+            ? await provider.addContract(contract, _generatedInstallments)
+            : await provider.renewContract(
+                _renewalSourceContractId!,
+                contract,
+                _generatedInstallments,
+              );
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('تم حفظ العقد رقم $contractId وتحديث حالة الوحدة'),
+              content: Text(
+                _renewalSourceContractId == null
+                    ? 'تم حفظ العقد رقم $contractId وتحديث حالة الوحدة'
+                    : 'تم إنشاء عقد التجديد رقم $contractId؛ بقيت الذمم والأقساط السابقة على العقد السابق',
+              ),
             ),
           );
-          // Reset form
-          _disposeInstallmentControllers();
           setState(() {
-            _selectedTenantId = null;
-            _selectedUnitId = null;
-            _totalRentController.clear();
-            _purposeController.clear();
-            _electricityReadingController.clear();
-            _generatedInstallments.clear();
+            _clearDraft();
           });
         }
       } catch (e) {
@@ -378,13 +500,15 @@ class _ContractsScreenState extends State<ContractsScreen> {
           return Center(child: Text(propProv.errorMessage!));
         }
 
-        Map<String, dynamic>? selectedUnit;
-        for (final unit in leasingProv.vacantUnits) {
-          if (unit['id'] == _selectedUnitId) {
-            selectedUnit = unit;
-            break;
-          }
+        final selectedUnit = _selectedVacantUnit();
+        final formUnits = List<Map<String, dynamic>>.from(
+          leasingProv.vacantUnits,
+        );
+        if (_renewalUnit != null &&
+            !formUnits.any((unit) => unit['id'] == _renewalUnit!['id'])) {
+          formUnits.add(_renewalUnit!);
         }
+        final durationMonths = _draftDurationMonths();
 
         return Padding(
           padding: const EdgeInsets.all(24.0),
@@ -400,13 +524,43 @@ class _ContractsScreenState extends State<ContractsScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        const Text(
-                          'إنشاء عقد جديد',
+                        Text(
+                          _renewalSourceContractId == null
+                              ? 'إنشاء عقد جديد'
+                              : 'تجديد العقد رقم $_renewalSourceContractId',
                           style: TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
+                        if (_renewalSourceContractId != null) ...[
+                          const SizedBox(height: 8),
+                          Card(
+                            color: AppPalette.navy.withValues(alpha: 0.06),
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.info_outline,
+                                    color: AppPalette.navy,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  const Expanded(
+                                    child: Text(
+                                      'سيُنشأ عقد جديد مرتبط بالسابق. لن تتغير الأقساط أو الفواتير أو القيود والذمم القديمة؛ أدخل الإجمالي الجديد المتفق عليه.',
+                                    ),
+                                  ),
+                                  TextButton.icon(
+                                    onPressed: () => setState(_clearDraft),
+                                    icon: const Icon(Icons.close),
+                                    label: const Text('إلغاء التجديد'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 16),
                         DropdownButtonFormField<int>(
                           value: _selectedTenantId,
@@ -418,8 +572,9 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                 ),
                               )
                               .toList(),
-                          onChanged: (val) =>
-                              setState(() => _selectedTenantId = val),
+                          onChanged: _renewalSourceContractId == null
+                              ? (val) => setState(() => _selectedTenantId = val)
+                              : null,
                           decoration: const InputDecoration(
                             labelText: 'المستأجر',
                             border: OutlineInputBorder(),
@@ -429,7 +584,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         DropdownButtonFormField<int>(
                           value: _selectedUnitId,
                           isExpanded: true,
-                          items: leasingProv.vacantUnits.map((u) {
+                          items: formUnits.map((u) {
                             final propName = propProv.properties.firstWhere(
                               (p) => p['id'] == u['property_id'],
                               orElse: () => {'name': ''},
@@ -450,16 +605,21 @@ class _ContractsScreenState extends State<ContractsScreen> {
                               ),
                             );
                           }).toList(),
-                          onChanged: (val) {
-                            _disposeInstallmentControllers();
-                            setState(() {
-                              _selectedUnitId = val;
-                              _totalRentController.clear();
-                              _generatedInstallments.clear();
-                            });
-                          },
-                          decoration: const InputDecoration(
-                            labelText: 'الوحدة الشاغرة',
+                          onChanged: _renewalSourceContractId == null
+                              ? (val) {
+                                  _disposeInstallmentControllers();
+                                  setState(() {
+                                    _selectedUnitId = val;
+                                    _renewalUnit = null;
+                                    _totalRentController.clear();
+                                    _generatedInstallments.clear();
+                                  });
+                                }
+                              : null,
+                          decoration: InputDecoration(
+                            labelText: _renewalSourceContractId == null
+                                ? 'الوحدة الشاغرة'
+                                : 'الوحدة المرتبطة بالعقد السابق',
                             border: OutlineInputBorder(),
                           ),
                         ),
@@ -523,12 +683,16 @@ class _ContractsScreenState extends State<ContractsScreen> {
                             Expanded(
                               child: TextFormField(
                                 controller: _startDateController,
-                                decoration: const InputDecoration(
-                                  labelText: 'بداية العقد',
+                                decoration: InputDecoration(
+                                  labelText: _renewalSourceContractId == null
+                                      ? 'بداية العقد'
+                                      : 'بداية التجديد',
                                   border: OutlineInputBorder(),
                                 ),
                                 readOnly: true,
-                                onTap: () => _pickContractDate(true),
+                                onTap: _renewalSourceContractId == null
+                                    ? () => _pickContractDate(true)
+                                    : null,
                               ),
                             ),
                             const SizedBox(width: 16),
@@ -545,19 +709,37 @@ class _ContractsScreenState extends State<ContractsScreen> {
                             ),
                           ],
                         ),
+                        Padding(
+                          padding: const EdgeInsetsDirectional.only(top: 8),
+                          child: Text(
+                            durationMonths == null
+                                ? 'يجب أن تمثل البداية والنهاية مدة شهرية كاملة؛ لا تُحتسب أيام جزئية.'
+                                : 'مدة العقد: $durationMonths شهرًا كاملة، دون احتساب يومي.',
+                            style: TextStyle(
+                              color: durationMonths == null
+                                  ? Colors.deepOrange
+                                  : AppPalette.navy,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
                         const SizedBox(height: 16),
                         TextFormField(
                           controller: _totalRentController,
                           keyboardType: const TextInputType.numberWithOptions(
                             decimal: true,
                           ),
-                          decoration: const InputDecoration(
-                            labelText: 'إجمالي قيمة العقد المتفق عليها',
+                          decoration: InputDecoration(
+                            labelText: _renewalSourceContractId == null
+                                ? 'إجمالي قيمة العقد المتفق عليها'
+                                : 'إجمالي قيمة التجديد المتفق عليها',
                             border: OutlineInputBorder(),
                           ),
                           validator: (v) {
                             final value = double.tryParse(v ?? '');
-                            return value == null || value <= 0
+                            return value == null ||
+                                    !value.isFinite ||
+                                    value <= 0
                                 ? 'أدخل قيمة عقد موجبة'
                                 : null;
                           },
@@ -750,9 +932,11 @@ class _ContractsScreenState extends State<ContractsScreen> {
                         padding: const EdgeInsets.all(16),
                         backgroundColor: Colors.green,
                       ),
-                      child: const Text(
-                        'حفظ العقد واعتماد الأقساط',
-                        style: TextStyle(fontSize: 18),
+                      child: Text(
+                        _renewalSourceContractId == null
+                            ? 'حفظ العقد واعتماد الأقساط'
+                            : 'حفظ عقد التجديد واعتماد أقساطه',
+                        style: const TextStyle(fontSize: 18),
                       ),
                     ),
                     const SizedBox(height: 32),
@@ -776,6 +960,13 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                 (t) => t['id'] == contract['tenant_id'],
                                 orElse: () => {'name': 'غير معروف'},
                               )['name'];
+                          final renewedToContractId =
+                              contract['renewed_to_contract_id'];
+                          final renewedFromContractId =
+                              contract['renewed_from_contract_id'];
+                          final statusLabel = renewedToContractId == null
+                              ? '${contract['status']}'
+                              : 'مجدّد إلى العقد $renewedToContractId';
                           return Card(
                             child: InkWell(
                               onTap: () => _showContractDetailsDialog(
@@ -787,7 +978,9 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                   'عقد رقم: ${contract['id']} - المستأجر: $tenantName',
                                 ),
                                 subtitle: Text(
-                                  'الحالة: ${contract['status']} | الإجمالي: ${contract['rent_amount']}',
+                                  'الحالة: $statusLabel'
+                                  '${renewedFromContractId == null ? '' : ' | تجديد للعقد $renewedFromContractId'}'
+                                  ' | الإجمالي: ${contract['rent_amount']}',
                                 ),
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -826,7 +1019,24 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                             )
                                           : null,
                                     ),
-                                    if (contract['status'] == 'Active')
+                                    if (contract['status'] == 'Active' &&
+                                        renewedToContractId == null)
+                                      IconButton(
+                                        icon: const Icon(
+                                          Icons.autorenew,
+                                          color: AppPalette.navy,
+                                        ),
+                                        tooltip: 'تجديد العقد بشروط جديدة',
+                                        onPressed:
+                                            PermissionRuntime.allows(
+                                              'leasing',
+                                              AppPermissionAction.add,
+                                            )
+                                            ? () => _beginRenewal(contract)
+                                            : null,
+                                      ),
+                                    if (contract['status'] == 'Active' &&
+                                        renewedToContractId == null)
                                       IconButton(
                                         icon: const Icon(
                                           Icons.cancel,
@@ -892,6 +1102,14 @@ class _ContractsScreenState extends State<ContractsScreen> {
                 Text(
                   'المدة: من ${contract['start_date']} إلى ${contract['end_date']}',
                 ),
+                if (contract['renewed_from_contract_id'] != null)
+                  Text(
+                    'هذا العقد تجديد للعقد رقم ${contract['renewed_from_contract_id']}',
+                  ),
+                if (contract['renewed_to_contract_id'] != null)
+                  Text(
+                    'تم تجديد هذا العقد بالعقد رقم ${contract['renewed_to_contract_id']}',
+                  ),
                 Text('طريقة الدفع: ${contract['payment_method']}'),
                 Text('الإجمالي: ${contract['rent_amount']} ريال'),
                 if (contract['status'] == 'Cancelled') ...[

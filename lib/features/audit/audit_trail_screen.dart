@@ -34,6 +34,7 @@ class AuditTrailScreen extends StatefulWidget {
     'TENANT_REFUND_POSTED': 'ترحيل استرداد مستأجر',
     'TAX_INVOICE_ISSUED': 'إصدار فاتورة ضريبية',
     'CONTRACT_CREATED': 'إنشاء عقد',
+    'CONTRACT_RENEWED': 'تجديد عقد',
     'contract_cancelled': 'إلغاء عقد',
     'ACCOUNT_CREATE': 'إنشاء حساب',
     'ACCOUNT_RENAME': 'تعديل اسم حساب',
