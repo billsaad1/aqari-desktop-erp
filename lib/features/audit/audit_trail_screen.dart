@@ -59,6 +59,14 @@ class AuditTrailScreen extends StatefulWidget {
     'LEGACY_INVOICE_MARKED_NON_BILLABLE': 'تصنيف فاتورة قديمة كغير مستحقة',
     'USER_ACTIVATE': 'تفعيل مستخدم',
     'USER_DEACTIVATE': 'إيقاف مستخدم',
+    'ACCOUNTING_PERIOD_CREATED': 'إنشاء فترة محاسبية',
+    'ACCOUNTING_PERIOD_LOCKED': 'قفل فترة محاسبية للترحيل',
+    'ACCOUNTING_PERIOD_CLOSED': 'إقفال فترة محاسبية نهائيًا',
+    'ACCOUNTING_PERIOD_REOPENED': 'إعادة فتح فترة محاسبية',
+    'created': 'إنشاء الفترة',
+    'locked': 'قفل الفترة للترحيل',
+    'closed': 'الإقفال النهائي للفترة',
+    'reopened': 'إعادة فتح الفترة',
   };
 
   /// Public so tests can assert every persisted action code stays labelled.

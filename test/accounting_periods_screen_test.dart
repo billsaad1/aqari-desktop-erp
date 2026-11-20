@@ -46,6 +46,24 @@ void main() {
     if (await directory.exists()) await directory.delete(recursive: true);
   });
 
+  Future<void> pumpScreen(WidgetTester tester) async {
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 1024,
+              height: 564,
+              child: const AccountingPeriodsScreen(),
+            ),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      await tester.pump();
+    });
+  }
+
   testWidgets('period controls remain scrollable in a short desktop window', (
     tester,
   ) async {
@@ -56,18 +74,7 @@ void main() {
     await helper.lockAccountingPeriod(period.id);
     await helper.closeAccountingPeriod(period.id);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 1024,
-            height: 564,
-            child: const AccountingPeriodsScreen(),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
+    await pumpScreen(tester);
 
     expect(find.text('جاهزية الفترات وقفلها'), findsOneWidget);
     expect(find.text('2026-02-01 — 2026-02-28'), findsOneWidget);
@@ -79,7 +86,10 @@ void main() {
       role: 'Admin',
       permissionRows: const [],
     );
-    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      await tester.pump();
+    });
     expect(find.text('إعادة فتح'), findsNothing);
     expect(find.text('سجل أحداث'), findsOneWidget);
     expect(tester.takeException(), isNull);
