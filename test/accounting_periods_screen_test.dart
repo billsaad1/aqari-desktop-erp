@@ -93,7 +93,7 @@ void main() {
       await tester.pump();
     });
     expect(find.text('إعادة فتح'), findsNothing);
-    expect(find.text('سجل أحداث'), findsOneWidget);
+    expect(find.text('سجل الأحداث'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }
