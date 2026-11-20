@@ -8,6 +8,7 @@ import '../../providers/accounting_provider.dart';
 import 'tenant_receipt_screen.dart';
 import 'tenant_payment_screen.dart';
 import 'tax_invoice_screen.dart';
+import 'credit_note_screen.dart';
 
 class TenantFinancialMainScreen extends StatefulWidget {
   const TenantFinancialMainScreen({super.key});
@@ -26,7 +27,7 @@ class _TenantFinancialMainScreenState extends State<TenantFinancialMainScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _authProvider = Provider.of<AuthProvider>(context, listen: false);
     _permissionFingerprint = _currentPermissionFingerprint();
     _authProvider.addListener(_onAuthPermissionsChanged);
@@ -77,6 +78,7 @@ class _TenantFinancialMainScreenState extends State<TenantFinancialMainScreen>
             Tab(text: 'قبض مستأجر (تحصيل)'),
             Tab(text: 'صرف مستأجر (رد مبالغ)'),
             Tab(text: 'إصدار فاتورة ضريبية'),
+            Tab(text: 'إشعار دائن'),
           ],
         ),
         Expanded(
@@ -86,6 +88,7 @@ class _TenantFinancialMainScreenState extends State<TenantFinancialMainScreen>
               TenantReceiptScreen(),
               TenantPaymentScreen(),
               TaxInvoiceScreen(),
+              CreditNoteScreen(),
             ],
           ),
         ),
