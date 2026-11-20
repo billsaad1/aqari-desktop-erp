@@ -19,11 +19,12 @@ import '../models/tenant_collection_report_model.dart';
 import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import 'database_integrity_migrations.dart';
+import 'property_sale_schema.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 24;
+  static const int _schemaVersion = 26;
 
   /// Current schema version, exposed so tests and diagnostics assert against a
   /// single source of truth instead of hardcoding a number that drifts.
@@ -394,6 +395,7 @@ class DatabaseHelper {
       'units': [
         'id',
         'property_id',
+        'owner_id',
         'unit_number',
         'unit_type_id',
         'floor',
@@ -575,6 +577,7 @@ class DatabaseHelper {
         'reason',
         'proposed_amount_minor',
         'proposed_sale_date',
+        'proposed_buyer_owner_id',
         'target_snapshot_json',
         'active_contract_count_at_request',
         'status',
@@ -593,6 +596,43 @@ class DatabaseHelper {
         'created_at',
         'reason',
         'details',
+      ],
+      'property_sale_executions': [
+        'id',
+        'sale_review_id',
+        'target_type',
+        'property_id',
+        'unit_id',
+        'seller_owner_id',
+        'buyer_owner_id',
+        'seller_name_snapshot',
+        'buyer_name_snapshot',
+        'sale_price_minor',
+        'sale_date',
+        'deed_reference',
+        'execution_reason',
+        'executed_by',
+        'executed_at',
+        'transfer_applied_at',
+      ],
+      'property_sale_execution_events': [
+        'id',
+        'sale_execution_id',
+        'event_type',
+        'user_id',
+        'created_at',
+        'reason',
+        'details',
+      ],
+      'property_sale_accounting_records': [
+        'id',
+        'sale_execution_id',
+        'supersedes_record_id',
+        'book_value_minor',
+        'manual_journal_entry_id',
+        'accounting_note',
+        'approved_by',
+        'approved_at',
       ],
     };
     final missingSchema = <String>[];
@@ -636,6 +676,21 @@ class DatabaseHelper {
       'property_sale_reviews_no_delete',
       'property_sale_review_events_no_update',
       'property_sale_review_events_no_delete',
+      'property_sale_reviews_terms_required_insert',
+      'property_sale_reviews_buyer_not_seller_insert',
+      'property_sale_reviews_accepted_terms_required',
+      'property_sale_reviews_terms_immutable',
+      'property_sale_reviews_cannot_cancel_executed',
+      'property_sale_executions_valid_insert',
+      'property_sale_executions_apply_transfer_once',
+      'property_sale_executions_no_delete',
+      'properties_owner_change_requires_sale',
+      'units_owner_change_requires_sale',
+      'property_sale_accounting_valid_insert',
+      'property_sale_accounting_records_no_update',
+      'property_sale_accounting_records_no_delete',
+      'property_sale_execution_events_no_update',
+      'property_sale_execution_events_no_delete',
       'audit_logs_no_update',
       'audit_logs_no_delete',
     ];
@@ -667,9 +722,13 @@ class DatabaseHelper {
       'legacy_tenant_payment_review_status_idx',
       'legacy_invoice_review_status_idx',
       'property_sale_reviews_status_idx',
-      'property_sale_reviews_property_open_unique',
-      'property_sale_reviews_unit_open_unique',
       'property_sale_review_events_review_idx',
+      'property_sale_reviews_proposed_buyer_idx',
+      'property_sale_executions_property_date_idx',
+      'property_sale_executions_unit_date_idx',
+      'property_sale_execution_events_execution_idx',
+      'property_sale_accounting_root_unique',
+      'property_sale_accounting_successor_unique',
     ];
     final missingIndexes = requiredIndexes
         .where((index) => !indexes.contains(index))
@@ -1136,6 +1195,29 @@ class DatabaseHelper {
         'INTEGER REFERENCES contracts (id)',
       );
       await _createContractRenewalSchema(db);
+    }
+    if (oldVersion < 25) {
+      await _ensureColumn(
+        db,
+        'units',
+        'owner_id',
+        'INTEGER REFERENCES owners (id) ON DELETE RESTRICT',
+      );
+      await createPropertySaleExecutionSchema(db);
+    }
+    if (oldVersion < 26) {
+      await _ensureColumn(
+        db,
+        'property_sale_reviews',
+        'proposed_buyer_owner_id',
+        'INTEGER REFERENCES owners (id) ON DELETE RESTRICT',
+      );
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS property_sale_reviews_proposed_buyer_idx
+        ON property_sale_reviews(proposed_buyer_owner_id)
+        WHERE proposed_buyer_owner_id IS NOT NULL
+      ''');
+      await createPropertySaleExecutionSchema(db);
     }
   }
 
@@ -1753,6 +1835,8 @@ class DatabaseHelper {
         proposed_amount_minor INTEGER
           CHECK (proposed_amount_minor IS NULL OR proposed_amount_minor > 0),
         proposed_sale_date TEXT,
+        proposed_buyer_owner_id INTEGER
+          REFERENCES owners (id) ON DELETE RESTRICT,
         target_snapshot_json TEXT NOT NULL,
         active_contract_count_at_request INTEGER NOT NULL DEFAULT 0
           CHECK (active_contract_count_at_request >= 0),
@@ -1811,6 +1895,11 @@ class DatabaseHelper {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS property_sale_reviews_status_idx
       ON property_sale_reviews(status, requested_at DESC, id DESC)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS property_sale_reviews_proposed_buyer_idx
+      ON property_sale_reviews(proposed_buyer_owner_id)
+      WHERE proposed_buyer_owner_id IS NOT NULL
     ''');
     await db.execute('''
       CREATE UNIQUE INDEX IF NOT EXISTS property_sale_reviews_property_open_unique
@@ -2162,6 +2251,7 @@ class DatabaseHelper {
       CREATE TABLE units (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         property_id INTEGER NOT NULL,
+        owner_id INTEGER,
         unit_number TEXT NOT NULL,
         unit_type_id INTEGER,
         floor TEXT,
@@ -2171,7 +2261,8 @@ class DatabaseHelper {
         default_rent REAL,
         default_rent_period TEXT CHECK (default_rent_period IN ('monthly', 'annual') OR default_rent_period IS NULL),
         FOREIGN KEY (property_id) REFERENCES properties (id),
-        FOREIGN KEY (unit_type_id) REFERENCES unit_types (id)
+        FOREIGN KEY (unit_type_id) REFERENCES unit_types (id),
+        FOREIGN KEY (owner_id) REFERENCES owners (id) ON DELETE RESTRICT
       )
     ''');
     await DatabaseIntegrityMigrations.installUnitNumberGuards(db);
@@ -2360,6 +2451,7 @@ class DatabaseHelper {
     await _createRefundSchema(db);
     await _createTenantNoticeSchema(db);
     await _createPropertySaleReviewSchema(db);
+    await createPropertySaleExecutionSchema(db);
     await _createContractRenewalSchema(db);
     await _createAuditTrailSchema(db);
     await _insertSeedData(db);
@@ -4013,15 +4105,9 @@ class DatabaseHelper {
       if (existing.isEmpty) throw StateError('العقار المطلوب غير موجود');
       final previousOwnerId = existing.first['owner_id'] as int;
       if (previousOwnerId != ownerId) {
-        final history = await txn.rawQuery(
-          'SELECT COUNT(*) AS count FROM units u JOIN contracts c ON c.unit_id = u.id WHERE u.property_id = ?',
-          [propertyId],
+        throw StateError(
+          'لا تغيّر ملكية العقار من شاشة التعديل؛ استخدم مسار مراجعة البيع وإتمامه لحفظ تاريخ الملكية والدفاتر.',
         );
-        if ((history.first['count'] as int) > 0) {
-          throw StateError(
-            'لا يمكن تغيير مالك عقار له عقود محفوظة؛ سجّل نقل الملكية كإجراء مستقل حتى لا يتغير تاريخ العقود.',
-          );
-        }
       }
       final changed = await txn.update(
         'properties',
@@ -4429,10 +4515,14 @@ class DatabaseHelper {
     if (propertyRows.isEmpty)
       throw StateError('العقار المرتبط بالوحدة غير موجود');
     final property = propertyRows.first;
+    final effectiveOwnerId = unit['owner_id'] ?? property['owner_id'];
+    if (effectiveOwnerId is! int || effectiveOwnerId <= 0) {
+      throw StateError('مالك الوحدة الفعلي غير صالح');
+    }
     final ownerRows = await txn.query(
       'owners',
       where: 'id = ?',
-      whereArgs: [property['owner_id']],
+      whereArgs: [effectiveOwnerId],
       limit: 1,
     );
     if (ownerRows.isEmpty) throw StateError('مالك العقار المرتبط غير موجود');
@@ -4468,6 +4558,8 @@ class DatabaseHelper {
 
     return {
       'owner': {
+        'owner_id': effectiveOwnerId,
+        'account_id': owner['account_id'],
         for (final field in [
           'name',
           'identity_number',
@@ -9899,6 +9991,8 @@ class DatabaseHelper {
         p.id,
         p.name,
         p.deed_number,
+        p.owner_id,
+        o.account_id AS owner_account_id,
         o.name AS owner_name,
         COUNT(DISTINCT u.id) AS unit_count,
         COUNT(DISTINCT CASE WHEN c.status = 'Active' THEN c.id END)
@@ -9909,6 +10003,16 @@ class DatabaseHelper {
       LEFT JOIN contracts c ON c.unit_id = u.id
       GROUP BY p.id
       ORDER BY p.name COLLATE NOCASE, p.id
+    ''');
+  }
+
+  Future<List<Map<String, Object?>>> getPropertySaleOwners() async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.rawQuery('''
+      SELECT id, name, account_id
+      FROM owners
+      ORDER BY name COLLATE NOCASE, id
     ''');
   }
 
@@ -9923,12 +10027,18 @@ class DatabaseHelper {
       SELECT
         u.id,
         u.property_id,
+        u.owner_id,
+        COALESCE(u.owner_id, p.owner_id) AS effective_owner_id,
+        effective_owner.name AS owner_name,
         u.unit_number,
         u.status,
         (SELECT COUNT(*) FROM contracts c
           WHERE c.unit_id = u.id AND c.status = 'Active')
           AS active_contract_count
       FROM units u
+      JOIN properties p ON p.id = u.property_id
+      LEFT JOIN owners effective_owner
+        ON effective_owner.id = COALESCE(u.owner_id, p.owner_id)
       WHERE u.property_id = ?
       ORDER BY u.unit_number COLLATE NOCASE, u.id
       ''',
@@ -9941,8 +10051,9 @@ class DatabaseHelper {
     required int propertyId,
     int? unitId,
     required String reason,
-    int? proposedAmountMinor,
-    String? proposedSaleDate,
+    required int proposedBuyerOwnerId,
+    required int proposedAmountMinor,
+    required String proposedSaleDate,
   }) async {
     PermissionRuntime.require('property_sales', AppPermissionAction.add);
     final normalizedReason = reason.trim();
@@ -9957,16 +10068,27 @@ class DatabaseHelper {
     if (normalizedReason.isEmpty || normalizedReason.length > 1000) {
       throw ArgumentError('مبرر طلب البيع مطلوب وبحد أقصى 1000 حرف');
     }
-    if (proposedAmountMinor != null && proposedAmountMinor <= 0) {
-      throw ArgumentError('القيمة المقترحة يجب أن تكون أكبر من صفر');
+    if (proposedBuyerOwnerId <= 0 || proposedAmountMinor <= 0) {
+      throw ArgumentError('المشتري والسعر المقترح حقول مطلوبة وبقيم صالحة');
     }
     final normalizedDate = _normalizeSaleDateOnly(proposedSaleDate);
+    if (normalizedDate == null) {
+      throw ArgumentError('تاريخ البيع المقترح مطلوب بصيغة صحيحة');
+    }
+    final parsedProposedDate = DateTime.parse(normalizedDate);
+    final today = DateTime.now();
+    if (parsedProposedDate.isAfter(
+      DateTime(today.year, today.month, today.day),
+    )) {
+      throw ArgumentError('لا يمكن طلب مراجعة بيع بتاريخ مستقبلي');
+    }
     final db = await instance.database;
     return db.transaction((txn) async {
       final actorId = await _requirePropertySaleActorId(txn);
       final propertyRows = await txn.rawQuery(
         '''
-        SELECT p.id, p.name, p.deed_number, p.address, o.name AS owner_name
+        SELECT p.id, p.name, p.deed_number, p.address, p.owner_id,
+          o.account_id AS owner_account_id, o.name AS owner_name
         FROM properties p LEFT JOIN owners o ON o.id = p.owner_id
         WHERE p.id = ? LIMIT 1
         ''',
@@ -9976,16 +10098,57 @@ class DatabaseHelper {
       final property = propertyRows.single;
       Map<String, Object?>? unit;
       if (targetType == 'unit') {
-        final unitRows = await txn.query(
-          'units',
-          where: 'id = ? AND property_id = ?',
-          whereArgs: [unitId, propertyId],
-          limit: 1,
+        final unitRows = await txn.rawQuery(
+          '''
+          SELECT u.*, COALESCE(u.owner_id, p.owner_id) AS effective_owner_id,
+            effective_owner.name AS owner_name,
+            effective_owner.account_id AS owner_account_id
+          FROM units u
+          JOIN properties p ON p.id = u.property_id
+          LEFT JOIN owners effective_owner
+            ON effective_owner.id = COALESCE(u.owner_id, p.owner_id)
+          WHERE u.id = ? AND u.property_id = ? LIMIT 1
+          ''',
+          [unitId, propertyId],
         );
         if (unitRows.isEmpty) {
           throw StateError('الوحدة غير موجودة أو لا تتبع العقار المحدد');
         }
         unit = unitRows.single;
+      }
+      Object? sellerOwnerIdValue;
+      String? sellerOwnerName;
+      Object? sellerOwnerAccountId;
+      if (targetType == 'unit') {
+        final unitData = unit!;
+        sellerOwnerIdValue = unitData['effective_owner_id'];
+        sellerOwnerName = unitData['owner_name']?.toString();
+        sellerOwnerAccountId = unitData['owner_account_id'];
+      } else {
+        sellerOwnerIdValue = property['owner_id'];
+        sellerOwnerName = property['owner_name']?.toString();
+        sellerOwnerAccountId = property['owner_account_id'];
+      }
+      final sellerOwnerId = sellerOwnerIdValue is num
+          ? sellerOwnerIdValue.toInt()
+          : null;
+      if (sellerOwnerId == null || sellerOwnerName == null) {
+        throw StateError('لا يوجد مالك فعلي صالح للهدف المحدد');
+      }
+      if (sellerOwnerId == proposedBuyerOwnerId) {
+        throw ArgumentError('يجب أن يختلف المشتري عن المالك البائع');
+      }
+      final buyerRows = await txn.query(
+        'owners',
+        columns: ['id', 'name'],
+        where: 'id = ?',
+        whereArgs: [proposedBuyerOwnerId],
+        limit: 1,
+      );
+      if (buyerRows.isEmpty) throw StateError('المشتري المحدد غير موجود');
+      final proposedBuyerName = buyerRows.single['name']?.toString();
+      if (proposedBuyerName == null || proposedBuyerName.trim().isEmpty) {
+        throw StateError('اسم المشتري غير صالح');
       }
       final activeContractRows = await txn.rawQuery(
         targetType == 'property'
@@ -10007,6 +10170,11 @@ class DatabaseHelper {
         'source': 'current_master_data_at_request',
         'target_type': targetType,
         'property_id': propertyId,
+        'seller_owner_id': sellerOwnerId,
+        'seller_owner_name': sellerOwnerName,
+        'seller_owner_account_id': sellerOwnerAccountId,
+        'proposed_buyer_owner_id': proposedBuyerOwnerId,
+        'proposed_buyer_owner_name': proposedBuyerName,
         'property_name': property['name'],
         'deed_number': property['deed_number'],
         'address': property['address'],
@@ -10027,6 +10195,7 @@ class DatabaseHelper {
         'reason': normalizedReason,
         'proposed_amount_minor': proposedAmountMinor,
         'proposed_sale_date': normalizedDate,
+        'proposed_buyer_owner_id': proposedBuyerOwnerId,
         'target_snapshot_json': jsonEncode(snapshot),
         'active_contract_count_at_request': activeContractCount,
         'status': 'pending',
@@ -10042,6 +10211,8 @@ class DatabaseHelper {
           'target_type': targetType,
           'property_id': propertyId,
           'unit_id': unitId,
+          'proposed_buyer_owner_id': proposedBuyerOwnerId,
+          'proposed_buyer_owner_name': proposedBuyerName,
           'proposed_amount_minor': proposedAmountMinor,
           'proposed_sale_date': normalizedDate,
           'active_contract_count_at_request': activeContractCount,
@@ -10059,9 +10230,28 @@ class DatabaseHelper {
         r.*,
         p.name AS current_property_name,
         u.unit_number AS current_unit_number,
+        proposed_buyer.name AS proposed_buyer_name,
+        CASE WHEN r.target_type = 'unit'
+          THEN COALESCE(u.owner_id, p.owner_id) ELSE p.owner_id END
+          AS current_owner_id,
+        current_owner.name AS current_owner_name,
         requester.full_name AS requester_name,
         reviewer.full_name AS reviewer_name,
         canceller.full_name AS canceller_name,
+        e.id AS sale_execution_id,
+        e.buyer_owner_id,
+        e.buyer_name_snapshot AS buyer_owner_name_snapshot,
+        e.sale_price_minor,
+        e.sale_date,
+        e.deed_reference,
+        e.executed_at,
+        e.transfer_applied_at,
+        ar.id AS accounting_record_id,
+        ar.book_value_minor AS accounting_book_value_minor,
+        ar.manual_journal_entry_id,
+        ar.accounting_note,
+        ar.approved_at AS accounting_approved_at,
+        ar.approved_by AS accounting_approved_by,
         (SELECT COUNT(*) FROM contracts c JOIN units cu ON cu.id = c.unit_id
           WHERE c.status = 'Active' AND (
             (r.target_type = 'property' AND cu.property_id = r.property_id)
@@ -10070,9 +10260,26 @@ class DatabaseHelper {
       FROM property_sale_reviews r
       JOIN properties p ON p.id = r.property_id
       LEFT JOIN units u ON u.id = r.unit_id
+      LEFT JOIN owners current_owner
+        ON current_owner.id = CASE WHEN r.target_type = 'unit'
+          THEN COALESCE(u.owner_id, p.owner_id) ELSE p.owner_id END
+      LEFT JOIN owners proposed_buyer
+        ON proposed_buyer.id = r.proposed_buyer_owner_id
       JOIN users requester ON requester.id = r.requested_by
       LEFT JOIN users reviewer ON reviewer.id = r.reviewed_by
       LEFT JOIN users canceller ON canceller.id = r.cancelled_by
+      LEFT JOIN property_sale_executions e
+        ON e.sale_review_id = r.id AND e.transfer_applied_at IS NOT NULL
+      LEFT JOIN property_sale_accounting_records ar ON ar.id = (
+        SELECT current_record.id
+        FROM property_sale_accounting_records current_record
+        WHERE current_record.sale_execution_id = e.id
+          AND NOT EXISTS (
+            SELECT 1 FROM property_sale_accounting_records successor
+            WHERE successor.supersedes_record_id = current_record.id
+          )
+        ORDER BY current_record.id DESC LIMIT 1
+      )
       ORDER BY CASE r.status
         WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
         r.requested_at DESC, r.id DESC
@@ -10087,14 +10294,467 @@ class DatabaseHelper {
     final db = await instance.database;
     return db.rawQuery(
       '''
-      SELECT e.*, u.full_name AS user_name
-      FROM property_sale_review_events e
-      JOIN users u ON u.id = e.user_id
-      WHERE e.sale_review_id = ?
-      ORDER BY e.id
+      SELECT * FROM (
+        SELECT e.id, 'review' AS event_source, e.event_type, e.user_id,
+          e.created_at, e.reason, e.details, u.full_name AS user_name
+        FROM property_sale_review_events e
+        JOIN users u ON u.id = e.user_id
+        WHERE e.sale_review_id = ?
+        UNION ALL
+        SELECT e.id, 'execution' AS event_source, e.event_type, e.user_id,
+          e.created_at, e.reason, e.details, u.full_name AS user_name
+        FROM property_sale_execution_events e
+        JOIN property_sale_executions x ON x.id = e.sale_execution_id
+        JOIN users u ON u.id = e.user_id
+        WHERE x.sale_review_id = ?
+      ) events
+      ORDER BY created_at, event_source, id
       ''',
-      [saleReviewId],
+      [saleReviewId, saleReviewId],
     );
+  }
+
+  Future<int> completePropertySaleExecution({
+    required int saleReviewId,
+    required int buyerOwnerId,
+    required int salePriceMinor,
+    required String saleDate,
+    required String deedReference,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('property_sales', AppPermissionAction.post);
+    if (saleReviewId <= 0 || buyerOwnerId <= 0 || salePriceMinor <= 0) {
+      throw ArgumentError('طلب البيع والمشتري والسعر النهائي حقول مطلوبة');
+    }
+    final normalizedDate = _normalizeSaleDateOnly(saleDate);
+    if (normalizedDate == null) throw ArgumentError('تاريخ الإتمام مطلوب');
+    final effectiveDate = DateTime.utc(
+      int.parse(normalizedDate.substring(0, 4)),
+      int.parse(normalizedDate.substring(5, 7)),
+      int.parse(normalizedDate.substring(8, 10)),
+    );
+    final today = DateTime.now();
+    if (effectiveDate.isAfter(
+      DateTime.utc(today.year, today.month, today.day),
+    )) {
+      throw ArgumentError('لا يمكن تسجيل نقل ملكية بتاريخ مستقبلي');
+    }
+    final normalizedDeed = deedReference.trim();
+    final normalizedReason = reason.trim();
+    if (normalizedDeed.isEmpty || normalizedDeed.length > 200) {
+      throw ArgumentError('مرجع صك/مستند البيع مطلوب وبحد أقصى 200 حرف');
+    }
+    if (normalizedReason.isEmpty || normalizedReason.length > 1000) {
+      throw ArgumentError('مبرر إتمام البيع مطلوب وبحد أقصى 1000 حرف');
+    }
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final actorId = await _requirePropertySaleActorId(txn);
+      final reviewRows = await txn.query(
+        'property_sale_reviews',
+        columns: [
+          'id',
+          'status',
+          'target_type',
+          'property_id',
+          'unit_id',
+          'target_snapshot_json',
+          'proposed_buyer_owner_id',
+          'proposed_amount_minor',
+          'proposed_sale_date',
+        ],
+        where: 'id = ?',
+        whereArgs: [saleReviewId],
+        limit: 1,
+      );
+      if (reviewRows.isEmpty) throw StateError('طلب البيع غير موجود');
+      final review = reviewRows.single;
+      if (review['status'] != 'accepted') {
+        throw StateError('يجب اعتماد المراجعة اليدوية قبل إتمام البيع');
+      }
+      final approvedBuyerOwnerId = review['proposed_buyer_owner_id'] is num
+          ? (review['proposed_buyer_owner_id'] as num).toInt()
+          : null;
+      final approvedSalePriceMinor = review['proposed_amount_minor'] is num
+          ? (review['proposed_amount_minor'] as num).toInt()
+          : null;
+      final approvedSaleDate = _normalizeSaleDateOnly(
+        review['proposed_sale_date']?.toString(),
+      );
+      if (approvedBuyerOwnerId == null ||
+          approvedBuyerOwnerId <= 0 ||
+          approvedSalePriceMinor == null ||
+          approvedSalePriceMinor <= 0 ||
+          approvedSaleDate == null) {
+        throw StateError(
+          'طلب البيع القديم لا يتضمن شروطًا معتمدة كاملة؛ ألغِه وأنشئ طلبًا جديدًا',
+        );
+      }
+      if (buyerOwnerId != approvedBuyerOwnerId ||
+          salePriceMinor != approvedSalePriceMinor ||
+          normalizedDate != approvedSaleDate) {
+        throw StateError(
+          'لا تطابق بيانات التنفيذ المشتري والسعر والتاريخ المعتمدة؛ ألغِ الطلب وأعد مراجعته بالشروط الصحيحة',
+        );
+      }
+      final existingExecution = await txn.query(
+        'property_sale_executions',
+        columns: ['id'],
+        where: 'sale_review_id = ?',
+        whereArgs: [saleReviewId],
+        limit: 1,
+      );
+      if (existingExecution.isNotEmpty) {
+        throw StateError('سبق تسجيل إتمام هذا البيع؛ لا تكرر الإجراء');
+      }
+
+      final targetType = review['target_type']?.toString();
+      final propertyId = (review['property_id'] as num).toInt();
+      final unitId = (review['unit_id'] as num?)?.toInt();
+      final snapshot = jsonDecode(
+        review['target_snapshot_json']?.toString() ?? '{}',
+      );
+      if (snapshot is! Map || snapshot['seller_owner_id'] is! num) {
+        throw StateError(
+          'هذا الطلب قديم ولا يحمل هوية المالك عند الطلب؛ ألغِه وأنشئ طلبًا جديدًا للمراجعة',
+        );
+      }
+      final sellerAtRequest = (snapshot['seller_owner_id'] as num).toInt();
+      final targetRows = targetType == 'property'
+          ? await txn.rawQuery(
+              '''
+              SELECT p.owner_id AS effective_owner_id, p.name AS property_name,
+                p.deed_number
+              FROM properties p WHERE p.id = ? LIMIT 1
+              ''',
+              [propertyId],
+            )
+          : await txn.rawQuery(
+              '''
+              SELECT COALESCE(u.owner_id, p.owner_id) AS effective_owner_id,
+                p.name AS property_name, p.deed_number, u.unit_number,
+                u.owner_id AS unit_owner_id
+              FROM units u JOIN properties p ON p.id = u.property_id
+              WHERE u.id = ? AND u.property_id = ? LIMIT 1
+              ''',
+              [unitId, propertyId],
+            );
+      if (targetRows.isEmpty) throw StateError('العقار أو الوحدة غير موجودة');
+      final target = targetRows.single;
+      final sellerOwnerId = (target['effective_owner_id'] as num).toInt();
+      if (sellerOwnerId != sellerAtRequest) {
+        throw StateError(
+          'تغير مالك الهدف منذ إنشاء الطلب؛ ألغِ الطلب القديم وأنشئ مراجعة جديدة',
+        );
+      }
+      final buyerRows = await txn.query(
+        'owners',
+        columns: ['id', 'name'],
+        where: 'id = ?',
+        whereArgs: [buyerOwnerId],
+        limit: 1,
+      );
+      if (buyerRows.isEmpty) throw StateError('المشتري المحدد غير موجود');
+      if (buyerOwnerId == sellerOwnerId) {
+        throw ArgumentError('يجب أن يختلف المشتري عن المالك البائع');
+      }
+
+      if (targetType == 'property') {
+        final independentlyOwnedUnits = await txn.query(
+          'units',
+          columns: ['id'],
+          where: 'property_id = ? AND owner_id IS NOT NULL',
+          whereArgs: [propertyId],
+          limit: 1,
+        );
+        if (independentlyOwnedUnits.isNotEmpty) {
+          throw StateError(
+            'لا يمكن بيع العقار كاملًا ما دامت فيه وحدة ذات ملكية مستقلة؛ راجع نطاق البيع يدويًا',
+          );
+        }
+      }
+
+      final contractRows = await txn.rawQuery(
+        targetType == 'property'
+            ? '''
+              SELECT c.id FROM contracts c JOIN units u ON u.id = c.unit_id
+              WHERE u.property_id = ? AND c.status != 'Cancelled'
+                AND (DATE(c.end_date) IS NULL
+                  OR DATE(c.end_date) >= DATE(?))
+              LIMIT 1
+            '''
+            : '''
+              SELECT c.id FROM contracts c
+              WHERE c.unit_id = ? AND c.status != 'Cancelled'
+                AND (DATE(c.end_date) IS NULL
+                  OR DATE(c.end_date) >= DATE(?))
+              LIMIT 1
+            ''',
+        [targetType == 'property' ? propertyId : unitId, normalizedDate],
+      );
+      if (contractRows.isNotEmpty) {
+        throw StateError(
+          'لا يمكن إتمام البيع قبل انتهاء أو تسوية العقود القائمة في تاريخ البيع؛ لا ينقل النظام العقود ولا يلغيها تلقائيًا',
+        );
+      }
+
+      final previousSales = await txn.query(
+        'property_sale_executions',
+        columns: ['sale_date'],
+        where: unitId == null
+            ? 'target_type = ? AND property_id = ? AND unit_id IS NULL'
+            : 'target_type = ? AND property_id = ? AND unit_id = ?',
+        whereArgs: unitId == null
+            ? [targetType, propertyId]
+            : [targetType, propertyId, unitId],
+        orderBy: 'sale_date DESC, id DESC',
+        limit: 1,
+      );
+      if (previousSales.isNotEmpty &&
+          normalizedDate.compareTo(
+                previousSales.single['sale_date']!.toString(),
+              ) <=
+              0) {
+        throw StateError('يجب أن يكون تاريخ نقل الملكية بعد آخر نقل مسجل');
+      }
+
+      final sellerRows = await txn.query(
+        'owners',
+        columns: ['id', 'name'],
+        where: 'id = ?',
+        whereArgs: [sellerOwnerId],
+        limit: 1,
+      );
+      if (sellerRows.isEmpty) throw StateError('المالك البائع غير موجود');
+      final executedAt = DateTime.now().toIso8601String();
+      final executionId = await txn.insert('property_sale_executions', {
+        'sale_review_id': saleReviewId,
+        'target_type': targetType,
+        'property_id': propertyId,
+        'unit_id': unitId,
+        'seller_owner_id': sellerOwnerId,
+        'buyer_owner_id': buyerOwnerId,
+        'seller_name_snapshot': sellerRows.single['name']?.toString() ?? '',
+        'buyer_name_snapshot': buyerRows.single['name']?.toString() ?? '',
+        'sale_price_minor': salePriceMinor,
+        'sale_date': normalizedDate,
+        'deed_reference': normalizedDeed,
+        'execution_reason': normalizedReason,
+        'executed_by': actorId,
+        'executed_at': executedAt,
+      });
+
+      final changed = targetType == 'property'
+          ? await txn.update(
+              'properties',
+              {'owner_id': buyerOwnerId},
+              where: 'id = ? AND owner_id = ?',
+              whereArgs: [propertyId, sellerOwnerId],
+            )
+          : await txn.update(
+              'units',
+              {'owner_id': buyerOwnerId},
+              where: target['unit_owner_id'] == null
+                  ? 'id = ? AND owner_id IS NULL'
+                  : 'id = ? AND owner_id = ?',
+              whereArgs: target['unit_owner_id'] == null
+                  ? [unitId]
+                  : [unitId, target['unit_owner_id']],
+            );
+      if (changed != 1) throw StateError('تعذر تحديث الملكية؛ أُلغيت العملية');
+      await txn.update(
+        'property_sale_executions',
+        {'transfer_applied_at': DateTime.now().toIso8601String()},
+        where: 'id = ? AND transfer_applied_at IS NULL',
+        whereArgs: [executionId],
+      );
+      final eventDetails = {
+        'sale_review_id': saleReviewId,
+        'target_type': targetType,
+        'property_id': propertyId,
+        'unit_id': unitId,
+        'seller_owner_id': sellerOwnerId,
+        'buyer_owner_id': buyerOwnerId,
+        'sale_price_minor': salePriceMinor,
+        'sale_date': normalizedDate,
+        'deed_reference': normalizedDeed,
+        'accounting_status': 'pending',
+      };
+      await _recordPropertySaleExecutionEvent(
+        txn,
+        saleExecutionId: executionId,
+        eventType: 'executed',
+        userId: actorId,
+        timestamp: executedAt,
+        reason: normalizedReason,
+        details: eventDetails,
+      );
+      await _recordAuditTx(
+        txn,
+        action: 'PROPERTY_SALE_EXECUTED',
+        entityType: 'property_sale_execution',
+        entityId: executionId,
+        amountMinor: salePriceMinor,
+        details: eventDetails,
+        timestamp: executedAt,
+      );
+      return executionId;
+    });
+  }
+
+  Future<int> recordPropertySaleAccounting({
+    required int saleExecutionId,
+    required int bookValueMinor,
+    required int manualJournalEntryId,
+    required String note,
+    int? supersedesRecordId,
+  }) async {
+    PermissionRuntime.require('accounting', AppPermissionAction.post);
+    final normalizedNote = note.trim();
+    if (saleExecutionId <= 0 ||
+        bookValueMinor < 0 ||
+        manualJournalEntryId <= 0 ||
+        normalizedNote.isEmpty ||
+        normalizedNote.length > 1000 ||
+        (supersedesRecordId != null && supersedesRecordId <= 0)) {
+      throw ArgumentError(
+        'القيمة الدفترية والقيد اليدوي ومبرر الاعتماد مطلوبة',
+      );
+    }
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final actorId = await _requirePropertySaleActorId(txn);
+      final executionRows = await txn.query(
+        'property_sale_executions',
+        columns: ['id', 'sale_review_id', 'sale_date', 'transfer_applied_at'],
+        where: 'id = ?',
+        whereArgs: [saleExecutionId],
+        limit: 1,
+      );
+      if (executionRows.isEmpty ||
+          executionRows.single['transfer_applied_at'] == null) {
+        throw StateError('لا توجد عملية بيع منفذة يمكن تسويتها محاسبيًا');
+      }
+      final journalRows = await txn.rawQuery(
+        '''
+        SELECT je.is_posted,
+          COUNT(jl.id) AS line_count,
+          CAST(ROUND(COALESCE(SUM(jl.debit), 0) * 100) AS INTEGER)
+            AS debit_minor,
+          CAST(ROUND(COALESCE(SUM(jl.credit), 0) * 100) AS INTEGER)
+            AS credit_minor
+        FROM journal_entries je
+        LEFT JOIN journal_lines jl ON jl.journal_entry_id = je.id
+        WHERE je.id = ?
+        GROUP BY je.id
+        ''',
+        [manualJournalEntryId],
+      );
+      if (journalRows.isEmpty || journalRows.single['is_posted'] != 1) {
+        throw StateError('يجب ربط قيد يدوي موجود ومرحّل بالفعل');
+      }
+      final journal = journalRows.single;
+      final lineCount = (journal['line_count'] as num).toInt();
+      final debitMinor = (journal['debit_minor'] as num).toInt();
+      final creditMinor = (journal['credit_minor'] as num).toInt();
+      if (lineCount < 2 ||
+          debitMinor <= 0 ||
+          creditMinor <= 0 ||
+          debitMinor != creditMinor) {
+        throw StateError('القيد المرتبط غير متوازن أو لا يحتوي أسطرًا كافية');
+      }
+
+      final currentRows = await txn.rawQuery(
+        '''
+        SELECT current_record.id
+        FROM property_sale_accounting_records current_record
+        WHERE current_record.sale_execution_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM property_sale_accounting_records successor
+            WHERE successor.supersedes_record_id = current_record.id
+          )
+        ORDER BY current_record.id DESC LIMIT 1
+        ''',
+        [saleExecutionId],
+      );
+      final currentRecordId = currentRows.isEmpty
+          ? null
+          : (currentRows.single['id'] as num).toInt();
+      if (currentRecordId == null && supersedesRecordId != null) {
+        throw StateError('لا يوجد اعتماد سابق يمكن تصحيحه');
+      }
+      if (currentRecordId != null && supersedesRecordId != currentRecordId) {
+        throw StateError(
+          'توجد تسوية محاسبية سابقة؛ حدّث البيانات قبل إضافة التصحيح الموثق',
+        );
+      }
+
+      final timestamp = DateTime.now().toIso8601String();
+      final recordId = await txn.insert('property_sale_accounting_records', {
+        'sale_execution_id': saleExecutionId,
+        'supersedes_record_id': supersedesRecordId,
+        'book_value_minor': bookValueMinor,
+        'manual_journal_entry_id': manualJournalEntryId,
+        'accounting_note': normalizedNote,
+        'approved_by': actorId,
+        'approved_at': timestamp,
+      });
+      final eventType = supersedesRecordId == null
+          ? 'accounting_approved'
+          : 'accounting_corrected';
+      final details = {
+        'sale_execution_id': saleExecutionId,
+        'accounting_record_id': recordId,
+        'supersedes_record_id': supersedesRecordId,
+        'book_value_minor': bookValueMinor,
+        'manual_journal_entry_id': manualJournalEntryId,
+        'journal_debit_minor': debitMinor,
+        'journal_credit_minor': creditMinor,
+      };
+      await _recordPropertySaleExecutionEvent(
+        txn,
+        saleExecutionId: saleExecutionId,
+        eventType: eventType,
+        userId: actorId,
+        timestamp: timestamp,
+        reason: normalizedNote,
+        details: details,
+      );
+      await _recordAuditTx(
+        txn,
+        action: 'PROPERTY_SALE_$eventType',
+        entityType: 'property_sale_execution',
+        entityId: saleExecutionId,
+        amountMinor: bookValueMinor,
+        details: details,
+        timestamp: timestamp,
+      );
+      return recordId;
+    });
+  }
+
+  Future<void> _recordPropertySaleExecutionEvent(
+    DatabaseExecutor txn, {
+    required int saleExecutionId,
+    required String eventType,
+    required int userId,
+    required String timestamp,
+    required String reason,
+    required Map<String, Object?> details,
+  }) async {
+    final eventDetails = <String, Object?>{
+      'sale_execution_id': saleExecutionId,
+      ...details,
+    };
+    await txn.insert('property_sale_execution_events', {
+      'sale_execution_id': saleExecutionId,
+      'event_type': eventType,
+      'user_id': userId,
+      'created_at': timestamp,
+      'reason': reason,
+      'details': jsonEncode(eventDetails),
+    });
   }
 
   Future<void> reviewPropertySaleRequest({
@@ -10117,7 +10777,15 @@ class DatabaseHelper {
       final actorId = await _requirePropertySaleActorId(txn);
       final rows = await txn.query(
         'property_sale_reviews',
-        columns: ['status', 'property_id', 'unit_id', 'target_type'],
+        columns: [
+          'status',
+          'property_id',
+          'unit_id',
+          'target_type',
+          'proposed_buyer_owner_id',
+          'proposed_amount_minor',
+          'proposed_sale_date',
+        ],
         where: 'id = ?',
         whereArgs: [saleReviewId],
         limit: 1,
@@ -10125,6 +10793,18 @@ class DatabaseHelper {
       if (rows.isEmpty) throw StateError('طلب البيع غير موجود');
       if (rows.single['status'] != 'pending') {
         throw StateError('لا يمكن مراجعة طلب بيع إلا إذا كان بانتظار المراجعة');
+      }
+      if (accept &&
+          (rows.single['proposed_buyer_owner_id'] is! num ||
+              rows.single['proposed_amount_minor'] is! num ||
+              (rows.single['proposed_amount_minor'] as num) <= 0 ||
+              _normalizeSaleDateOnly(
+                    rows.single['proposed_sale_date']?.toString(),
+                  ) ==
+                  null)) {
+        throw StateError(
+          'لا يمكن اعتماد طلب قديم بلا مشتري وسعر وتاريخ محددين؛ ألغِه وأنشئ طلبًا جديدًا',
+        );
       }
       final status = accept ? 'accepted' : 'rejected';
       final timestamp = DateTime.now().toIso8601String();
@@ -10152,6 +10832,9 @@ class DatabaseHelper {
           'target_type': rows.single['target_type'],
           'property_id': rows.single['property_id'],
           'unit_id': rows.single['unit_id'],
+          'proposed_buyer_owner_id': rows.single['proposed_buyer_owner_id'],
+          'proposed_amount_minor': rows.single['proposed_amount_minor'],
+          'proposed_sale_date': rows.single['proposed_sale_date'],
         },
       );
     });

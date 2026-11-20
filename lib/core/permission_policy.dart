@@ -39,7 +39,7 @@ class AppPermissionCatalog {
     AppPermissionModule('system_settings', 'إعدادات النظام والمستخدمون'),
     AppPermissionModule('lookups', 'البيانات الأساسية'),
     AppPermissionModule('properties', 'العقارات والملاك والوحدات'),
-    AppPermissionModule('property_sales', 'مراجعة بيع العقار والوحدة'),
+    AppPermissionModule('property_sales', 'مراجعة وتنفيذ بيع العقار والوحدة'),
     AppPermissionModule('leasing', 'المستأجرون وعقود الإيجار'),
     AppPermissionModule('notices', 'إشعارات المستأجرين'),
     AppPermissionModule('tenant_financial', 'العمليات المالية للمستأجرين'),

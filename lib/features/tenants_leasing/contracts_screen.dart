@@ -1272,7 +1272,7 @@ class _ContractsScreenState extends State<ContractsScreen> {
       final ownerRows = await db.query(
         'owners',
         where: 'id = ?',
-        whereArgs: [property['owner_id']],
+        whereArgs: [unit['owner_id'] ?? property['owner_id']],
         limit: 1,
       );
       if (ownerRows.isNotEmpty)

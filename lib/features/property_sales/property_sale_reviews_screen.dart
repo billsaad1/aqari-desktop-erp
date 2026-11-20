@@ -57,9 +57,14 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
   Future<void> _showCreateDialog() async {
     final properties = await DatabaseHelper.instance
         .getPropertySaleProperties();
+    final owners = await DatabaseHelper.instance.getPropertySaleOwners();
     if (!mounted) return;
     if (properties.isEmpty) {
       _showMessage('أضف عقارًا أولًا قبل إنشاء طلب مراجعة بيع.');
+      return;
+    }
+    if (owners.isEmpty) {
+      _showMessage('أضف مالكًا يمثل المشتري قبل إنشاء طلب مراجعة البيع.');
       return;
     }
 
@@ -69,7 +74,16 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
     var targetType = 'property';
     var propertyId = (properties.first['id'] as num).toInt();
     int? unitId;
-    String? proposedSaleDate;
+    final firstSellerValue = properties.first['owner_id'];
+    final firstSellerId = firstSellerValue is num
+        ? firstSellerValue.toInt()
+        : null;
+    final firstBuyer = owners.firstWhere(
+      (owner) => (owner['id'] as num).toInt() != firstSellerId,
+      orElse: () => owners.first,
+    );
+    var buyerOwnerId = (firstBuyer['id'] as num).toInt();
+    var proposedSaleDate = _toIsoDate(DateTime.now());
     var units = await DatabaseHelper.instance.getPropertySaleUnits(propertyId);
     if (!mounted) {
       reasonController.dispose();
@@ -77,6 +91,23 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
       return;
     }
     var isDialogSaving = false;
+
+    int? selectedSellerOwnerId() {
+      if (targetType == 'unit' && unitId != null) {
+        final selectedUnit = units.firstWhere(
+          (unit) => (unit['id'] as num).toInt() == unitId,
+          orElse: () => const <String, Object?>{},
+        );
+        final ownerId = selectedUnit['effective_owner_id'];
+        return ownerId is num ? ownerId.toInt() : null;
+      }
+      final selectedProperty = properties.firstWhere(
+        (property) => (property['id'] as num).toInt() == propertyId,
+        orElse: () => const <String, Object?>{},
+      );
+      final ownerId = selectedProperty['owner_id'];
+      return ownerId is num ? ownerId.toInt() : null;
+    }
 
     try {
       await showDialog<void>(
@@ -177,7 +208,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                                   (unit) => DropdownMenuItem<int>(
                                     value: (unit['id'] as num).toInt(),
                                     child: Text(
-                                      'وحدة ${unit['unit_number']} — الحالة: ${unit['status']} — عقود نشطة: ${unit['active_contract_count']}',
+                                      'وحدة ${unit['unit_number']} — المالك: ${unit['owner_name'] ?? 'غير محدد'} — الحالة: ${unit['status']} — عقود نشطة: ${unit['active_contract_count']}',
                                     ),
                                   ),
                                 )
@@ -196,20 +227,48 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                             ),
                         ],
                         const SizedBox(height: 12),
+                        DropdownButtonFormField<int>(
+                          initialValue: buyerOwnerId,
+                          decoration: const InputDecoration(
+                            labelText: 'المشتري المقترح (من سجل الملاك)',
+                            border: OutlineInputBorder(),
+                          ),
+                          items: owners
+                              .map(
+                                (owner) => DropdownMenuItem<int>(
+                                  value: (owner['id'] as num).toInt(),
+                                  child: Text(owner['name']?.toString() ?? ''),
+                                ),
+                              )
+                              .toList(),
+                          validator: (value) => value == null
+                              ? 'حدد المشتري الذي سيعتمده المراجع'
+                              : value == selectedSellerOwnerId()
+                              ? 'يجب أن يختلف المشتري عن مالك العقار/الوحدة'
+                              : null,
+                          onChanged: isDialogSaving
+                              ? null
+                              : (value) {
+                                  if (value != null) {
+                                    setDialogState(() => buyerOwnerId = value);
+                                  }
+                                },
+                        ),
+                        const SizedBox(height: 12),
                         TextFormField(
                           controller: amountController,
                           keyboardType: const TextInputType.numberWithOptions(
                             decimal: true,
                           ),
                           decoration: const InputDecoration(
-                            labelText: 'القيمة المقترحة (اختياري)',
+                            labelText: 'سعر البيع المقترح',
                             helperText:
-                                'أدخلها فقط إذا كانت معلومة؛ لن تُستنتج أو تُرحّل محاسبيًا.',
+                                'سعر الصفقة الذي سيُعرض للمراجع ويُقفل بعد الإرسال؛ لا يولد قيدًا محاسبيًا.',
                             border: OutlineInputBorder(),
                           ),
                           validator: (value) {
                             final raw = value?.trim() ?? '';
-                            if (raw.isEmpty) return null;
+                            if (raw.isEmpty) return 'أدخل سعر البيع المقترح';
                             return _parseMinorUnits(raw) == null
                                 ? 'أدخل مبلغًا موجبًا بدقة لا تتجاوز منزلتين عشريتين'
                                 : null;
@@ -222,10 +281,12 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                               : () async {
                                   final picked = await showDatePicker(
                                     context: dialogContext,
-                                    initialDate: DateTime.now(),
+                                    initialDate: DateTime.parse(
+                                      proposedSaleDate,
+                                    ),
                                     firstDate: DateTime(1900),
-                                    lastDate: DateTime(2200),
-                                    helpText: 'التاريخ المقترح للبيع (اختياري)',
+                                    lastDate: DateTime.now(),
+                                    helpText: 'تاريخ البيع المقترح والمعتمد',
                                   );
                                   if (picked != null && dialogContext.mounted) {
                                     setDialogState(() {
@@ -234,24 +295,8 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                                   }
                                 },
                           icon: const Icon(Icons.calendar_month_outlined),
-                          label: Text(
-                            proposedSaleDate == null
-                                ? 'تحديد تاريخ مقترح (اختياري)'
-                                : 'التاريخ المقترح: $proposedSaleDate',
-                          ),
+                          label: Text('تاريخ البيع المقترح: $proposedSaleDate'),
                         ),
-                        if (proposedSaleDate != null)
-                          Align(
-                            alignment: AlignmentDirectional.centerStart,
-                            child: TextButton(
-                              onPressed: isDialogSaving
-                                  ? null
-                                  : () => setDialogState(
-                                      () => proposedSaleDate = null,
-                                    ),
-                              child: const Text('مسح التاريخ'),
-                            ),
-                          ),
                         const SizedBox(height: 12),
                         TextFormField(
                           controller: reasonController,
@@ -280,7 +325,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'حفظ الطلب أو الموافقة عليه لا يثبت إتمام البيع، ولا يغيّر المالك أو حالة الوحدة أو العقود، ولا ينشئ قيدًا أو ربحًا أو خسارة.',
+                          'المراجعة تعتمد المشتري والسعر والتاريخ المحددة هنا؛ لا يمكن تغييرها بعد الإرسال. الموافقة لا تنقل الملكية ولا تنشئ قيدًا أو ربحًا أو خسارة.',
                           style: TextStyle(fontSize: 12),
                         ),
                       ],
@@ -303,6 +348,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                           final amount = _parseMinorUnits(
                             amountController.text,
                           );
+                          if (amount == null) return;
                           setDialogState(() => isDialogSaving = true);
                           try {
                             await DatabaseHelper.instance
@@ -311,6 +357,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                                   propertyId: propertyId,
                                   unitId: targetType == 'unit' ? unitId : null,
                                   reason: reasonController.text,
+                                  proposedBuyerOwnerId: buyerOwnerId,
                                   proposedAmountMinor: amount,
                                   proposedSaleDate: proposedSaleDate,
                                 );
@@ -373,10 +420,385 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
     return property == null ? 0 : _activeCount(property);
   }
 
+  Future<void> _showSaleExecutionDialog(Map<String, Object?> review) async {
+    final saleReviewId = (review['id'] as num).toInt();
+    final snapshot = _decodeSnapshot(review['target_snapshot_json']);
+    final rawSellerId = snapshot['seller_owner_id'];
+    if (rawSellerId is! num) {
+      _showMessage(
+        'هذا طلب قديم لا يحفظ هوية المالك عند الطلب؛ ألغِه وأنشئ طلب مراجعة جديدًا.',
+      );
+      return;
+    }
+    final sellerOwnerId = rawSellerId.toInt();
+    final rawBuyerId = review['proposed_buyer_owner_id'];
+    final rawPriceMinor = review['proposed_amount_minor'];
+    final proposedDate = DateTime.tryParse(
+      review['proposed_sale_date']?.toString() ?? '',
+    );
+    if (rawBuyerId is! num ||
+        rawPriceMinor is! num ||
+        rawPriceMinor <= 0 ||
+        proposedDate == null) {
+      _showMessage(
+        'الطلب قديم ولا يتضمن مشتريًا وسعرًا وتاريخًا اعتمدها المراجع؛ ألغِه وأنشئ طلبًا جديدًا.',
+      );
+      return;
+    }
+    final buyerOwnerId = rawBuyerId.toInt();
+    final salePriceMinor = rawPriceMinor.toInt();
+    final proposedSaleDate = DateTime(
+      proposedDate.year,
+      proposedDate.month,
+      proposedDate.day,
+    );
+    final today = DateTime.now();
+    final todayOnly = DateTime(today.year, today.month, today.day);
+    if (proposedSaleDate.isAfter(todayOnly)) {
+      _showMessage('لا يمكن تنفيذ طلب بيع مؤرخ بتاريخ مستقبلي.');
+      return;
+    }
+    final owners = await DatabaseHelper.instance.getPropertySaleOwners();
+    if (!mounted) return;
+    final matchingBuyers = owners
+        .where((owner) => (owner['id'] as num).toInt() == buyerOwnerId)
+        .toList();
+    if (matchingBuyers.isEmpty || buyerOwnerId == sellerOwnerId) {
+      _showMessage('المشتري المعتمد غير صالح؛ ألغِ الطلب وأعد مراجعته.');
+      return;
+    }
+    final buyerNameAtRequest =
+        snapshot['proposed_buyer_owner_name'] ??
+        matchingBuyers.single['name'] ??
+        'غير محدد';
+
+    final formKey = GlobalKey<FormState>();
+    final priceController = TextEditingController(
+      text: _formatMinor(salePriceMinor),
+    );
+    final deedController = TextEditingController();
+    final reasonController = TextEditingController();
+    var saving = false;
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => PopScope(
+            canPop: !saving,
+            child: AlertDialog(
+              title: const Text('إتمام البيع ونقل الملكية'),
+              scrollable: true,
+              content: SizedBox(
+                width: 620,
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'البائع المسجل: ${snapshot['seller_owner_name'] ?? review['current_owner_name'] ?? 'غير محدد'}',
+                      ),
+                      Text('المشتري المعتمد عند الطلب: $buyerNameAtRequest'),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<int>(
+                        initialValue: buyerOwnerId,
+                        decoration: const InputDecoration(
+                          labelText: 'المشتري المعتمد في طلب المراجعة',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: matchingBuyers
+                            .map(
+                              (owner) => DropdownMenuItem<int>(
+                                value: (owner['id'] as num).toInt(),
+                                child: Text(owner['name']?.toString() ?? ''),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: null,
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: priceController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'سعر البيع المعتمد',
+                          suffixText: 'بالعملة الافتراضية',
+                          helperText: 'لا يمكن تغييره بعد اعتماد طلب المراجعة.',
+                          border: OutlineInputBorder(),
+                        ),
+                        readOnly: true,
+                        validator: (value) {
+                          final amount = _parseMinorUnits(value ?? '');
+                          return amount != null && amount > 0
+                              ? null
+                              : 'أدخل سعرًا نهائيًا موجبًا بدقة لا تتجاوز منزلتين';
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: null,
+                        icon: const Icon(Icons.calendar_month_outlined),
+                        label: Text(
+                          'تاريخ البيع المعتمد: ${_toIsoDate(proposedSaleDate)}',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: deedController,
+                        maxLength: 200,
+                        decoration: const InputDecoration(
+                          labelText: 'مرجع صك/مستند البيع',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (value) => value?.trim().isNotEmpty == true
+                            ? null
+                            : 'مرجع المستند مطلوب لإثبات الإتمام',
+                      ),
+                      const SizedBox(height: 8),
+                      TextFormField(
+                        controller: reasonController,
+                        minLines: 2,
+                        maxLines: 4,
+                        maxLength: 1000,
+                        decoration: const InputDecoration(
+                          labelText: 'بيان إتمام البيع',
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        validator: (value) => value?.trim().isNotEmpty == true
+                            ? null
+                            : 'أدخل بيانًا موثقًا',
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'لا يُسمح بالإتمام إذا بقي عقد يغطي تاريخ البيع أو يمتد بعده. نقل الملكية لا ينشئ قيدًا ولا يحسب ربحًا أو خسارة؛ ستبقى التسوية المحاسبية بانتظار إدخال المحاسب وربط قيده اليدوي المرحّل.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: saving ? null : () => Navigator.pop(dialogContext),
+                  child: const Text('إلغاء'),
+                ),
+                FilledButton.icon(
+                  onPressed: saving
+                      ? null
+                      : () async {
+                          if (!formKey.currentState!.validate()) return;
+                          final salePriceMinor = _parseMinorUnits(
+                            priceController.text,
+                          );
+                          if (salePriceMinor == null) return;
+                          setDialogState(() => saving = true);
+                          try {
+                            await DatabaseHelper.instance
+                                .completePropertySaleExecution(
+                                  saleReviewId: saleReviewId,
+                                  buyerOwnerId: buyerOwnerId,
+                                  salePriceMinor: salePriceMinor,
+                                  saleDate: _toIsoDate(proposedSaleDate),
+                                  deedReference: deedController.text,
+                                  reason: reasonController.text,
+                                );
+                            if (!dialogContext.mounted) return;
+                            Navigator.pop(dialogContext);
+                            await _loadReviews();
+                            if (mounted) {
+                              _showMessage(
+                                'تم توثيق نقل الملكية. لم يُنشأ أي قيد؛ التسوية المحاسبية ما زالت مطلوبة.',
+                              );
+                            }
+                          } catch (error) {
+                            if (!dialogContext.mounted) return;
+                            setDialogState(() => saving = false);
+                            _showMessage('تعذر إتمام البيع: $error');
+                          }
+                        },
+                  icon: const Icon(Icons.handshake_outlined),
+                  label: const Text('توثيق نقل الملكية'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } finally {
+      priceController.dispose();
+      deedController.dispose();
+      reasonController.dispose();
+    }
+  }
+
+  Future<void> _showSaleAccountingDialog(Map<String, Object?> review) async {
+    final executionId = (review['sale_execution_id'] as num?)?.toInt();
+    if (executionId == null) return;
+    final previousRecordId = (review['accounting_record_id'] as num?)?.toInt();
+    final bookValueController = TextEditingController(
+      text: review['accounting_book_value_minor'] is num
+          ? _formatMinor(review['accounting_book_value_minor'])
+          : '',
+    );
+    final journalIdController = TextEditingController(
+      text: review['manual_journal_entry_id']?.toString() ?? '',
+    );
+    final noteController = TextEditingController(
+      text: review['accounting_note']?.toString() ?? '',
+    );
+    final formKey = GlobalKey<FormState>();
+    var saving = false;
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => PopScope(
+            canPop: !saving,
+            child: AlertDialog(
+              title: Text(
+                previousRecordId == null
+                    ? 'توثيق التسوية المحاسبية'
+                    : 'إضافة تصحيح محاسبي موثق',
+              ),
+              scrollable: true,
+              content: SizedBox(
+                width: 560,
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'أدخل القيمة الدفترية المعتمدة واربط قيدًا يدويًا مرحّلًا ومتوازنًا. النظام لا ينشئ قيدًا ولا يحسب ربحًا أو خسارة.',
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: bookValueController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'القيمة الدفترية المعتمدة',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (value) =>
+                            _parseMinorUnits(value ?? '') != null
+                            ? null
+                            : 'أدخل قيمة دفترية صفرًا أو أكثر بدقة منزلتين',
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: journalIdController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'رقم القيد اليدوي المرحّل',
+                          helperText:
+                              'القيد يُنشأ ويرحّل يدويًا من شاشة القيود.',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (value) {
+                          final id = int.tryParse(value?.trim() ?? '');
+                          return id != null && id > 0
+                              ? null
+                              : 'أدخل رقم قيد موجبًا مرحّلًا ومتوازنًا';
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: noteController,
+                        minLines: 3,
+                        maxLines: 5,
+                        maxLength: 1000,
+                        decoration: const InputDecoration(
+                          labelText: 'بيان اعتماد المحاسب',
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        validator: (value) => value?.trim().isNotEmpty == true
+                            ? null
+                            : 'مبرر الاعتماد مطلوب',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: saving ? null : () => Navigator.pop(dialogContext),
+                  child: const Text('إلغاء'),
+                ),
+                FilledButton.icon(
+                  onPressed: saving
+                      ? null
+                      : () async {
+                          if (!formKey.currentState!.validate()) return;
+                          final bookValueMinor = _parseMinorUnits(
+                            bookValueController.text,
+                          );
+                          final journalEntryId = int.tryParse(
+                            journalIdController.text.trim(),
+                          );
+                          if (bookValueMinor == null ||
+                              journalEntryId == null) {
+                            return;
+                          }
+                          setDialogState(() => saving = true);
+                          try {
+                            await DatabaseHelper.instance
+                                .recordPropertySaleAccounting(
+                                  saleExecutionId: executionId,
+                                  bookValueMinor: bookValueMinor,
+                                  manualJournalEntryId: journalEntryId,
+                                  note: noteController.text,
+                                  supersedesRecordId: previousRecordId,
+                                );
+                            if (!dialogContext.mounted) return;
+                            Navigator.pop(dialogContext);
+                            await _loadReviews();
+                            if (mounted) {
+                              _showMessage(
+                                'تم توثيق اعتماد المحاسب وربط القيد اليدوي؛ لم ينشئ النظام أي قيد تلقائي.',
+                              );
+                            }
+                          } catch (error) {
+                            if (!dialogContext.mounted) return;
+                            setDialogState(() => saving = false);
+                            _showMessage('تعذر حفظ التسوية: $error');
+                          }
+                        },
+                  icon: const Icon(Icons.account_balance_outlined),
+                  label: Text(
+                    previousRecordId == null ? 'اعتماد يدوي' : 'حفظ التصحيح',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } finally {
+      bookValueController.dispose();
+      journalIdController.dispose();
+      noteController.dispose();
+    }
+  }
+
   Future<void> _showReviewDialog(
     Map<String, Object?> review, {
     required bool accept,
   }) async {
+    final snapshot = _decodeSnapshot(review['target_snapshot_json']);
+    final proposedBuyerName =
+        snapshot['proposed_buyer_owner_name'] ??
+        review['proposed_buyer_name'] ??
+        'غير محدد';
     final reasonController = TextEditingController();
     final formKey = GlobalKey<FormState>();
     var saving = false;
@@ -399,8 +821,16 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
+                          'شروط الصفقة التي سيشملها القرار:\n'
+                          'المشتري: $proposedBuyerName\n'
+                          'السعر: ${_formatMinor(review['proposed_amount_minor'])}\n'
+                          'التاريخ: ${review['proposed_sale_date'] ?? 'غير محدد'}',
+                          textAlign: TextAlign.start,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
                           accept
-                              ? 'الموافقة هنا تخص نتيجة المراجعة اليدوية فقط، ولا تعني إتمام البيع أو إنشاء أي قيد.'
+                              ? 'الموافقة تخص هذه الشروط نفسها فقط؛ لا تعني إتمام البيع أو إنشاء أي قيد، ولا يمكن تغيير المشتري أو السعر أو التاريخ أثناء التنفيذ.'
                               : 'سيبقى الطلب وسجلّه محفوظين؛ يمكن إنشاء طلب جديد لاحقًا بسبب موثق.',
                         ),
                         const SizedBox(height: 12),
@@ -571,6 +1001,17 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
     _ => 'حالة غير معروفة',
   };
 
+  String _saleEventLabel(String? eventType) => switch (eventType) {
+    'requested' => 'إنشاء طلب مراجعة',
+    'accepted' => 'اعتماد نتيجة المراجعة',
+    'rejected' => 'رفض الطلب',
+    'cancelled' => 'إلغاء الطلب',
+    'executed' => 'إتمام البيع ونقل الملكية',
+    'accounting_approved' => 'اعتماد التسوية المحاسبية',
+    'accounting_corrected' => 'تصحيح التسوية المحاسبية',
+    _ => eventType ?? 'حدث بيع',
+  };
+
   Color _statusColor(BuildContext context, String? status) => switch (status) {
     'pending' => Theme.of(context).colorScheme.tertiary,
     'accepted' => Theme.of(context).colorScheme.primary,
@@ -664,15 +1105,50 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
         (review['active_contract_count_at_request'] as num?)?.toInt() ?? 0;
     final activeCurrent =
         (review['active_contract_count_current'] as num?)?.toInt() ?? 0;
+    final saleExecuted =
+        review['sale_execution_id'] is num &&
+        review['transfer_applied_at'] != null;
+    final accountingComplete = review['accounting_record_id'] is num;
+    final snapshotSellerId = (snapshot['seller_owner_id'] as num?)?.toInt();
+    final currentOwnerId = (review['current_owner_id'] as num?)?.toInt();
+    final sellerStillCurrent =
+        snapshotSellerId != null && currentOwnerId == snapshotSellerId;
+    final hasApprovedTerms =
+        review['proposed_buyer_owner_id'] is num &&
+        (review['proposed_buyer_owner_id'] as num) > 0 &&
+        review['proposed_amount_minor'] is num &&
+        (review['proposed_amount_minor'] as num) > 0 &&
+        DateTime.tryParse(review['proposed_sale_date']?.toString() ?? '') !=
+            null;
     final canReview =
         status == 'pending' &&
         PermissionRuntime.allows(
           'property_sales',
           AppPermissionAction.reviewApprove,
         );
+    final canExecute =
+        status == 'accepted' &&
+        !saleExecuted &&
+        hasApprovedTerms &&
+        sellerStillCurrent &&
+        PermissionRuntime.allows('property_sales', AppPermissionAction.post);
+    final canRecordAccounting =
+        saleExecuted &&
+        PermissionRuntime.allows('accounting', AppPermissionAction.post);
     final canCancel =
         (status == 'pending' || status == 'accepted') &&
+        !saleExecuted &&
         PermissionRuntime.allows('property_sales', AppPermissionAction.edit);
+    final statusLabel = !saleExecuted
+        ? _statusLabel(status)
+        : accountingComplete
+        ? 'تم نقل الملكية واعتماد التسوية يدويًا'
+        : 'تم نقل الملكية — التسوية المحاسبية معلقة';
+    final statusColor = !saleExecuted
+        ? _statusColor(context, status)
+        : accountingComplete
+        ? Theme.of(context).colorScheme.primary
+        : Theme.of(context).colorScheme.tertiary;
     final reviewId = (review['id'] as num).toInt();
     final eventFuture = _eventFutures[reviewId];
 
@@ -701,10 +1177,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
         subtitle: Text(
           'طلب #${review['id']} • ${review['requester_name'] ?? 'مستخدم'} • ${review['requested_at'] ?? ''}',
         ),
-        trailing: _StatusBadge(
-          label: _statusLabel(status),
-          color: _statusColor(context, status),
-        ),
+        trailing: _StatusBadge(label: statusLabel, color: statusColor),
         children: [
           Align(
             alignment: AlignmentDirectional.centerStart,
@@ -716,13 +1189,70 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                   'القيمة المقترحة: ${_formatMinor(review['proposed_amount_minor'])}',
                 ),
                 Text(
+                  'المشتري المقترح: ${snapshot['proposed_buyer_owner_name'] ?? review['proposed_buyer_name'] ?? 'غير محدد'}',
+                ),
+                Text(
                   'تاريخ البيع المقترح: ${review['proposed_sale_date'] ?? 'غير محدد'}',
                 ),
                 Text('العقود النشطة وقت الطلب: $activeAtRequest'),
                 Text('العقود النشطة حاليًا: $activeCurrent'),
+                Text(
+                  'مالك الهدف عند الطلب: ${snapshot['seller_owner_name'] ?? 'غير موثق'}',
+                ),
+                Text(
+                  'المالك الحالي: ${review['current_owner_name'] ?? 'غير محدد'}',
+                ),
               ],
             ),
           ),
+          if (status == 'accepted' && !saleExecuted && !sellerStillCurrent)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'تغير المالك منذ إنشاء الطلب أو أن الطلب قديم بلا لقطة موثوقة؛ لا تنفذ البيع قبل إلغاء الطلب وإعادة مراجعته.',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          if (status == 'accepted' && !saleExecuted && !hasApprovedTerms)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'طلب قديم بلا شروط مشتري وسعر وتاريخ معتمدة؛ لا يمكن تنفيذه. ألغِه وأنشئ طلبًا جديدًا.',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          if (saleExecuted) ...[
+            const SizedBox(height: 10),
+            Card(
+              color: Theme.of(context).colorScheme.surfaceContainerLow,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Wrap(
+                  spacing: 20,
+                  runSpacing: 8,
+                  children: [
+                    Text(
+                      'المشتري: ${review['buyer_owner_name_snapshot'] ?? 'غير محدد'}',
+                    ),
+                    Text('تاريخ النفاذ: ${review['sale_date'] ?? ''}'),
+                    Text(
+                      'سعر البيع: ${_formatMinor(review['sale_price_minor'])}',
+                    ),
+                    Text('مرجع الصك: ${review['deed_reference'] ?? ''}'),
+                    if (accountingComplete) ...[
+                      Text(
+                        'القيمة الدفترية المعتمدة: ${_formatMinor(review['accounting_book_value_minor'])}',
+                      ),
+                      Text(
+                        'رقم القيد اليدوي: ${review['manual_journal_entry_id']}',
+                      ),
+                    ] else
+                      const Text('التسوية المحاسبية: بانتظار اعتماد المحاسب'),
+                  ],
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           _activeContractsNotice(activeCurrent),
           const SizedBox(height: 8),
@@ -767,6 +1297,22 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                   label: const Text('رفض الطلب'),
                 ),
               ],
+              if (canExecute)
+                FilledButton.icon(
+                  onPressed: () => _showSaleExecutionDialog(review),
+                  icon: const Icon(Icons.handshake_outlined),
+                  label: const Text('إتمام البيع ونقل الملكية'),
+                ),
+              if (canRecordAccounting)
+                OutlinedButton.icon(
+                  onPressed: () => _showSaleAccountingDialog(review),
+                  icon: const Icon(Icons.account_balance_outlined),
+                  label: Text(
+                    accountingComplete
+                        ? 'تصحيح التسوية المحاسبية'
+                        : 'توثيق التسوية المحاسبية',
+                  ),
+                ),
               if (canCancel)
                 TextButton.icon(
                   onPressed: () => _showCancelDialog(review),
@@ -820,7 +1366,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
                           contentPadding: EdgeInsets.zero,
                           leading: const Icon(Icons.history, size: 18),
                           title: Text(
-                            '${event['event_type']} — ${event['user_name'] ?? 'مستخدم'}',
+                            '${_saleEventLabel(event['event_type']?.toString())} — ${event['user_name'] ?? 'مستخدم'}',
                           ),
                           subtitle: Text(
                             '${event['created_at'] ?? ''}\n${event['reason'] ?? ''}',
@@ -851,7 +1397,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
             children: [
               const Expanded(
                 child: Text(
-                  'مراجعة بيع العقار والوحدة',
+                  'مراجعة وتنفيذ بيع العقار والوحدة',
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                 ),
               ),
@@ -876,7 +1422,7 @@ class _PropertySaleReviewsScreenState extends State<PropertySaleReviewsScreen> {
             child: const Padding(
               padding: EdgeInsets.all(12),
               child: Text(
-                'هذه شاشة مراجعة يدوية فقط. اعتماد المراجعة لا يعني إتمام البيع، ولا يغيّر الملكية أو الإشغال أو العقود، ولا ينشئ قيدًا أو ربحًا/خسارة. لا يُرحّل أي أثر قبل مراجعة مستقلة واعتماد محاسبي موثق.',
+                'يمر البيع بثلاث خطوات منفصلة: اعتماد المراجعة، ثم توثيق الصك والسعر وتاريخ نقل الملكية، ثم اعتماد المحاسب للقيمة الدفترية وربط قيد يدوي مرحّل. يمنع الإتمام إذا امتد عقد غير ملغى إلى تاريخ البيع أو بعده. لا ينشئ النظام قيودًا ولا يحسب أرباحًا أو خسائر تلقائيًا.',
               ),
             ),
           ),

@@ -441,7 +441,7 @@ class _AppSidebarState extends State<AppSidebar> {
                           if (auth.canAccessScreen('property_sales'))
                             _buildNavItem(
                               context,
-                              'مراجعة البيع',
+                              'مراجعة وتنفيذ البيع',
                               Icons.real_estate_agent_outlined,
                               12,
                               navProvider,

@@ -74,6 +74,24 @@ void main() {
     );
     expect(
       AppPermissionCatalog.roleAllows(
+        'Accountant',
+        'property_sales',
+        AppPermissionAction.post,
+      ),
+      isFalse,
+      reason: 'المحاسب يراجع الطلب ولا ينفذ نقل الملكية بنفسه',
+    );
+    expect(
+      AppPermissionCatalog.roleAllows(
+        'Accountant',
+        'accounting',
+        AppPermissionAction.post,
+      ),
+      isTrue,
+      reason: 'توثيق التسوية مرتبط بصلاحية الترحيل المحاسبي',
+    );
+    expect(
+      AppPermissionCatalog.roleAllows(
         'Admin',
         'property_sales',
         AppPermissionAction.reviewApprove,
@@ -131,13 +149,26 @@ void main() {
         whereArgs: [ids['property_id']],
       )).single['owner_id'];
 
+      await expectLater(
+        helper.createPropertySaleReview(
+          targetType: 'unit',
+          propertyId: ids['property_id']!,
+          unitId: ids['unit1_id'],
+          reason: 'المشتري لا يجوز أن يكون البائع',
+          proposedBuyerOwnerId: ids['owner_id']!,
+          proposedAmountMinor: 123456789,
+          proposedSaleDate: '2026-08-31',
+        ),
+        throwsArgumentError,
+      );
       final reviewId = await helper.createPropertySaleReview(
         targetType: 'unit',
         propertyId: ids['property_id']!,
         unitId: ids['unit1_id'],
         reason: 'طلب مراجعة بيع مدخل يدويًا',
+        proposedBuyerOwnerId: ids['buyer_id']!,
         proposedAmountMinor: 123456789,
-        proposedSaleDate: '2026-12-31',
+        proposedSaleDate: '2026-08-31',
       );
 
       final review = (await helper.getPropertySaleReviews()).single;
@@ -148,11 +179,18 @@ void main() {
       expect(review['status'], 'pending');
       expect(review['target_type'], 'unit');
       expect(review['proposed_amount_minor'], 123456789);
+      expect(review['proposed_buyer_owner_id'], ids['buyer_id']);
+      expect(review['proposed_buyer_name'], startsWith('مشتري اختبار '));
       expect(review['active_contract_count_at_request'], 1);
       expect(review['active_contract_count_current'], 1);
       expect(snapshot['unit_number'], '101');
       expect(snapshot['unit_status_at_request'], 'مؤجرة');
       expect(snapshot['source'], 'current_master_data_at_request');
+      expect(snapshot['proposed_buyer_owner_id'], ids['buyer_id']);
+      expect(
+        snapshot['proposed_buyer_owner_name'],
+        startsWith('مشتري اختبار '),
+      );
       expect(
         (await helper.getPropertySaleProperties())
             .single['active_contract_count'],
@@ -226,18 +264,27 @@ void main() {
         propertyId: ids['property_id']!,
         unitId: ids['unit1_id'],
         reason: 'طلب الوحدة الأولى',
+        proposedBuyerOwnerId: ids['buyer_id']!,
+        proposedAmountMinor: 500000,
+        proposedSaleDate: '2026-01-01',
       );
       await helper.createPropertySaleReview(
         targetType: 'unit',
         propertyId: ids['property_id']!,
         unitId: ids['unit2_id'],
         reason: 'طلب الوحدة الثانية',
+        proposedBuyerOwnerId: ids['buyer_id']!,
+        proposedAmountMinor: 600000,
+        proposedSaleDate: '2026-01-02',
       );
       await expectLater(
         helper.createPropertySaleReview(
           targetType: 'property',
           propertyId: ids['property_id']!,
           reason: 'طلب العقار كاملًا أثناء وجود طلبات وحدات',
+          proposedBuyerOwnerId: ids['buyer_id']!,
+          proposedAmountMinor: 700000,
+          proposedSaleDate: '2026-01-03',
         ),
         throwsA(anything),
       );
@@ -260,6 +307,9 @@ void main() {
         targetType: 'property',
         propertyId: ids['property_id']!,
         reason: 'طلب مراجعة العقار كاملًا',
+        proposedBuyerOwnerId: ids['buyer_id']!,
+        proposedAmountMinor: 800000,
+        proposedSaleDate: '2026-02-01',
       );
       final journalEntriesBefore = _count(
         await db.rawQuery('SELECT COUNT(*) AS count FROM journal_entries'),
@@ -335,6 +385,9 @@ void main() {
           targetType: 'property',
           propertyId: ids['property_id']!,
           reason: 'طلب متداخل بعد الاعتماد',
+          proposedBuyerOwnerId: ids['buyer_id']!,
+          proposedAmountMinor: 900000,
+          proposedSaleDate: '2026-02-02',
         ),
         throwsA(anything),
       );
@@ -357,6 +410,9 @@ void main() {
         targetType: 'property',
         propertyId: ids['property_id']!,
         reason: 'طلب جديد بعد إلغاء موثق للطلب السابق',
+        proposedBuyerOwnerId: ids['buyer_id']!,
+        proposedAmountMinor: 1000000,
+        proposedSaleDate: '2026-02-03',
       );
     },
   );
@@ -369,6 +425,9 @@ void main() {
       propertyId: ids['property_id']!,
       unitId: ids['unit1_id'],
       reason: 'طلب لاختبار ثبات السجل',
+      proposedBuyerOwnerId: ids['buyer_id']!,
+      proposedAmountMinor: 1100000,
+      proposedSaleDate: '2026-03-01',
     );
     final eventId = (await db.query(
       'property_sale_review_events',
@@ -378,6 +437,15 @@ void main() {
       limit: 1,
     )).single['id'];
 
+    await expectLater(
+      db.update(
+        'property_sale_reviews',
+        {'proposed_amount_minor': 1},
+        where: 'id = ?',
+        whereArgs: [reviewId],
+      ),
+      throwsA(isA<DatabaseException>()),
+    );
     await expectLater(
       db.delete(
         'property_sale_reviews',
@@ -415,7 +483,98 @@ void main() {
   });
 
   test(
-    'v20 upgrades to v22, preserving permissions and default-denying review',
+    'v25 migration adds buyer term without making a legacy accepted sale executable',
+    () async {
+      final db = await helper.database;
+      final ids = await _seedPropertyWithUnits(db, activeOnUnit1: false);
+      for (final trigger in const [
+        'property_sale_reviews_terms_required_insert',
+        'property_sale_reviews_buyer_not_seller_insert',
+        'property_sale_reviews_accepted_terms_required',
+        'property_sale_reviews_terms_immutable',
+      ]) {
+        await db.execute('DROP TRIGGER IF EXISTS $trigger');
+      }
+      await db.execute(
+        'DROP INDEX IF EXISTS property_sale_reviews_proposed_buyer_idx',
+      );
+      final legacyReviewId = await db.insert('property_sale_reviews', {
+        'target_type': 'property',
+        'property_id': ids['property_id'],
+        'requested_by': 1,
+        'requested_at': '2026-11-19T00:00:00',
+        'reason': 'طلب قديم لا يحفظ هوية المشتري المعتمدة',
+        'proposed_amount_minor': 500000,
+        'proposed_sale_date': '2026-11-19',
+        'target_snapshot_json': jsonEncode({
+          'source': 'legacy_test',
+          'target_type': 'property',
+          'property_id': ids['property_id'],
+          'seller_owner_id': ids['owner_id'],
+          'seller_owner_name': 'مالك اختبار قديم',
+        }),
+        'active_contract_count_at_request': 0,
+        'status': 'pending',
+      });
+      await db.update(
+        'property_sale_reviews',
+        {
+          'status': 'accepted',
+          'reviewed_by': 1,
+          'reviewed_at': '2026-11-19T01:00:00',
+          'review_reason': 'اعتماد قديم قبل قفل شروط المشتري',
+        },
+        where: 'id = ?',
+        whereArgs: [legacyReviewId],
+      );
+      await db.execute(
+        'ALTER TABLE property_sale_reviews DROP COLUMN proposed_buyer_owner_id',
+      );
+      await db.execute('PRAGMA user_version = 25');
+      await helper.close();
+
+      final upgraded = await helper.database;
+      expect(_count(await upgraded.rawQuery('PRAGMA user_version')), 26);
+      final legacy = (await upgraded.query(
+        'property_sale_reviews',
+        where: 'id = ?',
+        whereArgs: [legacyReviewId],
+      )).single;
+      expect(legacy['status'], 'accepted');
+      expect(legacy['proposed_buyer_owner_id'], isNull);
+      await expectLater(
+        helper.completePropertySaleExecution(
+          saleReviewId: legacyReviewId,
+          buyerOwnerId: ids['buyer_id']!,
+          salePriceMinor: 500000,
+          saleDate: '2026-11-19',
+          deedReference: 'LEGACY-SALE',
+          reason: 'محاولة تنفيذ طلب قديم بلا مشتري معتمد',
+        ),
+        throwsStateError,
+      );
+      expect(
+        (await upgraded.query(
+          'properties',
+          columns: ['owner_id'],
+          where: 'id = ?',
+          whereArgs: [ids['property_id']],
+        )).single['owner_id'],
+        ids['owner_id'],
+      );
+      expect(
+        _count(
+          await upgraded.rawQuery(
+            'SELECT COUNT(*) AS count FROM property_sale_executions',
+          ),
+        ),
+        0,
+      );
+    },
+  );
+
+  test(
+    'v20 upgrades through v26, preserving permissions and default-denying review',
     () async {
       final db = await helper.database;
       await db.insert('user_permissions', {
@@ -429,6 +588,30 @@ void main() {
         'can_post': 0,
         'can_review_approve': 0,
       });
+      for (final trigger in const [
+        'property_sale_reviews_terms_required_insert',
+        'property_sale_reviews_buyer_not_seller_insert',
+        'property_sale_reviews_accepted_terms_required',
+        'property_sale_reviews_terms_immutable',
+        'property_sale_reviews_no_overlap_insert',
+        'property_sale_reviews_no_overlap_update',
+        'property_sale_reviews_cannot_cancel_executed',
+        'property_sale_executions_valid_insert',
+        'property_sale_executions_apply_transfer_once',
+        'property_sale_executions_no_delete',
+        'properties_owner_change_requires_sale',
+        'units_owner_change_requires_sale',
+        'property_sale_accounting_valid_insert',
+        'property_sale_accounting_records_no_update',
+        'property_sale_accounting_records_no_delete',
+        'property_sale_execution_events_no_update',
+        'property_sale_execution_events_no_delete',
+      ]) {
+        await db.execute('DROP TRIGGER IF EXISTS $trigger');
+      }
+      await db.execute('DROP TABLE property_sale_accounting_records');
+      await db.execute('DROP TABLE property_sale_execution_events');
+      await db.execute('DROP TABLE property_sale_executions');
       await db.execute('DROP TABLE property_sale_review_events');
       await db.execute('DROP TABLE property_sale_reviews');
       await db.execute(
@@ -454,7 +637,33 @@ void main() {
       )).map((row) => row['name']).toSet();
       expect(
         tables,
-        containsAll(['property_sale_reviews', 'property_sale_review_events']),
+        containsAll([
+          'property_sale_reviews',
+          'property_sale_review_events',
+          'property_sale_executions',
+          'property_sale_execution_events',
+          'property_sale_accounting_records',
+        ]),
+      );
+      final unitColumns = (await upgraded.rawQuery(
+        'PRAGMA table_info(units)',
+      )).map((row) => row['name']).toSet();
+      expect(unitColumns, contains('owner_id'));
+      final reviewColumns = (await upgraded.rawQuery(
+        'PRAGMA table_info(property_sale_reviews)',
+      )).map((row) => row['name']).toSet();
+      expect(reviewColumns, contains('proposed_buyer_owner_id'));
+      final saleTriggers = (await upgraded.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger'",
+      )).map((row) => row['name']).toSet();
+      expect(
+        saleTriggers,
+        containsAll([
+          'property_sale_reviews_terms_required_insert',
+          'property_sale_reviews_buyer_not_seller_insert',
+          'property_sale_reviews_accepted_terms_required',
+          'property_sale_reviews_terms_immutable',
+        ]),
       );
       expect(
         _count(
@@ -464,6 +673,15 @@ void main() {
         ),
         0,
         reason: 'ترحيل v20 لا يخمّن مبيعات تاريخية ولا ينشئ مراجعات آلية',
+      );
+      expect(
+        _count(
+          await upgraded.rawQuery(
+            'SELECT COUNT(*) AS count FROM property_sale_executions',
+          ),
+        ),
+        0,
+        reason: 'ترحيل v25 لا يخترع عمليات نقل ملكية سابقة',
       );
     },
   );
@@ -478,6 +696,7 @@ Future<Map<String, int>> _seedPropertyWithUnits(
 }) async {
   final suffix = DateTime.now().microsecondsSinceEpoch;
   final ownerId = await db.insert('owners', {'name': 'مالك اختبار $suffix'});
+  final buyerId = await db.insert('owners', {'name': 'مشتري اختبار $suffix'});
   final propertyId = await db.insert('properties', {
     'name': 'عقار اختبار $suffix',
     'owner_id': ownerId,
@@ -509,6 +728,7 @@ Future<Map<String, int>> _seedPropertyWithUnits(
   }
   return {
     'owner_id': ownerId,
+    'buyer_id': buyerId,
     'property_id': propertyId,
     'unit1_id': unit1Id,
     'unit2_id': unit2Id,

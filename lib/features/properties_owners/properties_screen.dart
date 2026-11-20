@@ -70,7 +70,7 @@ class _PropertiesScreenState extends State<PropertiesScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'المالك: ${provider.owners.firstWhere((owner) => owner['id'] == property['owner_id'], orElse: () => {'name': 'غير معروف'})['name']} — تغيير الملكية يحتاج إجراء نقل ملكية منفصلًا لحماية تاريخ العقود.',
+                    'المالك: ${provider.owners.firstWhere((owner) => owner['id'] == property['owner_id'], orElse: () => {'name': 'غير معروف'})['name']} — لا تغيّر الملكية من هنا؛ استخدم مسار مراجعة البيع وإتمامه لحفظ التاريخ.',
                     style: Theme.of(dialogContext).textTheme.bodySmall,
                   ),
                 ],

@@ -25,6 +25,7 @@ class AuditTrailScreen extends StatefulWidget {
     'session': 'جلسة',
     'tenant_notice': 'إشعار مستأجر',
     'property_sale_review': 'مراجعة بيع عقار',
+    'property_sale_execution': 'تنفيذ بيع عقار',
   };
 
   static const _actionLabels = <String, String>{
@@ -44,6 +45,9 @@ class AuditTrailScreen extends StatefulWidget {
     'USER_PERMISSIONS_UPDATE': 'تعديل صلاحيات',
     'LOGIN': 'تسجيل دخول',
     'LOGOUT': 'تسجيل خروج',
+    'PROPERTY_SALE_EXECUTED': 'تنفيذ بيع ونقل ملكية',
+    'PROPERTY_SALE_accounting_approved': 'اعتماد التسوية المحاسبية للبيع',
+    'PROPERTY_SALE_accounting_corrected': 'تصحيح موثق لتسوية البيع',
     'LEGACY_TENANT_PAYMENT_MARKED_UNRELATED': 'تصنيف سند قديم كغير متعلق',
     'LEGACY_TENANT_PAYMENT_RECONCILED_AS_REFUND': 'مطابقة سند قديم كاسترداد',
     'LEGACY_INVOICE_LINKED_TO_INSTALLMENT': 'ربط فاتورة قديمة بقسط',
