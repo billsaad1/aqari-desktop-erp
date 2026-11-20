@@ -272,122 +272,148 @@ class _InternalSubledgerReconciliationScreenState
     final List<InternalSubledgerReconciliationRow> rows = report == null
         ? const <InternalSubledgerReconciliationRow>[]
         : _visibleRows(report);
-    return Padding(
-      padding: const EdgeInsets.all(18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Card(
-            elevation: 1,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'مطابقة السجلات الفرعية مع دفتر الأستاذ',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final contentHeight = (constraints.maxHeight - 400)
+            .clamp(240.0, 700.0)
+            .toDouble();
+        return Padding(
+          padding: const EdgeInsets.all(18),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Card(
+                  elevation: 1,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'فحص داخلي للروابط الرقمية بين الفواتير والقبض والاستردادات والإشعارات الدائنة وتسويات المالك وقيود الذمم. يميز سلامة قيد الأستاذ عن تخصيص القبض. لا يخمّن الربط من الوصف أو المبلغ، ولا ينشئ أرصدة افتتاحية أو قيود تسوية.',
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      _dateButton('من', _startDateController),
-                      _dateButton('إلى', _endDateController),
-                      FilledButton.icon(
-                        onPressed: _loading ? null : _loadReport,
-                        icon: _loading
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.compare_arrows),
-                        label: Text(_loading ? 'جارٍ الفحص...' : 'فحص الفترة'),
-                      ),
-                      if (report != null)
-                        OutlinedButton.icon(
-                          onPressed: () => _preview(report, rows),
-                          icon: const Icon(Icons.picture_as_pdf_outlined),
-                          label: const Text('معاينة / طباعة PDF'),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'مطابقة السجلات الفرعية مع دفتر الأستاذ',
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.bold),
                         ),
-                      if (report != null)
-                        DropdownButton<String>(
-                          value: _statusFilter,
-                          onChanged: (value) {
-                            if (value != null) {
-                              setState(() => _statusFilter = value);
-                            }
-                          },
-                          items: const [
-                            DropdownMenuItem(
-                              value: 'all',
-                              child: Text('كل الحالات'),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'فحص داخلي للروابط الرقمية بين الفواتير والقبض والاستردادات والإشعارات الدائنة وتسويات المالك وقيود الذمم. يميز سلامة قيد الأستاذ عن تخصيص القبض. لا يخمّن الربط من الوصف أو المبلغ، ولا ينشئ أرصدة افتتاحية أو قيود تسوية.',
+                        ),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            _dateButton('من', _startDateController),
+                            _dateButton('إلى', _endDateController),
+                            FilledButton.icon(
+                              onPressed: _loading ? null : _loadReport,
+                              icon: _loading
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.compare_arrows),
+                              label: Text(
+                                _loading ? 'جارٍ الفحص...' : 'فحص الفترة',
+                              ),
                             ),
-                            DropdownMenuItem(
-                              value: 'matched',
-                              child: Text('مطابق مع الأستاذ'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'review',
-                              child: Text('يحتاج مراجعة'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'unallocated',
-                              child: Text('غير مخصص / بلا مصدر'),
-                            ),
+                            if (report != null)
+                              OutlinedButton.icon(
+                                onPressed: () => _preview(report, rows),
+                                icon: const Icon(
+                                  Icons.picture_as_pdf_outlined,
+                                ),
+                                label: const Text('معاينة / طباعة PDF'),
+                              ),
+                            if (report != null)
+                              DropdownButton<String>(
+                                value: _statusFilter,
+                                onChanged: (value) {
+                                  if (value != null) {
+                                    setState(() => _statusFilter = value);
+                                  }
+                                },
+                                items: const [
+                                  DropdownMenuItem(
+                                    value: 'all',
+                                    child: Text('كل الحالات'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'matched',
+                                    child: Text('مطابق مع الأستاذ'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'review',
+                                    child: Text('يحتاج مراجعة'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'unallocated',
+                                    child: Text('غير مخصص / بلا مصدر'),
+                                  ),
+                                ],
+                              ),
                           ],
                         ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'هذا تقرير مطابقة دفترية داخلية، وليس مطابقة بنكية أو خارجية. القيد المرحّل لا يثبت حركة النقد لدى البنك. قد تبقى الأرصدة الافتتاحية غير الممثلة بقيود أو البيانات التاريخية غير المفصلة بحاجة إلى مراجعة يدوية.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        const SizedBox(height: 8),
+                        Text(
+                          'هذا تقرير مطابقة دفترية داخلية، وليس مطابقة بنكية أو خارجية. القيد المرحّل لا يثبت حركة النقد لدى البنك. قد تبقى الأرصدة الافتتاحية غير الممثلة بقيود أو البيانات التاريخية غير المفصلة بحاجة إلى مراجعة يدوية.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                      ],
                     ),
                   ),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 10),
+                  _message(_error!, Colors.red.shade700),
                 ],
-              ),
+                const SizedBox(height: 10),
+                if (_loading)
+                  SizedBox(
+                    height: contentHeight,
+                    child: const Center(child: CircularProgressIndicator()),
+                  )
+                else if (report == null && _error == null)
+                  SizedBox(
+                    height: contentHeight,
+                    child: const Center(
+                      child: Text('اختر الفترة ثم اضغط «فحص الفترة».'),
+                    ),
+                  )
+                else if (report != null) ...[
+                  _summary(report),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    height: contentHeight,
+                    child: rows.isEmpty
+                        ? const Center(
+                            child: Text('لا توجد سجلات تطابق المرشح الحالي.'),
+                          )
+                        : _table(rows),
+                  ),
+                ] else
+                  SizedBox(
+                    height: contentHeight,
+                    child: const Center(child: Text('تعذر إعداد التقرير.')),
+                  ),
+              ],
             ),
           ),
-          if (_error != null) ...[
-            const SizedBox(height: 10),
-            _message(_error!, Colors.red.shade700),
-          ],
-          const SizedBox(height: 10),
-          if (_loading)
-            const Expanded(child: Center(child: CircularProgressIndicator()))
-          else if (report == null && _error == null)
-            const Expanded(
-              child: Center(child: Text('اختر الفترة ثم اضغط «فحص الفترة».')),
-            )
-          else if (report != null) ...[
-            _summary(report),
-            const SizedBox(height: 10),
-            if (rows.isEmpty)
-              const Expanded(
-                child: Center(child: Text('لا توجد سجلات تطابق المرشح الحالي.')),
-              )
-            else
-              Expanded(child: _table(rows)),
-          ] else
-            const Expanded(child: Center(child: Text('تعذر إعداد التقرير.'))),
-        ],
-      ),
+        );
+      },
     );
   }
 
