@@ -9,9 +9,12 @@ import '../../core/trial_balance_pdf.dart';
 import '../../database/database_helper.dart';
 import '../../models/trial_balance_report_model.dart';
 import '../../providers/reports_provider.dart';
+import '../../services/report_export_service.dart';
 
 class TrialBalanceScreen extends StatefulWidget {
-  const TrialBalanceScreen({super.key});
+  const TrialBalanceScreen({super.key, this.reportExportService});
+
+  final ReportExportService? reportExportService;
 
   @override
   State<TrialBalanceScreen> createState() => _TrialBalanceScreenState();
@@ -123,6 +126,64 @@ class _TrialBalanceScreenState extends State<TrialBalanceScreen> {
     }
   }
 
+  Future<void> _export(
+    TrialBalanceReport report,
+    ReportExportFormat format,
+  ) async {
+    final reports = Provider.of<ReportsProvider>(context, listen: false);
+    final authorizationUserId = PermissionRuntime.userId;
+    final authorizationRole = PermissionRuntime.role;
+    bool isAuthorizedAndCurrent() =>
+        mounted &&
+        PermissionRuntime.userId == authorizationUserId &&
+        PermissionRuntime.role == authorizationRole &&
+        PermissionRuntime.allows('reports', AppPermissionAction.view) &&
+        PermissionRuntime.allows('reports', AppPermissionAction.print) &&
+        identical(reports.trialBalanceReport, report) &&
+        _startDateController.text == report.startDate &&
+        _endDateController.text == report.endDate;
+
+    if (!isAuthorizedAndCurrent()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا تملك صلاحية تصدير هذا التقرير')),
+      );
+      return;
+    }
+    try {
+      final result = await (widget.reportExportService ?? ReportExportService())
+          .exportReport(
+            data: ReportExportData.trialBalance(report),
+            format: format,
+            isAuthorized: isAuthorizedAndCurrent,
+          );
+      if (!mounted) return;
+      switch (result.status) {
+        case ReportExportStatus.saved:
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('تم حفظ التقرير في ${result.path}')),
+          );
+          break;
+        case ReportExportStatus.cancelled:
+          break;
+        case ReportExportStatus.permissionDenied:
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'انتهت صلاحية التصدير أو تغيّر التقرير؛ أعد تحميله.',
+              ),
+            ),
+          );
+          break;
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تعذر تصدير ميزان المراجعة: $error')),
+        );
+      }
+    }
+  }
+
   String _amount(int minor) =>
       NumberFormat('#,##0.00', 'en_US').format(minor / 100);
 
@@ -194,6 +255,30 @@ class _TrialBalanceScreenState extends State<TrialBalanceScreen> {
                                 : null,
                             icon: const Icon(Icons.picture_as_pdf_outlined),
                             label: const Text('معاينة التقرير'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed:
+                                isCurrentReport &&
+                                    PermissionRuntime.allows(
+                                      'reports',
+                                      AppPermissionAction.print,
+                                    )
+                                ? () => _export(report, ReportExportFormat.csv)
+                                : null,
+                            icon: const Icon(Icons.table_view_outlined),
+                            label: const Text('تصدير CSV'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed:
+                                isCurrentReport &&
+                                    PermissionRuntime.allows(
+                                      'reports',
+                                      AppPermissionAction.print,
+                                    )
+                                ? () => _export(report, ReportExportFormat.xlsx)
+                                : null,
+                            icon: const Icon(Icons.grid_on_outlined),
+                            label: const Text('تصدير Excel'),
                           ),
                         ],
                       ),

@@ -42,6 +42,7 @@ class AuditTrailScreen extends StatefulWidget {
     'CONTRACT_CREATED': 'إنشاء عقد',
     'CONTRACT_RENEWED': 'تجديد عقد',
     'contract_cancelled': 'إلغاء عقد',
+    'contract_terminated_early': 'إنهاء عقد مبكر',
     'ACCOUNT_CREATE': 'إنشاء حساب',
     'ACCOUNT_RENAME': 'تعديل اسم حساب',
     'ACCOUNT_DELETE': 'حذف حساب',
@@ -209,9 +210,7 @@ class _AuditTrailScreenState extends State<AuditTrailScreen> {
   @override
   Widget build(BuildContext context) {
     if (!PermissionRuntime.allows('audit_logs', AppPermissionAction.view)) {
-      return const Center(
-        child: Text('لا تملك صلاحية عرض سجل التدقيق المالي'),
-      );
+      return const Center(child: Text('لا تملك صلاحية عرض سجل التدقيق المالي'));
     }
     return Padding(
       padding: const EdgeInsets.all(20),
@@ -381,7 +380,10 @@ class _AuditTrailScreenState extends State<AuditTrailScreen> {
           children: [
             Text(_error!, textAlign: TextAlign.center),
             const SizedBox(height: 10),
-            OutlinedButton(onPressed: _load, child: const Text('إعادة المحاولة')),
+            OutlinedButton(
+              onPressed: _load,
+              child: const Text('إعادة المحاولة'),
+            ),
           ],
         ),
       );
@@ -404,44 +406,50 @@ class _AuditTrailScreenState extends State<AuditTrailScreen> {
             ),
           ErpDataTable(
             showCheckboxColumn: false,
-        columns: const [
-          DataColumn(label: Text('الوقت')),
-          DataColumn(label: Text('الحدث')),
-          DataColumn(label: Text('الكيان')),
-          DataColumn(label: Text('المبلغ')),
-          DataColumn(label: Text('المستخدم')),
-          DataColumn(label: Text('التفاصيل')),
-        ],
-        rows: [
-          for (final row in _rows)
-            DataRow(
-              cells: [
-                DataCell(Text(_formatTimestamp(row['timestamp']))),
-                DataCell(Text(AuditTrailScreen.actionLabel(row['action'] as String? ?? ''))),
-                DataCell(
-                  Text(
-                    row['entity_type'] == null
-                        ? '—'
-                        : '${AuditTrailScreen._entityTypes[row['entity_type']] ?? row['entity_type']}'
-                              '#${row['entity_id'] ?? ''}',
-                  ),
-                ),
-                DataCell(Text(_formatMinor(row['amount_minor']))),
-                DataCell(Text(row['user_name']?.toString() ?? 'غير محدد')),
-                DataCell(
-                  SizedBox(
-                    width: 320,
-                    child: Text(
-                      _formatDetails(row['details']),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+            columns: const [
+              DataColumn(label: Text('الوقت')),
+              DataColumn(label: Text('الحدث')),
+              DataColumn(label: Text('الكيان')),
+              DataColumn(label: Text('المبلغ')),
+              DataColumn(label: Text('المستخدم')),
+              DataColumn(label: Text('التفاصيل')),
+            ],
+            rows: [
+              for (final row in _rows)
+                DataRow(
+                  cells: [
+                    DataCell(Text(_formatTimestamp(row['timestamp']))),
+                    DataCell(
+                      Text(
+                        AuditTrailScreen.actionLabel(
+                          row['action'] as String? ?? '',
+                        ),
+                      ),
                     ),
-                  ),
+                    DataCell(
+                      Text(
+                        row['entity_type'] == null
+                            ? '—'
+                            : '${AuditTrailScreen._entityTypes[row['entity_type']] ?? row['entity_type']}'
+                                  '#${row['entity_id'] ?? ''}',
+                      ),
+                    ),
+                    DataCell(Text(_formatMinor(row['amount_minor']))),
+                    DataCell(Text(row['user_name']?.toString() ?? 'غير محدد')),
+                    DataCell(
+                      SizedBox(
+                        width: 320,
+                        child: Text(
+                          _formatDetails(row['details']),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ],
-        ),
+            ],
+          ),
         ],
       ),
     );

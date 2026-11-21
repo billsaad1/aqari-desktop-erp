@@ -8,6 +8,7 @@ import 'package:path/path.dart';
 import 'dart:io';
 
 import '../core/contract_term.dart';
+import '../core/crypto_utils.dart';
 import '../core/internal_tax.dart';
 import '../core/lease_contract_terms.dart';
 import '../core/permission_policy.dart';
@@ -35,7 +36,9 @@ import 'property_sale_schema.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 31;
+  static const int _schemaVersion = 33;
+  static const int _maxFailedLoginAttempts = 5;
+  static const Duration _loginLockoutDuration = Duration(minutes: 15);
   @visibleForTesting
   static Future<void> Function()? restorePostReplacementHookForTesting;
 
@@ -136,6 +139,12 @@ class DatabaseHelper {
 
   Future<void> backupToFile(String targetPath) async {
     PermissionRuntime.require('system_settings', AppPermissionAction.edit);
+    await _createDatabaseSnapshot(targetPath, clearSmsSecretReference: true);
+  }
+
+  /// Creates a local snapshot for the app-managed automatic backup service.
+  /// User-initiated backups must use [backupToFile] to enforce permissions.
+  Future<void> createAutomaticBackupSnapshot(String targetPath) async {
     await _createDatabaseSnapshot(targetPath, clearSmsSecretReference: true);
   }
 
@@ -479,6 +488,8 @@ class DatabaseHelper {
         'cash_box_account_id',
         'must_change_password',
         'is_active',
+        'login_failed_attempts',
+        'login_locked_until_ms',
       ],
       'user_permissions': [
         'id',
@@ -601,6 +612,8 @@ class DatabaseHelper {
         'status',
         'cancellation_reason',
         'cancelled_at',
+        'early_termination_date',
+        'early_termination_reason',
       ],
       'contract_installments': [
         'id',
@@ -1046,50 +1059,49 @@ class DatabaseHelper {
         'تعريف حواجز سداد المالك في النسخة غير مطابق أو معطل: ${invalidOwnerTriggerDefinitions.join('، ')}',
       );
     }
-    const requiredAccountingPeriodTriggerFragments =
-        <String, List<String>>{
-          'accounting_periods_transition_audited': [
-            'before update of status on accounting_periods',
-            'accounting_period_events',
-            'raise(abort',
-          ],
-          'accounting_period_events_no_update': [
-            'before update on accounting_period_events',
-            'raise(abort',
-          ],
-          'accounting_period_journal_insert_guard': [
-            'before insert on journal_entries',
-            'date(substr(new.entry_date, 1, 10))',
-            'p.status in (\'locked\', \'closed\')',
-            'raise(abort',
-          ],
-          'accounting_period_journal_update_guard': [
-            'before update on journal_entries',
-            'old.entry_date',
-            'new.entry_date',
-            'raise(abort',
-          ],
-          'accounting_period_journal_delete_guard': [
-            'before delete on journal_entries',
-            'old.entry_date',
-            'raise(abort',
-          ],
-          'accounting_period_lines_insert_guard': [
-            'before insert on journal_lines',
-            'join accounting_periods p',
-            'raise(abort',
-          ],
-          'accounting_period_lines_update_guard': [
-            'before update on journal_lines',
-            'old.journal_entry_id, new.journal_entry_id',
-            'raise(abort',
-          ],
-          'accounting_period_lines_delete_guard': [
-            'before delete on journal_lines',
-            'old.journal_entry_id',
-            'raise(abort',
-          ],
-        };
+    const requiredAccountingPeriodTriggerFragments = <String, List<String>>{
+      'accounting_periods_transition_audited': [
+        'before update of status on accounting_periods',
+        'accounting_period_events',
+        'raise(abort',
+      ],
+      'accounting_period_events_no_update': [
+        'before update on accounting_period_events',
+        'raise(abort',
+      ],
+      'accounting_period_journal_insert_guard': [
+        'before insert on journal_entries',
+        'date(substr(new.entry_date, 1, 10))',
+        'p.status in (\'locked\', \'closed\')',
+        'raise(abort',
+      ],
+      'accounting_period_journal_update_guard': [
+        'before update on journal_entries',
+        'old.entry_date',
+        'new.entry_date',
+        'raise(abort',
+      ],
+      'accounting_period_journal_delete_guard': [
+        'before delete on journal_entries',
+        'old.entry_date',
+        'raise(abort',
+      ],
+      'accounting_period_lines_insert_guard': [
+        'before insert on journal_lines',
+        'join accounting_periods p',
+        'raise(abort',
+      ],
+      'accounting_period_lines_update_guard': [
+        'before update on journal_lines',
+        'old.journal_entry_id, new.journal_entry_id',
+        'raise(abort',
+      ],
+      'accounting_period_lines_delete_guard': [
+        'before delete on journal_lines',
+        'old.journal_entry_id',
+        'raise(abort',
+      ],
+    };
     final invalidAccountingPeriodTriggerDefinitions = <String>[];
     for (final entry in requiredAccountingPeriodTriggerFragments.entries) {
       final definition = triggerSqlByName[entry.key] ?? '';
@@ -1109,7 +1121,9 @@ class DatabaseHelper {
       throw StateError('مخطط النسخة يفتقد عرض رصيد التحصيلات بعد الاسترداد');
     }
     if (!views.contains('credit_note_refund_balances')) {
-      throw StateError('مخطط النسخة يفتقد عرض رصيد الإشعارات الدائنة القابل للاسترداد');
+      throw StateError(
+        'مخطط النسخة يفتقد عرض رصيد الإشعارات الدائنة القابل للاسترداد',
+      );
     }
     final indexes = (await db.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'index'",
@@ -1162,14 +1176,45 @@ class DatabaseHelper {
     }
   }
 
-  Future<String> factoryReset() async {
+  Future<String> factoryReset({required String currentPassword}) async {
     PermissionRuntime.require('system_settings', AppPermissionAction.delete);
+    final currentUserId = PermissionRuntime.userId;
+    if (currentUserId == null || currentPassword.isEmpty) {
+      throw StateError('يلزم إدخال كلمة مرور المستخدم الحالي قبل التهيئة');
+    }
     final path = await getDbPath();
     final rollbackPath = join(
       File(path).parent.path,
       'aqari_pre_reset_${DateTime.now().microsecondsSinceEpoch}.db',
     );
     final current = await database;
+    final currentUserRows = await current.query(
+      'users',
+      columns: ['password_hash', 'role', 'is_active', 'login_locked_until_ms'],
+      where: 'id = ?',
+      whereArgs: [currentUserId],
+      limit: 1,
+    );
+    if (currentUserRows.isEmpty ||
+        (currentUserRows.first['is_active'] as num?)?.toInt() != 1 ||
+        currentUserRows.first['role'] != PermissionRuntime.role) {
+      throw StateError('جلسة المستخدم غير صالحة؛ سجّل الدخول مجددًا');
+    }
+    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final loginLockUntil =
+        (currentUserRows.first['login_locked_until_ms'] as num?)?.toInt();
+    if (loginLockUntil != null && loginLockUntil > nowMs) {
+      throw StateError('الحساب مقيد مؤقتًا؛ لم تُمسح أي بيانات');
+    }
+    final currentPasswordHash =
+        currentUserRows.first['password_hash']?.toString() ?? '';
+    if (!CryptoUtils.verifyPassword(currentPassword, currentPasswordHash)) {
+      await recordFailedLoginAttempt(
+        currentUserId,
+        expectedPasswordHash: currentPasswordHash,
+      );
+      throw StateError('كلمة المرور الحالية غير صحيحة؛ لم تُمسح أي بيانات');
+    }
     final previousCredentials = await _resolveAllSmsCredentials(current);
     final previousCredentialIds = previousCredentials
         .map((credential) => credential.id)
@@ -1673,6 +1718,19 @@ class DatabaseHelper {
         'INTEGER NOT NULL DEFAULT 0',
       );
       await AccountingPeriodSchema.install(db);
+    }
+    if (oldVersion < 32) {
+      await _ensureColumn(
+        db,
+        'users',
+        'login_failed_attempts',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
+      await _ensureColumn(db, 'users', 'login_locked_until_ms', 'INTEGER');
+    }
+    if (oldVersion < 33) {
+      await _ensureColumn(db, 'contracts', 'early_termination_date', 'TEXT');
+      await _ensureColumn(db, 'contracts', 'early_termination_reason', 'TEXT');
     }
   }
 
@@ -2571,7 +2629,9 @@ class DatabaseHelper {
         role TEXT NOT NULL,
         cash_box_account_id INTEGER,
         must_change_password INTEGER NOT NULL DEFAULT 0,
-        is_active INTEGER NOT NULL DEFAULT 1
+        is_active INTEGER NOT NULL DEFAULT 1,
+        login_failed_attempts INTEGER NOT NULL DEFAULT 0,
+        login_locked_until_ms INTEGER
       )
     ''');
 
@@ -2761,6 +2821,8 @@ class DatabaseHelper {
         status TEXT DEFAULT 'Active',
         cancellation_reason TEXT,
         cancelled_at TEXT,
+        early_termination_date TEXT,
+        early_termination_reason TEXT,
         renewed_from_contract_id INTEGER REFERENCES contracts (id),
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (unit_id) REFERENCES units (id)
@@ -3083,6 +3145,8 @@ class DatabaseHelper {
         'cash_box_account_id',
         'must_change_password',
         'is_active',
+        'login_failed_attempts',
+        'login_locked_until_ms',
       ],
       where: 'username = ?',
       whereArgs: [username],
@@ -3091,6 +3155,91 @@ class DatabaseHelper {
       return result.first;
     }
     return null;
+  }
+
+  Future<void> recordFailedLoginAttempt(
+    int userId, {
+    required String expectedPasswordHash,
+  }) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'users',
+        columns: [
+          'password_hash',
+          'is_active',
+          'login_failed_attempts',
+          'login_locked_until_ms',
+        ],
+        where: 'id = ?',
+        whereArgs: [userId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final row = rows.first;
+      if (row['password_hash'] != expectedPasswordHash ||
+          (row['is_active'] as num?)?.toInt() != 1) {
+        return;
+      }
+      final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+      final currentLockUntil = (row['login_locked_until_ms'] as num?)?.toInt();
+      if (currentLockUntil != null && currentLockUntil > nowMs) return;
+
+      var failedAttempts = (row['login_failed_attempts'] as num?)?.toInt() ?? 0;
+      if (currentLockUntil != null && currentLockUntil <= nowMs) {
+        failedAttempts = 0;
+      }
+      failedAttempts = failedAttempts
+          .clamp(0, _maxFailedLoginAttempts - 1)
+          .toInt();
+      failedAttempts++;
+      final shouldLock = failedAttempts >= _maxFailedLoginAttempts;
+      await txn.update(
+        'users',
+        {
+          'login_failed_attempts': failedAttempts,
+          'login_locked_until_ms': shouldLock
+              ? nowMs + _loginLockoutDuration.inMilliseconds
+              : null,
+        },
+        where: 'id = ? AND password_hash = ? AND is_active = 1',
+        whereArgs: [userId, expectedPasswordHash],
+      );
+    });
+  }
+
+  Future<bool> clearFailedLoginAttemptsAfterAuthentication(
+    int userId, {
+    required String expectedPasswordHash,
+  }) async {
+    if (PermissionRuntime.hasSession) {
+      throw StateError('تحديث حالة الدخول مخصص لما قبل تسجيل الدخول');
+    }
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'users',
+        columns: ['password_hash', 'is_active', 'login_locked_until_ms'],
+        where: 'id = ?',
+        whereArgs: [userId],
+        limit: 1,
+      );
+      if (rows.isEmpty ||
+          rows.first['password_hash'] != expectedPasswordHash ||
+          (rows.first['is_active'] as num?)?.toInt() != 1) {
+        return false;
+      }
+      final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+      final lockUntil = (rows.first['login_locked_until_ms'] as num?)?.toInt();
+      if (lockUntil != null && lockUntil > nowMs) return false;
+      final updated = await txn.update(
+        'users',
+        {'login_failed_attempts': 0, 'login_locked_until_ms': null},
+        where: 'id = ? AND password_hash = ? AND is_active = 1',
+        whereArgs: [userId, expectedPasswordHash],
+      );
+      return updated == 1;
+    });
   }
 
   Future<bool> isUserSessionValid({
@@ -3285,6 +3434,8 @@ class DatabaseHelper {
       {
         'password_hash': passwordHash,
         'must_change_password': mustChangePassword ? 1 : 0,
+        'login_failed_attempts': 0,
+        'login_locked_until_ms': null,
       },
       where: 'id = ?',
       whereArgs: [userId],
@@ -3322,7 +3473,11 @@ class DatabaseHelper {
       }
       final updated = await txn.update(
         'users',
-        {'is_active': isActive ? 1 : 0},
+        {
+          'is_active': isActive ? 1 : 0,
+          'login_failed_attempts': 0,
+          'login_locked_until_ms': null,
+        },
         where: 'id = ?',
         whereArgs: [userId],
       );
@@ -3442,19 +3597,17 @@ class DatabaseHelper {
           );
         }
         if (normalized.any((permission) {
-            return permission['screen_name'] != 'accounting_periods' ||
-                permission['can_view'] != 1 ||
-                permission['can_reopen_period'] != 1 ||
-                AppPermissionAction.values
-                    .where(
-                      (action) =>
-                          action != AppPermissionAction.view &&
-                          action != AppPermissionAction.reopenPeriod,
-                    )
-                    .any(
-                      (action) => permission[action.databaseColumn] != 0,
-                    );
-          })) {
+          return permission['screen_name'] != 'accounting_periods' ||
+              permission['can_view'] != 1 ||
+              permission['can_reopen_period'] != 1 ||
+              AppPermissionAction.values
+                  .where(
+                    (action) =>
+                        action != AppPermissionAction.view &&
+                        action != AppPermissionAction.reopenPeriod,
+                  )
+                  .any((action) => permission[action.databaseColumn] != 0);
+        })) {
           throw StateError(
             'لا يسمح لمدير النظام الأعلى إلا بتخصيص إعادة فتح الفترات بصورة مستقلة',
           );
@@ -4030,6 +4183,20 @@ class DatabaseHelper {
     int oppositeAccountId,
     int? costCenterId,
     String voucherType,
+  ) => insertGeneralVoucherWithLines(voucher, cashAccountId, [
+    {
+      'account_id': oppositeAccountId,
+      'amount': voucher['amount'],
+      'cost_center_id': costCenterId,
+      'description': voucher['description'],
+    },
+  ], voucherType);
+
+  Future<int> insertGeneralVoucherWithLines(
+    Map<String, dynamic> voucher,
+    int cashAccountId,
+    List<Map<String, dynamic>> counterpartLines,
+    String voucherType,
   ) async {
     PermissionRuntime.require('accounting', AppPermissionAction.post);
     if (voucherType != 'قبض عام' && voucherType != 'صرف عام') {
@@ -4044,6 +4211,42 @@ class DatabaseHelper {
         !_hasCentPrecision(amountValue) ||
         DateTime.tryParse(voucher['voucher_date']?.toString() ?? '') == null) {
       throw ArgumentError('مبلغ أو تاريخ السند غير صحيح');
+    }
+    if (counterpartLines.isEmpty) {
+      throw ArgumentError('أضف حسابًا واحدًا على الأقل للسند');
+    }
+    var counterpartTotalCents = 0;
+    final validatedLines = <Map<String, dynamic>>[];
+    for (final line in counterpartLines) {
+      final accountId = line['account_id'];
+      final lineAmount = line['amount'];
+      final rawCostCenterId = line['cost_center_id'];
+      if (accountId is! int ||
+          accountId <= 0 ||
+          lineAmount is! num ||
+          lineAmount <= 0 ||
+          !_hasCentPrecision(lineAmount) ||
+          (rawCostCenterId != null &&
+              (rawCostCenterId is! int || rawCostCenterId <= 0))) {
+        throw ArgumentError('تحقق من الحساب والمبلغ ومركز التكلفة لكل بند');
+      }
+      final lineDescription = (line['description'] as String?)?.trim() ?? '';
+      if (lineDescription.isEmpty) {
+        throw ArgumentError('البيان مطلوب لكل بند من بنود السند');
+      }
+      final cents = (lineAmount.toDouble() * 100).round();
+      counterpartTotalCents += cents;
+      validatedLines.add({
+        'account_id': accountId,
+        'amount': cents / 100.0,
+        'amount_minor': cents,
+        'cost_center_id': rawCostCenterId,
+        'description': lineDescription,
+      });
+    }
+    if (counterpartTotalCents !=
+        InternalTax.toMinorUnits(amountValue.toDouble())) {
+      throw ArgumentError('إجمالي البنود لا يساوي مبلغ السند');
     }
     String? optionalVoucherDate(String key) {
       final value = voucher[key];
@@ -4074,35 +4277,35 @@ class DatabaseHelper {
         cashAccountId,
         expectedType: 'Asset',
       );
-      final oppositeAccount = await _requireLeafAccountTx(
-        txn,
-        oppositeAccountId,
-      );
       if (!(cashAccount['code'] as String).startsWith('11')) {
         throw ArgumentError('حساب النقدية يجب أن يكون صندوقاً أو بنكاً');
       }
       final allowedCounterpartTypes = voucherType == 'قبض عام'
           ? ['Asset', 'Liability', 'Equity', 'Revenue']
           : ['Asset', 'Liability', 'Equity', 'Expense'];
-      if (oppositeAccountId == cashAccountId ||
-          !allowedCounterpartTypes.contains(oppositeAccount['account_type'])) {
-        throw ArgumentError('الحساب المقابل غير صالح');
-      }
-      if (voucherType == 'صرف عام') {
-        final linkedOwners = await txn.query(
-          'owners',
-          columns: ['id'],
-          where: 'account_id = ?',
-          whereArgs: [oppositeAccountId],
-          limit: 1,
-        );
-        if (linkedOwners.isNotEmpty) {
-          throw StateError(
-            'سداد حساب المالك يتم من تبويب «سداد مستحقات المالك» لضبط الرصيد والربط المحاسبي',
-          );
+      for (final line in validatedLines) {
+        final accountId = line['account_id'] as int;
+        final counterpart = await _requireLeafAccountTx(txn, accountId);
+        if (accountId == cashAccountId ||
+            !allowedCounterpartTypes.contains(counterpart['account_type'])) {
+          throw ArgumentError('أحد الحسابات المقابلة غير صالح');
         }
+        if (voucherType == 'صرف عام') {
+          final linkedOwners = await txn.query(
+            'owners',
+            columns: ['id'],
+            where: 'account_id = ?',
+            whereArgs: [accountId],
+            limit: 1,
+          );
+          if (linkedOwners.isNotEmpty) {
+            throw StateError(
+              'سداد حساب المالك يتم من تبويب «سداد مستحقات المالك» لضبط الرصيد والربط المحاسبي',
+            );
+          }
+        }
+        await _requireCostCenterTx(txn, line['cost_center_id']);
       }
-      await _requireCostCenterTx(txn, costCenterId);
       final amount = (voucher['amount'] as num).toDouble();
       final date = voucher['voucher_date'];
       final description =
@@ -4122,56 +4325,39 @@ class DatabaseHelper {
       };
       final journalId = await txn.insert('journal_entries', journalHeader);
 
-      // 2. Insert Journal Lines
-      Map<String, dynamic> line1 = {'journal_entry_id': journalId};
-      Map<String, dynamic> line2 = {'journal_entry_id': journalId};
-
-      if (voucherType == 'قبض عام') {
-        // Cash Account (Debit)
-        line1['account_id'] = cashAccountId;
-        line1['debit'] = amount;
-        line1['credit'] = 0.0;
-        line1['description'] = description;
-
-        // Revenue/Opposite Account (Credit)
-        line2['account_id'] = oppositeAccountId;
-        line2['debit'] = 0.0;
-        line2['credit'] = amount;
-        line2['description'] = description;
-        line2['cost_center_id'] = costCenterId;
-      } else if (voucherType == 'صرف عام') {
-        // Expense/Opposite Account (Debit)
-        line1['account_id'] = oppositeAccountId;
-        line1['debit'] = amount;
-        line1['credit'] = 0.0;
-        line1['description'] = description;
-        line1['cost_center_id'] = costCenterId;
-
-        // Cash Account (Credit)
-        line2['account_id'] = cashAccountId;
-        line2['debit'] = 0.0;
-        line2['credit'] = amount;
-        line2['description'] = description;
+      // 2. Insert the cash control line and each separately described account.
+      final isReceipt = voucherType == 'قبض عام';
+      final cashLine = <String, dynamic>{
+        'journal_entry_id': journalId,
+        'account_id': cashAccountId,
+        'debit': isReceipt ? amount : 0.0,
+        'credit': isReceipt ? 0.0 : amount,
+        'description': description,
+      };
+      await txn.insert('journal_lines', cashLine);
+      await _updateBalanceTx(
+        txn,
+        cashAccountId,
+        cashLine['debit'],
+        cashLine['credit'],
+      );
+      for (final counterpart in validatedLines) {
+        final counterpartLine = <String, dynamic>{
+          'journal_entry_id': journalId,
+          'account_id': counterpart['account_id'],
+          'debit': isReceipt ? 0.0 : counterpart['amount'],
+          'credit': isReceipt ? counterpart['amount'] : 0.0,
+          'cost_center_id': counterpart['cost_center_id'],
+          'description': counterpart['description'],
+        };
+        await txn.insert('journal_lines', counterpartLine);
+        await _updateBalanceTx(
+          txn,
+          counterpartLine['account_id'],
+          counterpartLine['debit'],
+          counterpartLine['credit'],
+        );
       }
-
-      await txn.insert('journal_lines', line1);
-      await txn.insert('journal_lines', line2);
-
-      // Update balances (simplified logic here for brevity, in production we might use a trigger or shared function)
-      // Debit line
-      await _updateBalanceTx(
-        txn,
-        line1['account_id'],
-        line1['debit'],
-        line1['credit'],
-      );
-      // Credit line
-      await _updateBalanceTx(
-        txn,
-        line2['account_id'],
-        line2['debit'],
-        line2['credit'],
-      );
 
       // 3. Insert Voucher
       voucher['journal_entry_id'] = journalId;
@@ -4187,8 +4373,8 @@ class DatabaseHelper {
           'voucher_date': date,
           'journal_entry_id': journalId,
           'cash_account_id': cashAccountId,
-          'opposite_account_id': oppositeAccountId,
-          'cost_center_id': costCenterId,
+          'counterpart_lines': validatedLines,
+          'line_count': validatedLines.length,
         },
       );
       return voucherId;
@@ -6306,13 +6492,26 @@ class DatabaseHelper {
     final db = await instance.database;
     return db.rawQuery(
       '''
-      SELECT ci.*
+      SELECT
+        ci.*,
+        (SELECT COUNT(*) + 1 FROM contract_installments earlier
+          WHERE earlier.contract_id = ci.contract_id
+            AND (DATE(earlier.due_date) < DATE(ci.due_date)
+              OR (DATE(earlier.due_date) = DATE(ci.due_date)
+                AND earlier.id < ci.id))) AS installment_number,
+        p.name AS property_name,
+        u.unit_number
       FROM contract_installments ci
       JOIN contracts c ON c.id = ci.contract_id
       LEFT JOIN tax_invoices ti ON ti.installment_id = ci.id
+      LEFT JOIN units u ON u.id = c.unit_id
+      LEFT JOIN properties p ON p.id = u.property_id
       WHERE c.tenant_id = ?
-        AND c.status = 'Active'
+        AND (c.status = 'Active'
+          OR (c.status = 'Terminated'
+            AND DATE(ci.due_date) <= DATE(c.early_termination_date)))
         AND ci.status != 'Paid'
+        AND ci.status != 'Cancelled'
         AND ti.id IS NULL
       ORDER BY ci.due_date, ci.id
       ''',
@@ -6331,6 +6530,13 @@ class DatabaseHelper {
         ti.id,
         ti.contract_id,
         ti.installment_id,
+        (SELECT COUNT(*) + 1 FROM contract_installments earlier
+          WHERE earlier.contract_id = ci.contract_id
+            AND (DATE(earlier.due_date) < DATE(ci.due_date)
+              OR (DATE(earlier.due_date) = DATE(ci.due_date)
+                AND earlier.id < ci.id))) AS installment_number,
+        p.name AS property_name,
+        u.unit_number,
         ti.invoice_date,
         ti.net_amount,
         ti.tax_amount,
@@ -6348,6 +6554,8 @@ class DatabaseHelper {
       FROM tax_invoices ti
       JOIN contracts c ON c.id = ti.contract_id
       JOIN contract_installments ci ON ci.id = ti.installment_id
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
       LEFT JOIN (
         SELECT invoice_id, SUM(remaining_minor) AS paid_minor
         FROM collection_allocation_balances
@@ -6360,7 +6568,7 @@ class DatabaseHelper {
         WHERE status = 'posted'
         GROUP BY invoice_id
       ) credit ON credit.invoice_id = ti.id
-      WHERE c.tenant_id = ? AND c.status = 'Active'
+      WHERE c.tenant_id = ? AND c.status IN ('Active', 'Terminated')
       GROUP BY ti.id
       HAVING MAX(CAST(ROUND(ti.total_amount * 100) AS INTEGER)
         - COALESCE(vip.paid_minor, 0)
@@ -6421,9 +6629,7 @@ class DatabaseHelper {
   ) async {
     PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
     final db = await instance.database;
-    return db.transaction(
-      (txn) => _creditNoteRefundBalancesTx(txn, invoiceId),
-    );
+    return db.transaction((txn) => _creditNoteRefundBalancesTx(txn, invoiceId));
   }
 
   Future<List<Map<String, dynamic>>> _creditNoteRefundBalancesTx(
@@ -6514,12 +6720,10 @@ class DatabaseHelper {
       final originalNetMinor = InternalTax.toMinorUnits(net);
       final originalTaxMinor = InternalTax.toMinorUnits(tax);
       final originalTotalMinor = InternalTax.toMinorUnits(total);
-      final priorNetMinor =
-          (priorCredits.first['net_minor'] as num).toInt();
-      final priorTaxMinor =
-          (priorCredits.first['tax_minor'] as num).toInt();
-      final priorTotalMinor =
-          (priorCredits.first['total_minor'] as num).toInt();
+      final priorNetMinor = (priorCredits.first['net_minor'] as num).toInt();
+      final priorTaxMinor = (priorCredits.first['tax_minor'] as num).toInt();
+      final priorTotalMinor = (priorCredits.first['total_minor'] as num)
+          .toInt();
       final remainingNet = originalNetMinor - priorNetMinor;
       final remainingTax = originalTaxMinor - priorTaxMinor;
       final remainingTotal = originalTotalMinor - priorTotalMinor;
@@ -6533,9 +6737,9 @@ class DatabaseHelper {
       var noteTaxMinor = totalAmountMinor == remainingTotal
           ? remainingTax
           : ((BigInt.from(totalAmountMinor) * BigInt.from(remainingTax) +
-                          BigInt.from(remainingTotal ~/ 2)) ~/
-                      BigInt.from(remainingTotal))
-                  .toInt();
+                        BigInt.from(remainingTotal ~/ 2)) ~/
+                    BigInt.from(remainingTotal))
+                .toInt();
       if (noteTaxMinor > remainingTax) noteTaxMinor = remainingTax;
       var noteNetMinor = totalAmountMinor - noteTaxMinor;
       if (noteNetMinor > remainingNet) {
@@ -6591,8 +6795,11 @@ class DatabaseHelper {
       throw StateError('تعذر توزيع مبلغ الإشعار على أسطر مصدره');
     }
     final weights = sourceLines
-        .map((line) =>
-            InternalTax.toMinorUnits((line[sourceAmountField] as num).toDouble()))
+        .map(
+          (line) => InternalTax.toMinorUnits(
+            (line[sourceAmountField] as num).toDouble(),
+          ),
+        )
         .toList();
     final totalWeight = weights.fold<int>(0, (sum, value) => sum + value);
     if (totalWeight <= 0) {
@@ -6601,9 +6808,11 @@ class DatabaseHelper {
     var allocated = 0;
     return List<int>.generate(sourceLines.length, (index) {
       if (index == sourceLines.length - 1) return amountMinor - allocated;
-      final share = (BigInt.from(amountMinor) * BigInt.from(weights[index]) ~/
-              BigInt.from(totalWeight))
-          .toInt();
+      final share =
+          (BigInt.from(amountMinor) *
+                  BigInt.from(weights[index]) ~/
+                  BigInt.from(totalWeight))
+              .toInt();
       allocated += share;
       return share;
     });
@@ -6626,7 +6835,9 @@ class DatabaseHelper {
       final note = notes.first;
       final invoiceId = (note['invoice_id'] as num?)?.toInt();
       if (invoiceId == null) {
-        throw StateError('الإشعار التاريخي بلا فاتورة أصلية؛ يتطلب مراجعة يدوية');
+        throw StateError(
+          'الإشعار التاريخي بلا فاتورة أصلية؛ يتطلب مراجعة يدوية',
+        );
       }
       final noteNet = (note['net_amount_minor'] as num).toInt();
       final noteTax = (note['tax_amount_minor'] as num).toInt();
@@ -6651,7 +6862,8 @@ class DatabaseHelper {
         ''',
         [invoiceId],
       );
-      if (invoices.isEmpty) throw StateError('الفاتورة الأصلية غير مرتبطة بمستأجر');
+      if (invoices.isEmpty)
+        throw StateError('الفاتورة الأصلية غير مرتبطة بمستأجر');
       final invoice = invoices.first;
       final invoiceNet = (invoice['net_amount'] as num).toDouble();
       final invoiceTax = (invoice['tax_amount'] as num).toDouble();
@@ -6672,8 +6884,7 @@ class DatabaseHelper {
               (note['tax_account_id'] as num?)?.toInt()) {
         throw StateError('لقطة الضريبة في المسودة تغيرت عن الفاتورة الأصلية');
       }
-      final sourceJournalId =
-          (invoice['journal_entry_id'] as num?)?.toInt();
+      final sourceJournalId = (invoice['journal_entry_id'] as num?)?.toInt();
       if (sourceJournalId == null) {
         throw StateError('الفاتورة لا تحمل قيدًا أصليًا صالحًا للانعكاس');
       }
@@ -6744,7 +6955,9 @@ class DatabaseHelper {
           taxLines.add(line);
           sourceTaxMinor += creditMinor;
         } else {
-          throw StateError('قيد الفاتورة يحتوي حسابًا غير متوقع؛ لا يعكس آليًا');
+          throw StateError(
+            'قيد الفاتورة يحتوي حسابًا غير متوقع؛ لا يعكس آليًا',
+          );
         }
       }
       final originalNetMinor = InternalTax.toMinorUnits(invoiceNet);
@@ -6799,7 +7012,8 @@ class DatabaseHelper {
         sourceLines: receivableLines,
         sourceAmountField: 'debit',
       );
-      final description = 'إشعار دائن رقم $creditNoteId مرتبط بالفاتورة $invoiceId';
+      final description =
+          'إشعار دائن رقم $creditNoteId مرتبط بالفاتورة $invoiceId';
       final journalId = await txn.insert('journal_entries', {
         'entry_date': note['note_date'],
         'description': description,
@@ -6918,7 +7132,9 @@ class DatabaseHelper {
       final originalNoteDate = notes.first['note_date']?.toString() ?? '';
       if (!_isIsoCalendarDate(originalNoteDate) ||
           reversalDate.compareTo(originalNoteDate) < 0) {
-        throw ArgumentError('تاريخ العكس يجب أن يكون صحيحًا وغير سابق لتاريخ الإشعار');
+        throw ArgumentError(
+          'تاريخ العكس يجب أن يكون صحيحًا وغير سابق لتاريخ الإشعار',
+        );
       }
       final linkedRefund = await txn.query(
         'refund_allocations',
@@ -6928,10 +7144,12 @@ class DatabaseHelper {
         limit: 1,
       );
       if (linkedRefund.isNotEmpty) {
-        throw StateError('لا يمكن عكس إشعار استُخدم في رد نقدي؛ يلزم مستند تسوية مستقل');
+        throw StateError(
+          'لا يمكن عكس إشعار استُخدم في رد نقدي؛ يلزم مستند تسوية مستقل',
+        );
       }
-      final originalJournalId =
-          (notes.first['journal_entry_id'] as num?)?.toInt();
+      final originalJournalId = (notes.first['journal_entry_id'] as num?)
+          ?.toInt();
       if (originalJournalId == null) {
         throw StateError('قيد الإشعار المرحّل غير موجود؛ يلزم فحص يدوي');
       }
@@ -6951,7 +7169,8 @@ class DatabaseHelper {
         whereArgs: [originalJournalId],
         orderBy: 'id',
       );
-      if (lines.isEmpty) throw StateError('قيد الإشعار بلا أسطر؛ يلزم فحص يدوي');
+      if (lines.isEmpty)
+        throw StateError('قيد الإشعار بلا أسطر؛ يلزم فحص يدوي');
       final journalId = await txn.insert('journal_entries', {
         'entry_date': reversalDate,
         'description': 'عكس إشعار دائن رقم $creditNoteId: $normalizedReason',
@@ -7105,7 +7324,7 @@ class DatabaseHelper {
           FROM tax_invoices ti
           JOIN contracts c ON c.id = ti.contract_id
           JOIN contract_installments ci ON ci.id = ti.installment_id
-          WHERE ti.id = ? AND c.status = 'Active'
+          WHERE ti.id = ? AND c.status IN ('Active', 'Terminated')
           LIMIT 1
           ''',
           [invoiceId],
@@ -7153,10 +7372,10 @@ class DatabaseHelper {
           [invoiceId],
         );
         final invoicePaidMinor = (paidRows.first['paid_minor'] as num).toInt();
-        final invoicePaidRentMinor =
-            (paidRows.first['paid_rent_minor'] as num).toInt();
-        final invoicePaidTaxMinor =
-            (paidRows.first['paid_tax_minor'] as num).toInt();
+        final invoicePaidRentMinor = (paidRows.first['paid_rent_minor'] as num)
+            .toInt();
+        final invoicePaidTaxMinor = (paidRows.first['paid_tax_minor'] as num)
+            .toInt();
         if (invoicePaidMinor != invoicePaidRentMinor + invoicePaidTaxMinor ||
             invoicePaidMinor < 0) {
           throw StateError('تخصيصات الفاتورة السابقة غير متسقة ماليًا');
@@ -7171,10 +7390,10 @@ class DatabaseHelper {
           ''',
           [invoiceId],
         );
-        final creditedNetMinor =
-            (creditRows.first['credited_net_minor'] as num).toInt();
-        final creditedTaxMinor =
-            (creditRows.first['credited_tax_minor'] as num).toInt();
+        final creditedNetMinor = (creditRows.first['credited_net_minor'] as num)
+            .toInt();
+        final creditedTaxMinor = (creditRows.first['credited_tax_minor'] as num)
+            .toInt();
         final creditedTotalMinor =
             (creditRows.first['credited_total_minor'] as num).toInt();
         if (creditedNetMinor + creditedTaxMinor != creditedTotalMinor ||
@@ -7207,8 +7426,9 @@ class DatabaseHelper {
             InternalTax.toMinorUnits(installmentTotal) -
             InternalTax.toMinorUnits(oldPaid) -
             creditedNetMinor;
-        final nonnegativeRentRemaining =
-            installmentRemainingCents > 0 ? installmentRemainingCents : 0;
+        final nonnegativeRentRemaining = installmentRemainingCents > 0
+            ? installmentRemainingCents
+            : 0;
         final principalCents = receiptCents < nonnegativeRentRemaining
             ? receiptCents
             : nonnegativeRentRemaining;
@@ -7245,7 +7465,11 @@ class DatabaseHelper {
             '''
             SELECT ci.* FROM contract_installments ci
             JOIN contracts c ON c.id = ci.contract_id
-            WHERE ci.id = ? AND c.tenant_id = ? AND c.status = 'Active'
+            WHERE ci.id = ? AND c.tenant_id = ?
+              AND (c.status = 'Active'
+                OR (c.status = 'Terminated'
+                  AND DATE(ci.due_date) <= DATE(c.early_termination_date)))
+              AND ci.status != 'Cancelled'
             ''',
             [requested['id'], tenantId],
           );
@@ -8110,10 +8334,9 @@ class DatabaseHelper {
       if (refundCents > remainingMinor) {
         throw StateError('المبلغ يتجاوز الجزء غير المسترد من سند القبض الأصلي');
       }
-      final sourceRentRemaining =
-          (source['remaining_rent_minor'] as num).toInt();
-      final sourceTaxRemaining =
-          (source['remaining_tax_minor'] as num).toInt();
+      final sourceRentRemaining = (source['remaining_rent_minor'] as num)
+          .toInt();
+      final sourceTaxRemaining = (source['remaining_tax_minor'] as num).toInt();
       Map<String, int> split;
       if (creditNoteId == null) {
         split = _splitRefundMinorUnits(
@@ -8135,15 +8358,15 @@ class DatabaseHelper {
           throw StateError('الإشعار الدائن لا يطابق فاتورة ومصدر قبض المستأجر');
         }
         final note = matchingNotes.first;
-        final noteNetRemaining =
-            (note['refundable_net_minor'] as num).toInt();
-        final noteTaxRemaining =
-            (note['refundable_tax_minor'] as num).toInt();
+        final noteNetRemaining = (note['refundable_net_minor'] as num).toInt();
+        final noteTaxRemaining = (note['refundable_tax_minor'] as num).toInt();
         final noteTotalRemaining = (note['refundable_minor'] as num).toInt();
-        final refundableRent =
-            math.min(sourceRentRemaining, noteNetRemaining).toInt();
-        final refundableTax =
-            math.min(sourceTaxRemaining, noteTaxRemaining).toInt();
+        final refundableRent = math
+            .min(sourceRentRemaining, noteNetRemaining)
+            .toInt();
+        final refundableTax = math
+            .min(sourceTaxRemaining, noteTaxRemaining)
+            .toInt();
         if (noteNetRemaining < 0 ||
             noteTaxRemaining < 0 ||
             noteTotalRemaining < 0 ||
@@ -8362,6 +8585,11 @@ class DatabaseHelper {
       '''
       SELECT
         via.installment_id,
+        (SELECT COUNT(*) + 1 FROM contract_installments earlier
+          WHERE earlier.contract_id = ci.contract_id
+            AND (DATE(earlier.due_date) < DATE(ci.due_date)
+              OR (DATE(earlier.due_date) = DATE(ci.due_date)
+                AND earlier.id < ci.id))) AS installment_number,
         via.amount AS allocated_amount,
         ci.contract_id,
         ci.amount AS installment_amount,
@@ -8387,6 +8615,13 @@ class DatabaseHelper {
         via.amount AS allocated_amount,
         ti.contract_id,
         ti.installment_id,
+        (SELECT COUNT(*) + 1 FROM contract_installments earlier
+          WHERE earlier.contract_id = ci.contract_id
+            AND (DATE(earlier.due_date) < DATE(ci.due_date)
+              OR (DATE(earlier.due_date) = DATE(ci.due_date)
+                AND earlier.id < ci.id))) AS installment_number,
+        p.name AS property_name,
+        u.unit_number,
         ti.invoice_date,
         ti.net_amount,
         ti.tax_amount,
@@ -8395,7 +8630,10 @@ class DatabaseHelper {
         ci.due_date
       FROM voucher_invoice_allocations via
       JOIN tax_invoices ti ON ti.id = via.invoice_id
-      LEFT JOIN contract_installments ci ON ci.id = ti.installment_id
+      JOIN contract_installments ci ON ci.id = ti.installment_id
+      JOIN contracts c ON c.id = ti.contract_id
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
       WHERE via.voucher_id = ?
       ORDER BY ti.invoice_date, ti.id
       ''',
@@ -8709,6 +8947,9 @@ class DatabaseHelper {
       );
       if (contractResult.isEmpty) throw StateError('العقد غير موجود');
       if (contractResult.first['status'] == 'Cancelled') return;
+      if (contractResult.first['status'] == 'Terminated') {
+        throw StateError('العقد منتهٍ مبكرًا بالفعل؛ لا يمكن تحويله إلى إلغاء');
+      }
 
       final liveSuccessors = await txn.query(
         'contracts',
@@ -8800,6 +9041,143 @@ class DatabaseHelper {
     });
   }
 
+  Future<void> terminateContractEarly(
+    int contractId, {
+    required String effectiveDate,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('leasing', AppPermissionAction.edit);
+    final normalizedReason = reason.trim();
+    if (normalizedReason.isEmpty || normalizedReason.length > 500) {
+      throw ArgumentError('سبب الإنهاء مطلوب ولا يتجاوز 500 حرف');
+    }
+    final parsedDate = DateTime.tryParse(effectiveDate);
+    if (parsedDate == null ||
+        parsedDate.toIso8601String().substring(0, 10) != effectiveDate) {
+      throw ArgumentError('تاريخ سريان الإنهاء غير صحيح');
+    }
+    final today = DateTime.now();
+    final todayText = DateTime(
+      today.year,
+      today.month,
+      today.day,
+    ).toIso8601String().substring(0, 10);
+    if (effectiveDate.compareTo(todayText) > 0) {
+      throw ArgumentError('لا يمكن إتاحة الوحدة قبل تاريخ سريان الإنهاء');
+    }
+
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'contracts',
+        where: 'id = ?',
+        whereArgs: [contractId],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('العقد غير موجود');
+      final contract = rows.first;
+      if (contract['status'] != 'Active') {
+        throw StateError('لا يمكن إنهاء عقد غير نشط');
+      }
+      final startDate = contract['start_date']?.toString().substring(0, 10);
+      final endDate = contract['end_date']?.toString().substring(0, 10);
+      if (startDate == null ||
+          endDate == null ||
+          effectiveDate.compareTo(startDate) < 0 ||
+          effectiveDate.compareTo(endDate) >= 0) {
+        throw ArgumentError(
+          'تاريخ الإنهاء يجب أن يقع ضمن مدة العقد وقبل نهايته',
+        );
+      }
+      final unitId = (contract['unit_id'] as num).toInt();
+      final overlappingContracts = await txn.rawQuery(
+        '''
+        SELECT id FROM contracts
+        WHERE unit_id = ? AND id != ? AND status = 'Active'
+          AND DATE(start_date) <= DATE(?) AND DATE(end_date) >= DATE(?)
+        LIMIT 1
+        ''',
+        [unitId, contractId, todayText, todayText],
+      );
+      if (overlappingContracts.isNotEmpty) {
+        throw StateError(
+          'توجد وحدة مرتبطة بعقد نشط آخر؛ لم تُغيّر حالة الإشغال',
+        );
+      }
+
+      final now = DateTime.now().toIso8601String();
+      await txn.update(
+        'contracts',
+        {
+          'status': 'Terminated',
+          'early_termination_date': effectiveDate,
+          'early_termination_reason': normalizedReason,
+        },
+        where: 'id = ? AND status = ?',
+        whereArgs: [contractId, 'Active'],
+      );
+
+      // Keep every historic installment and any invoice/allocation untouched.
+      // Only unbilled future installments with no payment/allocation history are
+      // marked cancelled; no refund, credit note, or journal entry is created.
+      final futureRows = await txn.rawQuery(
+        '''
+        SELECT ci.id
+        FROM contract_installments ci
+        WHERE ci.contract_id = ?
+          AND DATE(ci.due_date) > DATE(?)
+          AND COALESCE(ci.paid_amount, 0) = 0
+          AND NOT EXISTS (SELECT 1 FROM tax_invoices ti WHERE ti.installment_id = ci.id)
+          AND NOT EXISTS (SELECT 1 FROM voucher_installment_allocations va WHERE va.installment_id = ci.id)
+          AND NOT EXISTS (SELECT 1 FROM collection_allocations ca WHERE ca.installment_id = ci.id)
+        ''',
+        [contractId, effectiveDate],
+      );
+      for (final installment in futureRows) {
+        await txn.update(
+          'contract_installments',
+          {'status': 'Cancelled'},
+          where: 'id = ? AND status != ?',
+          whereArgs: [installment['id'], 'Paid'],
+        );
+      }
+
+      await _recordAuditTx(
+        txn,
+        action: 'contract_terminated_early',
+        entityType: 'contract',
+        entityId: contractId,
+        details: {
+          'contract_id': contractId,
+          'unit_id': unitId,
+          'effective_date': effectiveDate,
+          'reason': normalizedReason,
+          'future_unbilled_installments_cancelled': futureRows.length,
+          'financial_history_preserved': true,
+          'automatic_refund_or_journal_created': false,
+        },
+        timestamp: now,
+      );
+
+      final otherActiveContracts = await txn.rawQuery(
+        '''
+        SELECT COUNT(*) AS count FROM contracts
+        WHERE unit_id = ? AND id != ? AND status = 'Active'
+          AND DATE(end_date) >= DATE(?)
+        ''',
+        [unitId, contractId, todayText],
+      );
+      if ((otherActiveContracts.first['count'] as num).toInt() == 0) {
+        await txn.update(
+          'units',
+          {'status': 'شاغرة'},
+          where: 'id = ?',
+          whereArgs: [unitId],
+        );
+      }
+    });
+  }
+
   // --- Reports & Alerts Queries ---
   // --- Reports & Alerts Queries ---
 
@@ -8833,7 +9211,8 @@ class DatabaseHelper {
             WHERE invoice_id IS NOT NULL
             GROUP BY invoice_id
           ) vip ON vip.invoice_id = ti.id
-          WHERE c.status = 'Active') AS outstanding_amount,
+          WHERE c.status IN ('Active', 'Terminated')
+            AND ci.status != 'Cancelled') AS outstanding_amount,
         (SELECT COUNT(*) FROM legacy_tenant_payment_reviews
           WHERE status = 'pending') AS pending_legacy_tenant_payment_count,
         (SELECT COALESCE(SUM(amount_minor), 0) / 100.0
@@ -9736,28 +10115,19 @@ class DatabaseHelper {
     if (periodId <= 0) throw ArgumentError('رقم الفترة غير صالح');
     final db = await instance.database;
     return db.transaction((txn) async {
-      PermissionRuntime.require(
-        'accounting_periods',
-        AppPermissionAction.view,
-      );
+      PermissionRuntime.require('accounting_periods', AppPermissionAction.view);
       final period = await _accountingPeriodTx(txn, periodId);
       final report = await _financialCloseReadinessTx(
         txn,
         startDate: period.startDate,
         endDate: period.endDate,
       );
-      PermissionRuntime.require(
-        'accounting_periods',
-        AppPermissionAction.view,
-      );
+      PermissionRuntime.require('accounting_periods', AppPermissionAction.view);
       return AccountingPeriodReadiness(period: period, report: report);
     });
   }
 
-  Future<void> lockAccountingPeriod(
-    int periodId, {
-    String reason = '',
-  }) async {
+  Future<void> lockAccountingPeriod(int periodId, {String reason = ''}) async {
     PermissionRuntime.require(
       'accounting_periods',
       AppPermissionAction.lockPeriod,
@@ -9790,7 +10160,8 @@ class DatabaseHelper {
           'توجد قيود أو استثناءات مطابقة داخلية تحتاج معالجة يدوية؛ راجع الجاهزية أولًا',
         );
       }
-      if (report.requiresManualReviewAcknowledgement && normalizedReason.isEmpty) {
+      if (report.requiresManualReviewAcknowledgement &&
+          normalizedReason.isEmpty) {
         throw StateError(
           'توجد استثناءات تتطلب إقرار مراجعة؛ أدخل سبب المراجعة أو الاعتماد قبل القفل',
         );
@@ -9834,17 +10205,15 @@ class DatabaseHelper {
         entityId: periodId,
         details: {
           ...summary,
-          if (normalizedReason.isNotEmpty) 'lock_review_reason': normalizedReason,
+          if (normalizedReason.isNotEmpty)
+            'lock_review_reason': normalizedReason,
         },
         timestamp: timestamp,
       );
     });
   }
 
-  Future<void> closeAccountingPeriod(
-    int periodId, {
-    String reason = '',
-  }) async {
+  Future<void> closeAccountingPeriod(int periodId, {String reason = ''}) async {
     PermissionRuntime.require(
       'accounting_periods',
       AppPermissionAction.closePeriod,
@@ -10019,9 +10388,11 @@ class DatabaseHelper {
   String _exclusiveDateBoundAfter(String inclusiveEndDate) {
     if (inclusiveEndDate == '9999-12-31') return '9999-12-32';
     final parts = inclusiveEndDate.split('-').map(int.parse).toList();
-    final nextDay = DateTime.utc(parts[0], parts[1], parts[2]).add(
-      const Duration(days: 1),
-    );
+    final nextDay = DateTime.utc(
+      parts[0],
+      parts[1],
+      parts[2],
+    ).add(const Duration(days: 1));
     return nextDay.toIso8601String().substring(0, 10);
   }
 
@@ -10593,9 +10964,16 @@ class DatabaseHelper {
     });
   }
 
+  Future<List<Map<String, dynamic>>> getTenantCollectionReportTenants() async {
+    PermissionRuntime.require('reports', AppPermissionAction.view);
+    final db = await instance.database;
+    return db.query('tenants', columns: ['id', 'name'], orderBy: 'name, id');
+  }
+
   Future<TenantCollectionReport> getTenantCollectionReport({
     required String startDate,
     required String endDate,
+    int? tenantId,
   }) async {
     PermissionRuntime.require('reports', AppPermissionAction.view);
 
@@ -10618,6 +10996,9 @@ class DatabaseHelper {
     }
     if (startDate.compareTo(endDate) > 0) {
       throw ArgumentError('بداية الفترة لا يمكن أن تتجاوز نهايتها');
+    }
+    if (tenantId != null && tenantId <= 0) {
+      throw ArgumentError('معرّف المستأجر غير صالح');
     }
     final endParts = endDate.split('-').map(int.parse).toList();
     final exclusiveEndDate = DateTime.utc(
@@ -10871,9 +11252,17 @@ class DatabaseHelper {
           FROM refund_audit audit
         )
         SELECT * FROM report_rows
+        WHERE (? IS NULL OR tenant_id = ?)
         ORDER BY voucher_date, voucher_id, is_refund
         ''',
-        [startDate, exclusiveEndDate, startDate, exclusiveEndDate],
+        [
+          startDate,
+          exclusiveEndDate,
+          startDate,
+          exclusiveEndDate,
+          tenantId,
+          tenantId,
+        ],
       );
       final companyRows = await txn.query(
         'company_info',
@@ -10887,11 +11276,24 @@ class DatabaseHelper {
       final currency = configuredCurrency == null || configuredCurrency.isEmpty
           ? 'غير محددة'
           : configuredCurrency;
+      final selectedTenantRows = tenantId == null
+          ? const <Map<String, Object?>>[]
+          : await txn.query(
+              'tenants',
+              columns: ['name'],
+              where: 'id = ?',
+              whereArgs: [tenantId],
+              limit: 1,
+            );
       PermissionRuntime.require('reports', AppPermissionAction.view);
       return TenantCollectionReport(
         startDate: startDate,
         endDate: endDate,
         currency: currency,
+        tenantId: tenantId,
+        tenantName: selectedTenantRows.isEmpty
+            ? null
+            : selectedTenantRows.first['name']?.toString(),
         rows: rows
             .map(
               (row) => TenantCollectionReportRow(
@@ -11136,7 +11538,8 @@ class DatabaseHelper {
             type: 'إشعار دائن تاريخي',
             tenant: note['tenant_name']?.toString() ?? 'غير محدد',
             amount: legacyAmount,
-            reason: 'إشعار قديم بلا لقطة تفصيلية أو قيد موثوق؛ لم يُخصم من الذمم.',
+            reason:
+                'إشعار قديم بلا لقطة تفصيلية أو قيد موثوق؛ لم يُخصم من الذمم.',
           );
           continue;
         }
@@ -11161,7 +11564,8 @@ class DatabaseHelper {
             type: status == 'reversed' ? 'إشعار دائن معكوس' : 'إشعار دائن',
             tenant: note['tenant_name']?.toString() ?? 'غير محدد',
             amount: noteTotal,
-            reason: 'قيد الإشعار أو قيد عكسه غير مرحّل؛ لم يُحتسب في أعمار الذمم.',
+            reason:
+                'قيد الإشعار أو قيد عكسه غير مرحّل؛ لم يُحتسب في أعمار الذمم.',
           );
           continue;
         }
@@ -11825,7 +12229,8 @@ class DatabaseHelper {
         WHERE invoice_id IS NOT NULL
         GROUP BY invoice_id
       ) vip ON vip.invoice_id = ti.id
-      WHERE c.status = 'Active'
+      WHERE c.status IN ('Active', 'Terminated')
+        AND ci.status != 'Cancelled'
         AND (CASE WHEN ti.id IS NULL
           THEN MAX(ci.amount - ci.paid_amount, 0)
           ELSE MAX(ti.total_amount - COALESCE(vip.paid_amount, 0), 0)

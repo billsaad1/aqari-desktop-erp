@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/crypto_utils.dart';
@@ -96,14 +97,22 @@ class _UsersTabState extends State<UsersTab> {
                     ),
                     TextFormField(
                       controller: passwordController,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'[0-9٠-٩۰-۹]'),
+                        ),
+                        LengthLimitingTextInputFormatter(5),
+                      ],
                       decoration: const InputDecoration(
                         labelText: 'كلمة المرور الأولية',
-                        helperText: '12 حرفًا على الأقل',
+                        helperText: '4 أو 5 أرقام',
                       ),
                       obscureText: true,
-                      validator: (value) => (value?.length ?? 0) >= 12
+                      validator: (value) =>
+                          CryptoUtils.isValidNumericPin(value ?? '')
                           ? null
-                          : 'كلمة المرور يجب ألا تقل عن 12 حرفًا',
+                          : 'كلمة المرور يجب أن تتكون من 4 أو 5 أرقام',
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
@@ -458,14 +467,19 @@ class _UsersTabState extends State<UsersTab> {
                                           AppPermissionAction.reopenPeriod,
                                         }.contains(action)
                                       : action !=
-                                                AppPermissionAction.lockPeriod &&
+                                                AppPermissionAction
+                                                    .lockPeriod &&
                                             action !=
-                                                AppPermissionAction.closePeriod &&
+                                                AppPermissionAction
+                                                    .closePeriod &&
                                             action !=
-                                                AppPermissionAction.reopenPeriod &&
+                                                AppPermissionAction
+                                                    .reopenPeriod &&
                                             (action !=
-                                                    AppPermissionAction.reviewApprove ||
-                                                module.code == 'property_sales'))
+                                                    AppPermissionAction
+                                                        .reviewApprove ||
+                                                module.code ==
+                                                    'property_sales'))
                                     SizedBox(
                                       width: 145,
                                       child: CheckboxListTile(
@@ -539,7 +553,8 @@ class _UsersTabState extends State<UsersTab> {
               child: const Text('إغلاق'),
             ),
             FilledButton.icon(
-              onPressed: isSaving ||
+              onPressed:
+                  isSaving ||
                       (isSuperAdmin && PermissionRuntime.role != 'SuperAdmin')
                   ? null
                   : () async {
@@ -550,8 +565,11 @@ class _UsersTabState extends State<UsersTab> {
                               for (final module in AppPermissionCatalog.modules)
                                 if (isSuperAdmin
                                     ? module.code == 'accounting_periods' &&
-                                          touchedModules.contains(module.code) &&
-                                          values[module.code]![AppPermissionAction
+                                          touchedModules.contains(
+                                            module.code,
+                                          ) &&
+                                          values[module
+                                                  .code]![AppPermissionAction
                                                   .reopenPeriod] ==
                                               true
                                     : touchedModules.contains(module.code))
@@ -559,17 +577,17 @@ class _UsersTabState extends State<UsersTab> {
                                     'screen_name': module.code,
                                     for (final action
                                         in AppPermissionAction.values)
-                                      action.databaseColumn:
-                                          isSuperAdmin
-                                              ? action ==
-                                                        AppPermissionAction.view ||
-                                                    (action ==
-                                                            AppPermissionAction
-                                                                .reopenPeriod &&
-                                                        values[module.code]![action] ==
-                                                            true)
-                                              : values[module.code]![action] ??
-                                                    false,
+                                      action.databaseColumn: isSuperAdmin
+                                          ? action ==
+                                                    AppPermissionAction.view ||
+                                                (action ==
+                                                        AppPermissionAction
+                                                            .reopenPeriod &&
+                                                    values[module
+                                                            .code]![action] ==
+                                                        true)
+                                          : values[module.code]![action] ??
+                                                false,
                                   },
                             ];
                       try {

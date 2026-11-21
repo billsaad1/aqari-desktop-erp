@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/app_theme.dart';
 import '../../core/company_logo_mark.dart';
+import '../../core/crypto_utils.dart';
 import '../../providers/auth_provider.dart';
 import '../main_shell/main_shell_screen.dart';
 
@@ -65,9 +67,9 @@ class _LoginScreenState extends State<LoginScreen> {
               Future<void> submit() async {
                 if (saving) return;
                 final password = passwordController.text;
-                if (password.length < 12) {
+                if (!CryptoUtils.isValidNumericPin(password)) {
                   setDialogState(
-                    () => errorText = 'كلمة المرور يجب ألا تقل عن 12 حرفاً',
+                    () => errorText = 'أدخل رقمًا سريًا مكونًا من 4 أو 5 أرقام',
                   );
                   return;
                 }
@@ -107,20 +109,35 @@ class _LoginScreenState extends State<LoginScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           const Text(
-                            'يجب تغيير كلمة المرور الأولية قبل استخدام النظام. اختر كلمة مرور لا تقل عن 12 حرفاً.',
+                            'يجب تغيير كلمة المرور الأولية قبل استخدام النظام. اختر رقمًا سريًا من 4 أو 5 أرقام.',
                           ),
                           const SizedBox(height: 18),
                           TextField(
                             controller: passwordController,
+                            keyboardType: TextInputType.number,
+                            inputFormatters: [
+                              FilteringTextInputFormatter.allow(
+                                RegExp(r'[0-9٠-٩۰-۹]'),
+                              ),
+                              LengthLimitingTextInputFormatter(5),
+                            ],
                             obscureText: true,
                             decoration: const InputDecoration(
                               labelText: 'كلمة المرور الجديدة',
+                              helperText: '4 أو 5 أرقام',
                               prefixIcon: Icon(Icons.lock_outline_rounded),
                             ),
                           ),
                           const SizedBox(height: 12),
                           TextField(
                             controller: confirmController,
+                            keyboardType: TextInputType.number,
+                            inputFormatters: [
+                              FilteringTextInputFormatter.allow(
+                                RegExp(r'[0-9٠-٩۰-۹]'),
+                              ),
+                              LengthLimitingTextInputFormatter(5),
+                            ],
                             obscureText: true,
                             decoration: const InputDecoration(
                               labelText: 'تأكيد كلمة المرور',

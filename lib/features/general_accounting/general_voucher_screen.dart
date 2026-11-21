@@ -25,9 +25,27 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
   final _periodToController = TextEditingController();
 
   int? _cashAccountId;
-  int? _oppositeAccountId;
-  int? _costCenterId;
+  final List<_GeneralVoucherLine> _lines = [_GeneralVoucherLine()];
   bool _isProcessing = false;
+
+  double get _totalAmount => _lines.fold<double>(
+    0,
+    (sum, line) => sum + (double.tryParse(line.amountController.text) ?? 0),
+  );
+
+  void _syncAmount() =>
+      _amountController.text = _totalAmount.toStringAsFixed(2);
+
+  void _addLine() => setState(() => _lines.add(_GeneralVoucherLine()));
+
+  void _removeLine(int index) {
+    if (_lines.length <= 1) return;
+    setState(() {
+      final line = _lines.removeAt(index);
+      line.dispose();
+      _syncAmount();
+    });
+  }
 
   @override
   void initState() {
@@ -45,6 +63,9 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
     _descController.dispose();
     _periodFromController.dispose();
     _periodToController.dispose();
+    for (final line in _lines) {
+      line.dispose();
+    }
     super.dispose();
   }
 
@@ -101,21 +122,47 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
 
   Future<void> _saveVoucher({required bool saveAsPdf}) async {
     if (_isProcessing) return;
-    if (!_formKey.currentState!.validate() ||
-        _cashAccountId == null ||
-        _oppositeAccountId == null) {
+    if (!_formKey.currentState!.validate() || _cashAccountId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('الرجاء تعبئة جميع الحقول المطلوبة واختيار الحسابات'),
-        ),
+        const SnackBar(content: Text('اختر حساب الصندوق/البنك وأكمل البيانات')),
       );
       return;
     }
-    final amount = double.tryParse(_amountController.text) ?? 0.0;
-    if (amount <= 0 || DateTime.tryParse(_dateController.text) == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('تحقق من المبلغ والتاريخ')));
+    if (_lines.isEmpty || _lines.any((line) => line.accountId == null)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اختر حسابًا لكل بند من بنود السند')),
+      );
+      return;
+    }
+    if (_lines.any((line) => line.descriptionController.text.trim().isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('أدخل بيانًا مستقلًا لكل بند')),
+      );
+      return;
+    }
+    final lineAmounts = <double>[];
+    for (final line in _lines) {
+      final value = double.tryParse(line.amountController.text);
+      if (value == null ||
+          !value.isFinite ||
+          value <= 0 ||
+          (value * 100 - (value * 100).round()).abs() > 0.000001) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('أدخل مبلغًا موجبًا بدقة منزلتين لكل بند'),
+          ),
+        );
+        return;
+      }
+      lineAmounts.add(value);
+    }
+    final amount = _totalAmount;
+    if (!amount.isFinite ||
+        amount <= 0 ||
+        DateTime.tryParse(_dateController.text) == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تحقق من مجموع المبالغ والتاريخ')),
+      );
       return;
     }
 
@@ -136,14 +183,22 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
           ? null
           : _periodToController.text.trim(),
     };
+    final counterpartLines = [
+      for (var index = 0; index < _lines.length; index++)
+        {
+          'account_id': _lines[index].accountId,
+          'amount': lineAmounts[index],
+          'cost_center_id': _lines[index].costCenterId,
+          'description': _lines[index].descriptionController.text.trim(),
+        },
+    ];
     setState(() => _isProcessing = true);
     late final int voucherId;
     try {
-      voucherId = await accountingProvider.saveGeneralVoucher(
+      voucherId = await accountingProvider.saveGeneralVoucherWithLines(
         voucher,
         _cashAccountId!,
-        _oppositeAccountId!,
-        _costCenterId,
+        counterpartLines,
         widget.voucherType,
       );
     } catch (e) {
@@ -163,10 +218,28 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
     try {
       final accounts = accountingProvider.accounts;
       final cashAccount = accounts.firstWhere((a) => a['id'] == _cashAccountId);
-      final counterpart = accounts.firstWhere(
-        (a) => a['id'] == _oppositeAccountId,
-      );
       final isReceipt = widget.voucherType == 'قبض عام';
+      final journalLines = <Map<String, dynamic>>[
+        {
+          'account_name': '${cashAccount['code']} ${cashAccount['name']}',
+          'description': _descController.text.trim(),
+          'debit': isReceipt ? amount : 0.0,
+          'credit': isReceipt ? 0.0 : amount,
+        },
+        for (var index = 0; index < _lines.length; index++)
+          () {
+            final line = _lines[index];
+            final account = accounts.firstWhere(
+              (a) => a['id'] == line.accountId,
+            );
+            return <String, dynamic>{
+              'account_name': '${account['code']} ${account['name']}',
+              'description': line.descriptionController.text.trim(),
+              'debit': isReceipt ? 0.0 : lineAmounts[index],
+              'credit': isReceipt ? lineAmounts[index] : 0.0,
+            };
+          }(),
+      ];
       final pdfBytes = await PrintUtils.buildVoucherPdf(
         voucherType: isReceipt ? 'سند قبض عام' : 'سند صرف عام',
         voucherNo: voucherId,
@@ -174,7 +247,7 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         targetName: null,
         amount: amount,
         paymentMethod: null,
-        accountName: '${cashAccount['name']} / ${counterpart['name']}',
+        accountName: '${cashAccount['name']}',
         description: _descController.text.trim(),
         periodStartDate: _periodFromController.text.trim().isEmpty
             ? null
@@ -182,6 +255,7 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         periodEndDate: _periodToController.text.trim().isEmpty
             ? null
             : _periodToController.text.trim(),
+        journalLines: journalLines,
       );
       if (mounted) {
         await PdfDocumentPreviewDialog.show(
@@ -195,7 +269,7 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         );
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -203,18 +277,23 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
             ),
           ),
         );
+      }
     }
 
     if (mounted) {
+      for (final line in _lines) {
+        line.dispose();
+      }
       _formKey.currentState!.reset();
       setState(() {
         _cashAccountId = null;
-        _oppositeAccountId = null;
-        _costCenterId = null;
         _amountController.clear();
         _descController.clear();
         _periodFromController.clear();
         _periodToController.clear();
+        _lines
+          ..clear()
+          ..add(_GeneralVoucherLine());
         _isProcessing = false;
       });
     }
@@ -274,9 +353,9 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                           Expanded(
                             child: TextFormField(
                               controller: _amountController,
-                              keyboardType: TextInputType.number,
+                              readOnly: true,
                               decoration: const InputDecoration(
-                                labelText: 'المبلغ',
+                                labelText: 'إجمالي المبلغ',
                                 border: OutlineInputBorder(),
                               ),
                               validator: (v) =>
@@ -323,116 +402,200 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
                         ],
                       ),
                       const SizedBox(height: 24),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: DropdownButtonFormField<int>(
-                              value: _cashAccountId,
-                              items: provider.detailAccounts
-                                  .where(
-                                    (a) =>
-                                        a['account_type'] == 'Asset' &&
-                                        a['code'].toString().startsWith('11') &&
-                                        a['parent_id'] != null,
-                                  )
-                                  .map(
-                                    (a) => DropdownMenuItem<int>(
-                                      value: a['id'],
-                                      child: Text(
-                                        '${a['code']} - ${a['name']}',
-                                      ),
-                                    ),
-                                  )
-                                  .toList(),
-                              onChanged: (val) =>
-                                  setState(() => _cashAccountId = val),
-                              decoration: InputDecoration(
-                                labelText: isReceipt
-                                    ? 'يُقبض إلى حساب (الصندوق/البنك)'
-                                    : 'يُصرف من حساب (الصندوق/البنك)',
-                                border: const OutlineInputBorder(),
+                      DropdownButtonFormField<int>(
+                        value: _cashAccountId,
+                        items: provider.detailAccounts
+                            .where(
+                              (account) =>
+                                  account['account_type'] == 'Asset' &&
+                                  account['code'].toString().startsWith('11') &&
+                                  account['parent_id'] != null,
+                            )
+                            .map(
+                              (account) => DropdownMenuItem<int>(
+                                value: (account['id'] as num).toInt(),
+                                child: Text(
+                                  '${account['code']} - ${account['name']}',
+                                ),
                               ),
+                            )
+                            .toList(),
+                        onChanged: (value) =>
+                            setState(() => _cashAccountId = value),
+                        decoration: InputDecoration(
+                          labelText: isReceipt
+                              ? 'يُقبض إلى حساب (الصندوق/البنك)'
+                              : 'يُصرف من حساب (الصندوق/البنك)',
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'بنود السند',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 17,
                             ),
                           ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: DropdownButtonFormField<int>(
-                              value: _oppositeAccountId,
-                              items: provider.detailAccounts
-                                  .where(
-                                    (a) => (isReceipt
-                                        ? [
-                                            'Asset',
-                                            'Liability',
-                                            'Equity',
-                                            'Revenue',
-                                          ].contains(a['account_type'])
-                                        : [
-                                            'Asset',
-                                            'Liability',
-                                            'Equity',
-                                            'Expense',
-                                          ].contains(a['account_type'])),
-                                  )
-                                  .map(
-                                    (a) => DropdownMenuItem<int>(
-                                      value: a['id'],
-                                      child: Text(
-                                        '${a['code']} - ${a['name']}',
-                                      ),
-                                    ),
-                                  )
-                                  .toList(),
-                              onChanged: (val) =>
-                                  setState(() => _oppositeAccountId = val),
-                              decoration: InputDecoration(
-                                labelText: isReceipt
-                                    ? 'حساب الإيراد / الحساب الدائن'
-                                    : 'حساب المصروف / الحساب المدين',
-                                border: const OutlineInputBorder(),
-                              ),
-                            ),
+                          TextButton.icon(
+                            onPressed: _isProcessing ? null : _addLine,
+                            icon: const Icon(Icons.add),
+                            label: const Text('إضافة بند'),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 24),
-                      Row(
-                        children: [
-                          Expanded(
-                            flex: 2,
-                            child: TextFormField(
-                              controller: _descController,
-                              maxLines: 2,
-                              decoration: const InputDecoration(
-                                labelText: 'البيان',
-                                border: OutlineInputBorder(),
-                              ),
-                              validator: (v) =>
-                                  v!.trim().isEmpty ? 'البيان مطلوب' : null,
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            flex: 1,
-                            child: DropdownButtonFormField<int>(
-                              value: _costCenterId,
-                              items: provider.costCenters
-                                  .map(
-                                    (c) => DropdownMenuItem<int>(
-                                      value: c['id'],
-                                      child: Text(c['name']),
+                      ..._lines.asMap().entries.map((entry) {
+                        final index = entry.key;
+                        final line = entry.value;
+                        final allowedTypes = isReceipt
+                            ? ['Asset', 'Liability', 'Equity', 'Revenue']
+                            : ['Asset', 'Liability', 'Equity', 'Expense'];
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      flex: 4,
+                                      child: DropdownButtonFormField<int>(
+                                        value: line.accountId,
+                                        items: provider.detailAccounts
+                                            .where(
+                                              (account) =>
+                                                  allowedTypes.contains(
+                                                    account['account_type'],
+                                                  ),
+                                            )
+                                            .map(
+                                              (
+                                                account,
+                                              ) => DropdownMenuItem<int>(
+                                                value: (account['id'] as num)
+                                                    .toInt(),
+                                                child: Text(
+                                                  '${account['code']} - ${account['name']}',
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                              ),
+                                            )
+                                            .toList(),
+                                        onChanged: (value) => setState(
+                                          () => line.accountId = value,
+                                        ),
+                                        decoration: InputDecoration(
+                                          labelText: isReceipt
+                                              ? 'الحساب المقابل الدائن'
+                                              : 'الحساب المقابل المدين',
+                                          border: const OutlineInputBorder(),
+                                        ),
+                                      ),
                                     ),
-                                  )
-                                  .toList(),
-                              onChanged: (val) =>
-                                  setState(() => _costCenterId = val),
-                              decoration: const InputDecoration(
-                                labelText: 'مركز التكلفة',
-                                border: OutlineInputBorder(),
-                              ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      flex: 2,
+                                      child: TextFormField(
+                                        controller: line.amountController,
+                                        keyboardType:
+                                            const TextInputType.numberWithOptions(
+                                              decimal: true,
+                                            ),
+                                        onChanged: (_) => setState(_syncAmount),
+                                        decoration: const InputDecoration(
+                                          labelText: 'مبلغ البند',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        validator: (value) {
+                                          final parsed = double.tryParse(
+                                            value ?? '',
+                                          );
+                                          return parsed == null ||
+                                                  !parsed.isFinite ||
+                                                  parsed <= 0
+                                              ? 'مبلغ موجب مطلوب'
+                                              : null;
+                                        },
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: 'حذف البند',
+                                      onPressed:
+                                          _isProcessing || _lines.length == 1
+                                          ? null
+                                          : () => _removeLine(index),
+                                      icon: const Icon(
+                                        Icons.delete_outline,
+                                        color: Colors.red,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: DropdownButtonFormField<int>(
+                                        value: line.costCenterId,
+                                        items: provider.costCenters
+                                            .map(
+                                              (center) => DropdownMenuItem<int>(
+                                                value: (center['id'] as num)
+                                                    .toInt(),
+                                                child: Text(
+                                                  center['name'].toString(),
+                                                ),
+                                              ),
+                                            )
+                                            .toList(),
+                                        onChanged: (value) => setState(
+                                          () => line.costCenterId = value,
+                                        ),
+                                        decoration: const InputDecoration(
+                                          labelText: 'مركز التكلفة (اختياري)',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      flex: 2,
+                                      child: TextFormField(
+                                        controller: line.descriptionController,
+                                        maxLines: 1,
+                                        decoration: const InputDecoration(
+                                          labelText: 'بيان هذا البند',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        validator: (value) =>
+                                            value?.trim().isEmpty ?? true
+                                            ? 'البيان مطلوب'
+                                            : null,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                           ),
-                        ],
+                        );
+                      }),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: _descController,
+                        maxLines: 2,
+                        decoration: const InputDecoration(
+                          labelText: 'بيان رأس السند (إجمالي)',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (value) => value?.trim().isEmpty ?? true
+                            ? 'البيان العام مطلوب'
+                            : null,
                       ),
                       const SizedBox(height: 32),
                       Row(
@@ -496,5 +659,17 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         );
       },
     );
+  }
+}
+
+class _GeneralVoucherLine {
+  int? accountId;
+  int? costCenterId;
+  final TextEditingController amountController = TextEditingController();
+  final TextEditingController descriptionController = TextEditingController();
+
+  void dispose() {
+    amountController.dispose();
+    descriptionController.dispose();
   }
 }

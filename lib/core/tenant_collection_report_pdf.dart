@@ -11,6 +11,7 @@ class TenantCollectionReportPdf {
     required TenantCollectionReport report,
     required Map<String, dynamic>? companyInfo,
     required String currency,
+    String? tenantName,
   }) async {
     final pdf = pw.Document();
     final theme = await PrintUtils.loadArabicTheme();
@@ -46,7 +47,9 @@ class TenantCollectionReportPdf {
         build: (_) => [
           pw.Center(
             child: pw.Text(
-              'تقرير تحصيل المستأجرين',
+              tenantName == null || tenantName.trim().isEmpty
+                  ? 'تقرير تحصيل المستأجرين'
+                  : 'كشف تحصيل المستأجر: ${tenantName.trim()}',
               textDirection: pw.TextDirection.rtl,
               textAlign: pw.TextAlign.center,
               style: pw.TextStyle(
@@ -57,6 +60,11 @@ class TenantCollectionReportPdf {
             ),
           ),
           pw.SizedBox(height: 8),
+          if (tenantName != null && tenantName.trim().isNotEmpty)
+            pw.Padding(
+              padding: const pw.EdgeInsets.only(bottom: 8),
+              child: PrintUtils.buildLabelValue('المستأجر', tenantName.trim()),
+            ),
           pw.Container(
             padding: const pw.EdgeInsets.all(9),
             decoration: pw.BoxDecoration(

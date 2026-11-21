@@ -186,6 +186,72 @@ void main() {
     },
   );
 
+  testWidgets('passes the selected tenant to the filtered report loader', (
+    tester,
+  ) async {
+    PermissionRuntime.activate(
+      userId: 44,
+      role: 'Accountant',
+      permissionRows: [
+        {
+          'screen_name': 'reports',
+          'can_view': 1,
+          'can_add': 0,
+          'can_edit': 0,
+          'can_delete': 0,
+          'can_print': 0,
+          'can_post': 0,
+        },
+      ],
+    );
+    int? requestedTenantId;
+    final reports = ReportsProvider(
+      tenantCollectionReportTenantsLoader: () async => [
+        {'id': 21, 'name': 'مستأجر تجريبي'},
+      ],
+      tenantCollectionReportFilteredLoader: (start, end, tenantId) async {
+        requestedTenantId = tenantId;
+        final unfiltered = report(start, end);
+        return TenantCollectionReport(
+          startDate: start,
+          endDate: end,
+          currency: unfiltered.currency,
+          tenantId: tenantId,
+          tenantName: 'مستأجر تجريبي',
+          rows: unfiltered.rows
+              .where((row) => row.tenantId == tenantId)
+              .toList(growable: false),
+        );
+      },
+    );
+    await tester.pumpWidget(
+      ChangeNotifierProvider<ReportsProvider>.value(
+        value: reports,
+        child: const MaterialApp(
+          home: Scaffold(body: TenantCollectionReportScreen()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(DropdownButtonFormField<int>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('مستأجر تجريبي').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('عرض التقرير'));
+    await tester.pumpAndSettle();
+
+    expect(requestedTenantId, 21);
+    expect(reports.tenantCollectionReport?.tenantId, 21);
+    expect(
+      reports.tenantCollectionReport?.rows.every((row) => row.tenantId == 21),
+      isTrue,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    reports.dispose();
+  });
+
   test('ignores stale report results after clear', () async {
     final completer = Completer<TenantCollectionReport>();
     final reports = ReportsProvider(

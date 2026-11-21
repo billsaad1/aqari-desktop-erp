@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:app/core/permission_policy.dart';
 import 'package:app/features/reports_inquiry/income_expense_report_screen.dart';
 import 'package:app/models/income_expense_report_model.dart';
 import 'package:app/providers/reports_provider.dart';
+import 'package:app/services/report_export_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -63,12 +65,21 @@ void main() {
             'can_add': 0,
             'can_edit': 0,
             'can_delete': 0,
-            'can_print': 0,
+            'can_print': 1,
             'can_post': 0,
           },
         ],
       );
       var loaderCalls = 0;
+      Uint8List? exportedCsv;
+      final exportService = ReportExportService(
+        pickSaveLocation:
+            ({required suggestedName, required extension}) async =>
+                '/tmp/income-expense-filter-test',
+        writeBytes: (path, bytes) async {
+          exportedCsv = bytes;
+        },
+      );
       final reports = ReportsProvider(
         incomeExpenseReportLoader: (startDate, endDate) async {
           loaderCalls++;
@@ -119,8 +130,12 @@ void main() {
       await tester.pumpWidget(
         ChangeNotifierProvider<ReportsProvider>.value(
           value: reports,
-          child: const MaterialApp(
-            home: Scaffold(body: IncomeExpenseReportScreen()),
+          child: MaterialApp(
+            home: Scaffold(
+              body: IncomeExpenseReportScreen(
+                reportExportService: exportService,
+              ),
+            ),
           ),
         ),
       );
@@ -165,6 +180,15 @@ void main() {
       expect(find.text('إيراد غير مخصص'), findsNothing);
       expect(loaderCalls, 1, reason: 'client-side filtering must not re-query');
       expect(reports.incomeExpenseReport?.netResultMinor, 6500);
+      await tester.tap(find.text('تصدير CSV'));
+      await tester.pumpAndSettle();
+      expect(exportedCsv, isNotNull);
+      final csv = utf8.decode(exportedCsv!);
+      expect(csv, contains('CC-A - مركز أ'));
+      expect(csv, contains('إيراد إيجار'));
+      expect(csv, isNot(contains('CC-B - مركز ب')));
+      expect(csv, isNot(contains('مصروف صيانة')));
+      expect(csv, isNot(contains('إيراد غير مخصص')));
 
       await tester.tap(
         find.byKey(const ValueKey('incomeExpenseCostCenterFilter')),

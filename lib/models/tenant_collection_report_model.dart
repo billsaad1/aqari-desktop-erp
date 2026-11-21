@@ -36,11 +36,15 @@ class TenantCollectionReport {
     required this.endDate,
     required this.currency,
     required List<TenantCollectionReportRow> rows,
+    this.tenantName,
+    this.tenantId,
   }) : rows = List.unmodifiable(rows);
 
   final String startDate;
   final String endDate;
   final String currency;
+  final String? tenantName;
+  final int? tenantId;
   final List<TenantCollectionReportRow> rows;
 
   int get grossReceiptsMinor => rows

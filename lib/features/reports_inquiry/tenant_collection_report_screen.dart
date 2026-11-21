@@ -28,6 +28,8 @@ class _TenantCollectionReportScreenState
   final _endDateController = TextEditingController(
     text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
   );
+  final List<Map<String, dynamic>> _tenantOptions = [];
+  int _selectedTenantFilter = -1;
 
   @override
   void initState() {
@@ -35,6 +37,25 @@ class _TenantCollectionReportScreenState
     PermissionRuntime.authorizationRevision.addListener(
       _onAuthorizationChanged,
     );
+    _loadTenantOptions();
+  }
+
+  Future<void> _loadTenantOptions() async {
+    if (!PermissionRuntime.allows('reports', AppPermissionAction.view)) return;
+    try {
+      final tenants = await Provider.of<ReportsProvider>(
+        context,
+        listen: false,
+      ).loadTenantCollectionReportTenants();
+      if (!mounted) return;
+      setState(() {
+        _tenantOptions
+          ..clear()
+          ..addAll(tenants);
+      });
+    } catch (_) {
+      // The date-based report remains available if the tenant list cannot load.
+    }
   }
 
   void _onAuthorizationChanged() {
@@ -44,6 +65,8 @@ class _TenantCollectionReportScreenState
         context,
         listen: false,
       ).clearTenantCollectionReport();
+    } else {
+      _loadTenantOptions();
     }
     setState(() {});
   }
@@ -92,7 +115,27 @@ class _TenantCollectionReportScreenState
     ).loadTenantCollectionReport(
       _startDateController.text,
       _endDateController.text,
+      tenantId: _selectedTenantFilter > 0 ? _selectedTenantFilter : null,
     );
+  }
+
+  void _onTenantFilterChanged(int? value) {
+    if (value == null) return;
+    setState(() => _selectedTenantFilter = value);
+    Provider.of<ReportsProvider>(
+      context,
+      listen: false,
+    ).clearTenantCollectionReport();
+  }
+
+  String? get _selectedTenantName {
+    if (_selectedTenantFilter <= 0) return null;
+    for (final tenant in _tenantOptions) {
+      if ((tenant['id'] as num?)?.toInt() == _selectedTenantFilter) {
+        return tenant['name']?.toString();
+      }
+    }
+    return null;
   }
 
   Future<void> _preview(TenantCollectionReport report) async {
@@ -105,6 +148,8 @@ class _TenantCollectionReportScreenState
           mounted &&
           _startDateController.text == report.startDate &&
           _endDateController.text == report.endDate &&
+          report.tenantId ==
+              (_selectedTenantFilter > 0 ? _selectedTenantFilter : null) &&
           identical(reports.tenantCollectionReport, report) &&
           PermissionRuntime.userId == authorizationUserId &&
           PermissionRuntime.role == authorizationRole &&
@@ -117,6 +162,7 @@ class _TenantCollectionReportScreenState
         report: report,
         companyInfo: companyInfo,
         currency: PrintUtils.currencyInArabic(report.currency),
+        tenantName: _selectedTenantName,
       );
       if (!canContinue()) return;
       if (!mounted) return;
@@ -152,7 +198,9 @@ class _TenantCollectionReportScreenState
         final isCurrentReport =
             report != null &&
             report.startDate == _startDateController.text &&
-            report.endDate == _endDateController.text;
+            report.endDate == _endDateController.text &&
+            report.tenantId ==
+                (_selectedTenantFilter > 0 ? _selectedTenantFilter : null);
 
         return Padding(
           padding: const EdgeInsets.all(20),
@@ -187,6 +235,35 @@ class _TenantCollectionReportScreenState
                         children: [
                           _dateField('من تاريخ', _startDateController),
                           _dateField('إلى تاريخ', _endDateController),
+                          SizedBox(
+                            width: 260,
+                            child: DropdownButtonFormField<int>(
+                              isExpanded: true,
+                              initialValue: _selectedTenantFilter,
+                              items: [
+                                const DropdownMenuItem<int>(
+                                  value: -1,
+                                  child: Text('جميع المستأجرين'),
+                                ),
+                                ..._tenantOptions.map((tenant) {
+                                  final id = (tenant['id'] as num).toInt();
+                                  return DropdownMenuItem<int>(
+                                    value: id,
+                                    child: Text(
+                                      tenant['name']?.toString() ?? 'غير معروف',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  );
+                                }),
+                              ],
+                              onChanged: _onTenantFilterChanged,
+                              decoration: const InputDecoration(
+                                labelText: 'المستأجر',
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                              ),
+                            ),
+                          ),
                           FilledButton.icon(
                             onPressed: reports.isTenantCollectionReportLoading
                                 ? null

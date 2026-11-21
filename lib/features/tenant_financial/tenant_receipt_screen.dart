@@ -25,6 +25,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   int? _selectedTenantId;
   int? _selectedCashAccountId;
   int? _selectedInvoiceId;
+  int? _selectedInstallmentId;
   bool _isInvoicePaymentMode = false;
 
   List<Map<String, dynamic>> _unpaidInstallments = [];
@@ -40,6 +41,16 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
     for (final invoice in _openTaxInvoices) {
       final id = invoice['id'];
       if (id is num && id.toInt() == _selectedInvoiceId) return invoice;
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? get _selectedInstallment {
+    for (final installment in _unpaidInstallments) {
+      final id = installment['id'];
+      if (id is num && id.toInt() == _selectedInstallmentId) {
+        return installment;
+      }
     }
     return null;
   }
@@ -73,6 +84,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _selectedInvoiceId = null;
+      _selectedInstallmentId = null;
       _amountController.clear();
       if (tenantId == null) {
         _legacyPayments = [];
@@ -115,17 +127,6 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           _openTaxInvoices = receivables;
         } else {
           _unpaidInstallments = receivables;
-          if (_unpaidInstallments.isNotEmpty) {
-            final first = _unpaidInstallments.first;
-            final totalCents = ((first['amount'] as num).toDouble() * 100)
-                .round();
-            final paidCents =
-                (((first['paid_amount'] as num?) ?? 0).toDouble() * 100)
-                    .round();
-            _amountController.text = _amountInput(
-              ((totalCents - paidCents).clamp(0, totalCents)) / 100,
-            );
-          }
         }
         _isLoadingReceivables = false;
       });
@@ -157,6 +158,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
     setState(() {
       _selectedTenantId = tenantId;
       _selectedInvoiceId = null;
+      _selectedInstallmentId = null;
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _amountController.clear();
@@ -172,6 +174,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
     setState(() {
       _isInvoicePaymentMode = invoiceMode;
       _selectedInvoiceId = null;
+      _selectedInstallmentId = null;
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _amountController.clear();
@@ -186,6 +189,20 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _amountController.text = invoice == null
           ? ''
           : _amountInput(invoice['remaining_amount']);
+    });
+  }
+
+  void _onInstallmentChanged(int? installmentId) {
+    setState(() {
+      _selectedInstallmentId = installmentId;
+      final installment = _selectedInstallment;
+      if (installment == null) {
+        _amountController.clear();
+      } else {
+        final total = (installment['amount'] as num).toDouble();
+        final paid = ((installment['paid_amount'] as num?) ?? 0).toDouble();
+        _amountController.text = _amountInput((total - paid).clamp(0, total));
+      }
     });
   }
 
@@ -222,6 +239,13 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       );
       return;
     }
+    final installment = _isInvoicePaymentMode ? null : _selectedInstallment;
+    if (!_isInvoicePaymentMode && installment == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اختر القسط المراد تحصيله أولاً')),
+      );
+      return;
+    }
 
     final amount = double.tryParse(_amountController.text) ?? 0.0;
     if (!amount.isFinite || amount <= 0) {
@@ -251,6 +275,22 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         );
         return;
       }
+    } else if (installment != null) {
+      final totalCents = ((installment['amount'] as num).toDouble() * 100)
+          .round();
+      final paidCents =
+          (((installment['paid_amount'] as num?) ?? 0).toDouble() * 100)
+              .round();
+      if (amountCents > totalCents - paidCents) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'المبلغ يتجاوز المتبقي على الدفعة (${_displayAmount((totalCents - paidCents) / 100)})',
+            ),
+          ),
+        );
+        return;
+      }
     }
 
     final receiptTenantId = _selectedTenantId!;
@@ -258,41 +298,18 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
     final receiptDate = _dateController.text;
     final invoiceId = invoice == null ? null : (invoice['id'] as num).toInt();
     final invoiceMode = _isInvoicePaymentMode;
-    final dueInstallments = List<Map<String, dynamic>>.from(_unpaidInstallments)
-      ..sort(
-        (a, b) => a['due_date'].toString().compareTo(b['due_date'].toString()),
-      );
-    var remainingCents = amountCents;
     final updates = <Map<String, dynamic>>[];
     if (!invoiceMode) {
-      for (final installment in dueInstallments) {
-        if (remainingCents <= 0) break;
-        final totalCents = ((installment['amount'] as num).toDouble() * 100)
-            .round();
-        final paidCents =
-            (((installment['paid_amount'] as num?) ?? 0).toDouble() * 100)
-                .round();
-        final dueCents = totalCents - paidCents;
-        if (dueCents <= 0) continue;
-        final allocationCents = remainingCents < dueCents
-            ? remainingCents
-            : dueCents;
-        final newPaidCents = paidCents + allocationCents;
-        updates.add({
-          'id': installment['id'],
-          'paid_amount': newPaidCents / 100,
-          'status': newPaidCents >= totalCents ? 'Paid' : 'Partially Paid',
-        });
-        remainingCents -= allocationCents;
-      }
-      if (remainingCents > 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('المبلغ أكبر من إجمالي الأقساط المتبقية'),
-          ),
-        );
-        return;
-      }
+      final selected = installment!;
+      final totalMinor = ((selected['amount'] as num).toDouble() * 100).round();
+      final oldPaidMinor =
+          (((selected['paid_amount'] as num?) ?? 0).toDouble() * 100).round();
+      final newPaidMinor = oldPaidMinor + amountCents;
+      updates.add({
+        'id': selected['id'],
+        'paid_amount': newPaidMinor / 100,
+        'status': newPaidMinor >= totalMinor ? 'Paid' : 'Partially Paid',
+      });
     }
 
     final leasingProvider = Provider.of<LeasingProvider>(
@@ -351,22 +368,19 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       final accountName = accountingProvider.accounts
           .firstWhere((a) => a['id'] == cashAccountId)['name']
           .toString();
-      final voucherDetails = invoiceMode
-          ? await DatabaseHelper.instance.getTenantReceiptVoucherDetails(
-              voucherId,
-            )
-          : null;
-      if (invoiceMode && voucherDetails == null) {
+      final voucherDetails = await DatabaseHelper.instance
+          .getTenantReceiptVoucherDetails(voucherId);
+      if (voucherDetails == null) {
         throw StateError('تعذر تحميل تخصيصات سند الفاتورة');
       }
-      final installmentAllocations = voucherDetails?['installments'] is List
-          ? (voucherDetails!['installments'] as List)
+      final installmentAllocations = voucherDetails['installments'] is List
+          ? (voucherDetails['installments'] as List)
                 .whereType<Map>()
                 .map((item) => Map<String, dynamic>.from(item))
                 .toList()
           : <Map<String, dynamic>>[];
-      final invoiceAllocations = voucherDetails?['invoices'] is List
-          ? (voucherDetails!['invoices'] as List)
+      final invoiceAllocations = voucherDetails['invoices'] is List
+          ? (voucherDetails['invoices'] as List)
                 .whereType<Map>()
                 .map((item) => Map<String, dynamic>.from(item))
                 .toList()
@@ -381,7 +395,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         accountName: accountName,
         description: invoiceMode
             ? 'سداد فاتورة داخلية رقم $invoiceId'
-            : 'تحصيل دفعة إيجار',
+            : 'تحصيل الدفعة رقم ${installment?['installment_number'] ?? '—'}',
         installmentAllocations: installmentAllocations,
         invoiceAllocations: invoiceAllocations,
       );
@@ -542,6 +556,43 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                             border: OutlineInputBorder(),
                           ),
                         ),
+                      ],
+                      if (!_isInvoicePaymentMode) ...[
+                        const SizedBox(height: 16),
+                        DropdownButtonFormField<int>(
+                          initialValue: _selectedInstallmentId,
+                          items: _unpaidInstallments.map((installment) {
+                            final id = (installment['id'] as num).toInt();
+                            final total = (installment['amount'] as num)
+                                .toDouble();
+                            final paid =
+                                ((installment['paid_amount'] as num?) ?? 0)
+                                    .toDouble();
+                            return DropdownMenuItem<int>(
+                              value: id,
+                              child: Text(
+                                'الدفعة ${installment['installment_number'] ?? '—'} | ${installment['property_name'] ?? 'العقار'} - ${installment['unit_number'] ?? 'الوحدة'} | ${installment['due_date']} | المتبقي ${_displayAmount(total - paid)}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: _isProcessing || _isLoadingReceivables
+                              ? null
+                              : _onInstallmentChanged,
+                          validator: (value) =>
+                              value == null ? 'اختر الدفعة' : null,
+                          decoration: const InputDecoration(
+                            labelText: 'الدفعة المراد تحصيلها',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        if (_selectedInstallment != null) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'الدفعة ${_selectedInstallment!['installment_number'] ?? '—'} — المبلغ: ${_displayAmount(_selectedInstallment!['amount'])} — الاستحقاق: ${_selectedInstallment!['due_date']}',
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ],
                       ],
                       const SizedBox(height: 16),
                       DropdownButtonFormField<int>(
@@ -776,14 +827,26 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                                               0)
                                           .toDouble();
                                   final remaining = total - paid;
+                                  final isSelected =
+                                      (installment['id'] as num).toInt() ==
+                                      _selectedInstallmentId;
                                   return Card(
+                                    color: isSelected
+                                        ? Colors.green.withValues(alpha: 0.08)
+                                        : null,
                                     child: ListTile(
+                                      onTap: _isProcessing
+                                          ? null
+                                          : () => _onInstallmentChanged(
+                                              (installment['id'] as num)
+                                                  .toInt(),
+                                            ),
                                       leading: const Icon(
                                         Icons.warning,
                                         color: Colors.orange,
                                       ),
                                       title: Text(
-                                        'تاريخ الاستحقاق: ${installment['due_date']}',
+                                        'الدفعة ${installment['installment_number'] ?? '—'} | ${installment['property_name'] ?? 'العقار'} - ${installment['unit_number'] ?? 'الوحدة'} | الاستحقاق: ${installment['due_date']}',
                                       ),
                                       subtitle: Text(
                                         'الحالة: ${installment['status']} | المدفوع سابقاً: ${_displayAmount(paid)}',

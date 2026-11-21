@@ -59,6 +59,14 @@ class ReportsProvider with ChangeNotifier {
     invoiceLedgerReconciliationLoader,
     Future<TenantCollectionReport> Function(String startDate, String endDate)?
     tenantCollectionReportLoader,
+    Future<TenantCollectionReport> Function(
+      String startDate,
+      String endDate,
+      int? tenantId,
+    )?
+    tenantCollectionReportFilteredLoader,
+    Future<List<Map<String, dynamic>>> Function()?
+    tenantCollectionReportTenantsLoader,
     Future<TenantAgingReport> Function(String asOfDate)?
     tenantAgingReportLoader,
     Future<List<Map<String, dynamic>>> Function()?
@@ -82,6 +90,10 @@ class ReportsProvider with ChangeNotifier {
        _incomeExpenseReportLoader = incomeExpenseReportLoader,
        _invoiceLedgerReconciliationLoader = invoiceLedgerReconciliationLoader,
        _tenantCollectionReportLoader = tenantCollectionReportLoader,
+       _tenantCollectionReportFilteredLoader =
+           tenantCollectionReportFilteredLoader,
+       _tenantCollectionReportTenantsLoader =
+           tenantCollectionReportTenantsLoader,
        _tenantAgingReportLoader = tenantAgingReportLoader,
        _propertyStatementPropertiesLoader = propertyStatementPropertiesLoader,
        _propertyStatementLoader = propertyStatementLoader;
@@ -143,6 +155,14 @@ class ReportsProvider with ChangeNotifier {
     String endDate,
   )?
   _tenantCollectionReportLoader;
+  final Future<TenantCollectionReport> Function(
+    String startDate,
+    String endDate,
+    int? tenantId,
+  )?
+  _tenantCollectionReportFilteredLoader;
+  final Future<List<Map<String, dynamic>>> Function()?
+  _tenantCollectionReportTenantsLoader;
   final Future<TenantAgingReport> Function(String asOfDate)?
   _tenantAgingReportLoader;
 
@@ -1067,10 +1087,17 @@ class ReportsProvider with ChangeNotifier {
     if (notify) notifyListeners();
   }
 
+  Future<List<Map<String, dynamic>>> loadTenantCollectionReportTenants() async {
+    final loader = _tenantCollectionReportTenantsLoader;
+    if (loader != null) return loader();
+    return DatabaseHelper.instance.getTenantCollectionReportTenants();
+  }
+
   Future<void> loadTenantCollectionReport(
     String startDate,
-    String endDate,
-  ) async {
+    String endDate, {
+    int? tenantId,
+  }) async {
     final generation = ++_tenantCollectionGeneration;
     _tenantCollectionReport = null;
     _tenantCollectionErrorMessage = null;
@@ -1078,13 +1105,29 @@ class ReportsProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      final loader = _tenantCollectionReportLoader;
-      final report = loader == null
-          ? await DatabaseHelper.instance.getTenantCollectionReport(
+      final filteredLoader = _tenantCollectionReportFilteredLoader;
+      final legacyLoader = _tenantCollectionReportLoader;
+      final loaded = filteredLoader != null
+          ? await filteredLoader(startDate, endDate, tenantId)
+          : legacyLoader != null
+          ? await legacyLoader(startDate, endDate)
+          : await DatabaseHelper.instance.getTenantCollectionReport(
               startDate: startDate,
               endDate: endDate,
-            )
-          : await loader(startDate, endDate);
+              tenantId: tenantId,
+            );
+      final report = tenantId == null || filteredLoader != null
+          ? loaded
+          : TenantCollectionReport(
+              startDate: loaded.startDate,
+              endDate: loaded.endDate,
+              currency: loaded.currency,
+              tenantId: tenantId,
+              tenantName: loaded.tenantName,
+              rows: loaded.rows
+                  .where((row) => row.tenantId == tenantId)
+                  .toList(growable: false),
+            );
       if (generation == _tenantCollectionGeneration) {
         _tenantCollectionReport = report;
         _tenantCollectionErrorMessage = null;

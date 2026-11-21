@@ -965,7 +965,9 @@ class _ContractsScreenState extends State<ContractsScreen> {
                           final renewedFromContractId =
                               contract['renewed_from_contract_id'];
                           final statusLabel = renewedToContractId == null
-                              ? '${contract['status']}'
+                              ? contract['status'] == 'Terminated'
+                                    ? 'منتهٍ مبكرًا بتاريخ ${contract['early_termination_date'] ?? '—'}'
+                                    : '${contract['status']}'
                               : 'مجدّد إلى العقد $renewedToContractId';
                           return Card(
                             child: InkWell(
@@ -1033,6 +1035,25 @@ class _ContractsScreenState extends State<ContractsScreen> {
                                               AppPermissionAction.add,
                                             )
                                             ? () => _beginRenewal(contract)
+                                            : null,
+                                      ),
+                                    if (contract['status'] == 'Active' &&
+                                        renewedToContractId == null)
+                                      IconButton(
+                                        icon: const Icon(
+                                          Icons.meeting_room_outlined,
+                                          color: Colors.orange,
+                                        ),
+                                        tooltip:
+                                            'إنهاء العقد مبكرًا وإتاحة الوحدة',
+                                        onPressed:
+                                            PermissionRuntime.allows(
+                                              'leasing',
+                                              AppPermissionAction.edit,
+                                            )
+                                            ? () => _terminateContractEarly(
+                                                (contract['id'] as num).toInt(),
+                                              )
                                             : null,
                                       ),
                                     if (contract['status'] == 'Active' &&
@@ -1112,6 +1133,17 @@ class _ContractsScreenState extends State<ContractsScreen> {
                   ),
                 Text('طريقة الدفع: ${contract['payment_method']}'),
                 Text('الإجمالي: ${contract['rent_amount']} ريال'),
+                if (contract['status'] == 'Terminated') ...[
+                  Text(
+                    'تاريخ سريان الإنهاء المبكر: ${contract['early_termination_date'] ?? '—'}',
+                  ),
+                  Text(
+                    'سبب الإنهاء: ${contract['early_termination_reason']?.toString().trim().isNotEmpty == true ? contract['early_termination_reason'] : 'غير موثق'}',
+                  ),
+                  const Text(
+                    'السجل المالي محفوظ؛ راجع الفواتير والأرصدة السابقة دون تسوية تلقائية.',
+                  ),
+                ],
                 if (contract['status'] == 'Cancelled') ...[
                   Text(
                     'سبب الإلغاء: ${contract['cancellation_reason']?.toString().trim().isNotEmpty == true ? contract['cancellation_reason'] : 'غير موثق في النظام'}',
@@ -1458,6 +1490,140 @@ class _ContractsScreenState extends State<ContractsScreen> {
               TextButton(
                 onPressed: () => Navigator.pop(context),
                 child: const Text('حسناً'),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _terminateContractEarly(int contractId) async {
+    final leasingProvider = Provider.of<LeasingProvider>(
+      context,
+      listen: false,
+    );
+    final today = DateTime.now();
+    final dateController = TextEditingController(
+      text: DateFormat('yyyy-MM-dd').format(today),
+    );
+    final reasonController = TextEditingController();
+    var showDateError = false;
+    var showReasonError = false;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('إنهاء العقد مبكرًا'),
+          content: SizedBox(
+            width: 460,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'سيُحفظ العقد وسجل الأقساط والتحصيلات. ستُوقف الأقساط المستقبلية غير المفوترة التي ليس لها حركة، بينما تبقى الفواتير والدفعات السابقة كما هي. لا ينشئ النظام استردادًا أو إشعارًا دائنًا أو قيدًا تلقائيًا.',
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: dateController,
+                  readOnly: true,
+                  decoration: InputDecoration(
+                    labelText: 'تاريخ سريان الإنهاء',
+                    errorText: showDateError ? 'تاريخ السريان مطلوب' : null,
+                    suffixIcon: const Icon(Icons.calendar_month),
+                    border: const OutlineInputBorder(),
+                  ),
+                  onTap: () async {
+                    final current =
+                        DateTime.tryParse(dateController.text) ?? today;
+                    final chosen = await showDatePicker(
+                      context: dialogContext,
+                      initialDate: current.isAfter(today) ? today : current,
+                      firstDate: DateTime(2000),
+                      lastDate: today,
+                    );
+                    if (chosen != null) {
+                      dateController.text = DateFormat(
+                        'yyyy-MM-dd',
+                      ).format(chosen);
+                      setDialogState(() => showDateError = false);
+                    }
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: reasonController,
+                  maxLines: 3,
+                  maxLength: 500,
+                  decoration: InputDecoration(
+                    labelText: 'سبب الإنهاء (مطلوب)',
+                    errorText: showReasonError ? 'سبب الإنهاء مطلوب' : null,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onChanged: (_) {
+                    if (showReasonError) {
+                      setDialogState(() => showReasonError = false);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('تراجع'),
+            ),
+            FilledButton.icon(
+              onPressed: () {
+                final date = DateTime.tryParse(dateController.text);
+                final reason = reasonController.text.trim();
+                setDialogState(() {
+                  showDateError = date == null || date.isAfter(today);
+                  showReasonError = reason.isEmpty;
+                });
+                if (showDateError || showReasonError) return;
+                Navigator.pop(dialogContext, true);
+              },
+              icon: const Icon(Icons.meeting_room_outlined),
+              label: const Text('إنهاء العقد وإتاحة الوحدة'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final effectiveDate = dateController.text;
+    final reason = reasonController.text.trim();
+    dateController.dispose();
+    reasonController.dispose();
+    if (!mounted || confirmed != true) return;
+
+    try {
+      await leasingProvider.terminateContractEarly(
+        contractId,
+        effectiveDate: effectiveDate,
+        reason: reason,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'تم إنهاء العقد؛ حُفظت الحركات والفواتير السابقة ولم تُنشأ تسوية مالية تلقائية',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('تعذر إنهاء العقد'),
+            content: Text(error.toString()),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('حسنًا'),
               ),
             ],
           ),

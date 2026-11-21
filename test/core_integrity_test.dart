@@ -99,6 +99,17 @@ void main() {
         isFalse,
       );
     });
+
+    test('numeric PIN policy accepts only four or five digits', () {
+      expect(CryptoUtils.isValidNumericPin('1234'), isTrue);
+      expect(CryptoUtils.isValidNumericPin('12345'), isTrue);
+      expect(CryptoUtils.isValidNumericPin('١٢٣٤'), isTrue);
+      expect(CryptoUtils.isValidNumericPin('۱۲۳۴۵'), isTrue);
+      expect(CryptoUtils.isValidNumericPin('123'), isFalse);
+      expect(CryptoUtils.isValidNumericPin('123456'), isFalse);
+      expect(CryptoUtils.isValidNumericPin('12ab'), isFalse);
+      expect(CryptoUtils.isValidNumericPin('1234 '), isFalse);
+    });
   });
 
   group('internal tax calculation', () {
@@ -1599,7 +1610,7 @@ void main() {
             0,
           );
           expect(await auth.login(username, password), isFalse);
-          expect(auth.errorMessage, contains('الحساب موقوف'));
+          expect(auth.errorMessage, contains('تعذر تسجيل الدخول'));
           expect(PermissionRuntime.hasSession, isFalse);
 
           PermissionRuntime.activate(
@@ -1627,6 +1638,137 @@ void main() {
           );
           await DatabaseHelper.instance.deleteUser(userId);
           auth.dispose();
+        }
+      },
+    );
+
+    test(
+      'five failed passwords lock an account and successful login clears the lock',
+      () async {
+        final username = 'lockout_${DateTime.now().microsecondsSinceEpoch}';
+        const password = 'Test-password-1234';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'مستخدم اختبار القفل',
+          'password_hash': CryptoUtils.hashPassword(password),
+          'role': 'DataEntry',
+        });
+        final auth = AuthProvider();
+        try {
+          for (var attempt = 0; attempt < 5; attempt++) {
+            expect(await auth.login(username, 'Wrong-password-1234'), isFalse);
+          }
+          final db = await DatabaseHelper.instance.database;
+          var state = (await db.query(
+            'users',
+            columns: ['login_failed_attempts', 'login_locked_until_ms'],
+            where: 'id = ?',
+            whereArgs: [userId],
+            limit: 1,
+          )).single;
+          expect(state['login_failed_attempts'], 5);
+          expect(
+            (state['login_locked_until_ms'] as num).toInt(),
+            greaterThan(DateTime.now().toUtc().millisecondsSinceEpoch),
+          );
+          expect(await auth.login(username, password), isFalse);
+
+          await db.update(
+            'users',
+            {
+              'login_locked_until_ms':
+                  DateTime.now().toUtc().millisecondsSinceEpoch - 1,
+            },
+            where: 'id = ?',
+            whereArgs: [userId],
+          );
+          expect(await auth.login(username, password), isTrue);
+          state = (await db.query(
+            'users',
+            columns: ['login_failed_attempts', 'login_locked_until_ms'],
+            where: 'id = ?',
+            whereArgs: [userId],
+            limit: 1,
+          )).single;
+          expect(state['login_failed_attempts'], 0);
+          expect(state['login_locked_until_ms'], isNull);
+        } finally {
+          await auth.logout();
+          auth.dispose();
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          await DatabaseHelper.instance.deleteUser(userId);
+        }
+      },
+    );
+
+    test(
+      'password changes accept only four- or five-digit numeric PINs',
+      () async {
+        final username = 'pin_change_${DateTime.now().microsecondsSinceEpoch}';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'مستخدم تغيير الرقم السري',
+          'password_hash': CryptoUtils.hashPassword('1234'),
+          'role': 'DataEntry',
+        });
+        final auth = AuthProvider();
+        try {
+          expect(await auth.login(username, '1234'), isTrue);
+          await expectLater(
+            auth.changePassword('abc123'),
+            throwsA(isA<ArgumentError>()),
+          );
+          await expectLater(
+            auth.changePassword('123456'),
+            throwsA(isA<ArgumentError>()),
+          );
+          final db = await DatabaseHelper.instance.database;
+          await db.update(
+            'users',
+            {
+              'login_failed_attempts': 4,
+              'login_locked_until_ms':
+                  DateTime.now().toUtc().millisecondsSinceEpoch + 60000,
+            },
+            where: 'id = ?',
+            whereArgs: [userId],
+          );
+          await auth.changePassword('56789');
+          final user = (await db.query(
+            'users',
+            columns: [
+              'password_hash',
+              'must_change_password',
+              'login_failed_attempts',
+              'login_locked_until_ms',
+            ],
+            where: 'id = ?',
+            whereArgs: [userId],
+            limit: 1,
+          )).single;
+          expect(
+            CryptoUtils.verifyPassword(
+              '56789',
+              user['password_hash'] as String,
+            ),
+            isTrue,
+          );
+          expect(user['must_change_password'], 0);
+          expect(user['login_failed_attempts'], 0);
+          expect(user['login_locked_until_ms'], isNull);
+        } finally {
+          await auth.logout();
+          auth.dispose();
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          await DatabaseHelper.instance.deleteUser(userId);
         }
       },
     );
@@ -3578,6 +3720,9 @@ void main() {
               .whereType<Map>()
               .map((row) => Map<String, dynamic>.from(row))
               .toList();
+      expect(receiptInstallments.single['installment_number'], 3);
+      expect(receiptInstallments.single['property_name'], 'عقار الاختبار');
+      expect(receiptInstallments.single['unit_number'], 'T-01');
       final receiptInvoices = partialInvoiceLinks
           .map((row) => Map<String, dynamic>.from(row))
           .toList();
@@ -4181,7 +4326,25 @@ void main() {
     'factory reset creates a verified rollback copy before reseeding',
     () async {
       final helper = DatabaseHelper.instance;
+      const factoryResetPassword = 'Factory-reset-test-2026';
+      PermissionRuntime.activate(
+        userId: 1,
+        role: 'SuperAdmin',
+        permissionRows: const [],
+      );
       final liveDb = await helper.database;
+      await liveDb.update(
+        'users',
+        {
+          'password_hash': CryptoUtils.hashPassword(factoryResetPassword),
+          'role': 'SuperAdmin',
+          'is_active': 1,
+          'login_failed_attempts': 0,
+          'login_locked_until_ms': null,
+        },
+        where: 'id = ?',
+        whereArgs: [1],
+      );
       await liveDb.delete('sms_settings');
       smsCredentialStore.values.clear();
       await liveDb.insert('sms_settings', {
@@ -4199,7 +4362,38 @@ void main() {
           (await liveDb.query('sms_settings')).single['api_key_secret_id']
               as String;
 
-      final rollbackPath = await DatabaseHelper.instance.factoryReset();
+      for (var attempt = 0; attempt < 5; attempt++) {
+        await expectLater(
+          helper.factoryReset(currentPassword: 'incorrect-reset-password'),
+          throwsA(isA<StateError>()),
+        );
+      }
+      expect(await (await helper.database).query('sms_settings'), hasLength(1));
+      final lockedAdmin = (await liveDb.query(
+        'users',
+        columns: ['login_failed_attempts', 'login_locked_until_ms'],
+        where: 'id = ?',
+        whereArgs: [1],
+        limit: 1,
+      )).single;
+      expect(lockedAdmin['login_failed_attempts'], 5);
+      expect(lockedAdmin['login_locked_until_ms'], isNotNull);
+      await expectLater(
+        helper.factoryReset(currentPassword: factoryResetPassword),
+        throwsA(isA<StateError>()),
+      );
+      await liveDb.update(
+        'users',
+        {
+          'login_locked_until_ms':
+              DateTime.now().toUtc().millisecondsSinceEpoch - 1,
+        },
+        where: 'id = ?',
+        whereArgs: [1],
+      );
+      final rollbackPath = await helper.factoryReset(
+        currentPassword: factoryResetPassword,
+      );
       final rollback = File(rollbackPath);
       expect(await rollback.exists(), isTrue);
       expect(await rollback.length(), greaterThan(100));

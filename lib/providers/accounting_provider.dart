@@ -109,4 +109,21 @@ class AccountingProvider with ChangeNotifier {
     await loadAccounts(); // Refresh balances
     return voucherId;
   }
+
+  Future<int> saveGeneralVoucherWithLines(
+    Map<String, dynamic> voucher,
+    int cashAccountId,
+    List<Map<String, dynamic>> counterpartLines,
+    String voucherType,
+  ) async {
+    final voucherId = await DatabaseHelper.instance
+        .insertGeneralVoucherWithLines(
+          voucher,
+          cashAccountId,
+          counterpartLines,
+          voucherType,
+        );
+    await loadAccounts();
+    return voucherId;
+  }
 }
