@@ -6,11 +6,15 @@ import 'package:app/features/tenant_financial/credit_note_screen.dart';
 import 'package:app/providers/accounting_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:provider/provider.dart';
 
-const _testDocuments = '/tmp/aqari_credit_note_widget_test';
-const _testSupport = '/tmp/aqari_credit_note_widget_test_support';
+final _testRoot = Directory.systemTemp.createTempSync(
+  'aqari_credit_note_widget_test_',
+);
+final _testDocuments = p.join(_testRoot.path, 'Documents');
+final _testSupport = p.join(_testRoot.path, 'Support');
 
 class _TestPathProvider extends PathProviderPlatform {
   @override
@@ -57,6 +61,7 @@ void main() {
 
   tearDownAll(() async {
     PathProviderPlatform.instance = originalPathProvider;
+    if (await _testRoot.exists()) await _testRoot.delete(recursive: true);
   });
 
   Future<int> accountId(dynamic db, String code) async =>
