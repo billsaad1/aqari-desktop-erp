@@ -35,6 +35,7 @@ import 'package:image/image.dart' as img;
 import 'package:provider/provider.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
 import 'support/fake_sms_credential_store.dart';
 
 void main() {
@@ -2220,6 +2221,7 @@ void main() {
           {
             'property_name': 'عقار الاختبار',
             'unit_number': '1',
+            'installment_number': 2,
             'due_date': '2026-11-10',
             'installment_amount': 1250.5,
             'allocated_amount': 1250.5,
@@ -3267,6 +3269,7 @@ void main() {
             amount: 150.0,
             voucherDate: '2026-11-10',
             cashAccountId: cashAccountId,
+            description: 'تحصيل حسب اتفاق الإيجار',
             installmentsToUpdate: [
               {
                 'id': storedInstallments[0]['id'],
@@ -3290,7 +3293,11 @@ void main() {
         receiptId,
       );
       expect(receiptDetails, isNotNull);
-      expect((receiptDetails!['journal_lines'] as List).length, 2);
+      expect(
+        (receiptDetails!['voucher'] as Map)['description'],
+        'تحصيل حسب اتفاق الإيجار',
+      );
+      expect((receiptDetails['journal_lines'] as List).length, 2);
       final paidInstallments = receiptDetails['installments'] as List;
       expect(paidInstallments.length, 2);
       expect(
@@ -3702,11 +3709,16 @@ void main() {
             cashAccountId: cashAccountId,
             installmentsToUpdate: const [],
             invoiceId: invoiceId,
+            description: '',
           );
       final partialInvoiceReceiptDetails = await DatabaseHelper.instance
           .getVoucherDetails(partialInvoiceReceiptId);
+      expect(
+        (partialInvoiceReceiptDetails!['voucher'] as Map)['description'],
+        '',
+      );
       final partialInvoiceLinks =
-          partialInvoiceReceiptDetails!['invoices']
+          partialInvoiceReceiptDetails['invoices']
               as List<Map<String, Object?>>;
       expect(partialInvoiceLinks.single['invoice_id'], invoiceId);
       expect(partialInvoiceLinks.single['allocated_amount'], 50.0);

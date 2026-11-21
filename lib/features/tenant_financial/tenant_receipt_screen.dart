@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+
 import '../../providers/leasing_provider.dart';
 import '../../providers/accounting_provider.dart';
 import '../../database/database_helper.dart';
@@ -18,6 +19,7 @@ class TenantReceiptScreen extends StatefulWidget {
 class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   final _formKey = GlobalKey<FormState>();
   final _amountController = TextEditingController();
+  final _descriptionController = TextEditingController();
   final _dateController = TextEditingController(
     text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
   );
@@ -162,6 +164,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _amountController.clear();
+      _descriptionController.clear();
       _legacyPayments = [];
       _legacyInvoices = [];
       _legacyPaymentsError = null;
@@ -178,6 +181,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _amountController.clear();
+      _descriptionController.clear();
     });
     _loadTenantReceivables(_selectedTenantId);
   }
@@ -331,6 +335,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           cashAccountId: cashAccountId,
           installmentsToUpdate: const [],
           invoiceId: invoiceId!,
+          description: _descriptionController.text.trim(),
         );
       } else {
         voucherId = await DatabaseHelper.instance.insertTenantReceiptVoucher(
@@ -339,6 +344,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           voucherDate: receiptDate,
           cashAccountId: cashAccountId,
           installmentsToUpdate: updates,
+          description: _descriptionController.text.trim(),
         );
       }
     } catch (e) {
@@ -393,9 +399,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         amount: amountCents / 100,
         paymentMethod: null,
         accountName: accountName,
-        description: invoiceMode
-            ? 'سداد فاتورة داخلية رقم $invoiceId'
-            : 'تحصيل الدفعة رقم ${installment?['installment_number'] ?? '—'}',
+        description: _descriptionController.text.trim(),
         installmentAllocations: installmentAllocations,
         invoiceAllocations: invoiceAllocations,
       );
@@ -436,6 +440,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
     }
     if (mounted) {
       _amountController.clear();
+      _descriptionController.clear();
       setState(() => _isProcessing = false);
     }
   }
@@ -443,6 +448,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   @override
   void dispose() {
     _amountController.dispose();
+    _descriptionController.dispose();
     _dateController.dispose();
     super.dispose();
   }
@@ -661,6 +667,19 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                           }
                           return null;
                         },
+                      ),
+                      const SizedBox(height: 16),
+                      TextFormField(
+                        controller: _descriptionController,
+                        enabled: !_isProcessing,
+                        minLines: 1,
+                        maxLines: 2,
+                        maxLength: 240,
+                        decoration: const InputDecoration(
+                          labelText: 'البيان (اختياري)',
+                          hintText: 'اكتب بيان السند يدويًا إن رغبت',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
                       const SizedBox(height: 24),
                       Row(
