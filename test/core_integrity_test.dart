@@ -57,6 +57,9 @@ void main() {
     await testDirectory.create(recursive: true);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pathProvider, (call) async {
+          if (call.method == 'getApplicationSupportDirectory') {
+            return testDocuments;
+          }
           if (call.method == 'getApplicationDocumentsDirectory') {
             return testDocuments;
           }

@@ -10,10 +10,14 @@ import 'package:path_provider_platform_interface/path_provider_platform_interfac
 import 'package:provider/provider.dart';
 
 const _testDocuments = '/tmp/aqari_credit_note_widget_test';
+const _testSupport = '/tmp/aqari_credit_note_widget_test_support';
 
 class _TestPathProvider extends PathProviderPlatform {
   @override
   Future<String?> getApplicationDocumentsPath() async => _testDocuments;
+
+  @override
+  Future<String?> getApplicationSupportPath() async => _testSupport;
 }
 
 void main() {
@@ -29,6 +33,10 @@ void main() {
     await helper.close();
     final directory = Directory(_testDocuments);
     if (await directory.exists()) await directory.delete(recursive: true);
+    final supportDirectory = Directory(_testSupport);
+    if (await supportDirectory.exists()) {
+      await supportDirectory.delete(recursive: true);
+    }
     PermissionRuntime.activate(
       userId: 1,
       role: 'SuperAdmin',
@@ -41,6 +49,10 @@ void main() {
     PermissionRuntime.clear();
     final directory = Directory(_testDocuments);
     if (await directory.exists()) await directory.delete(recursive: true);
+    final supportDirectory = Directory(_testSupport);
+    if (await supportDirectory.exists()) {
+      await supportDirectory.delete(recursive: true);
+    }
   });
 
   tearDownAll(() async {
