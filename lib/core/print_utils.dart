@@ -689,6 +689,20 @@ class PrintUtils {
       final id = installment['installment_id'];
       return id is! num || !invoiceInstallmentIds.contains(id.toInt());
     }).toList();
+    final receiptAllocationRows = <Map<String, dynamic>>[
+      ...standaloneInstallmentAllocations,
+      ...invoiceAllocations.map(
+        (invoice) => <String, dynamic>{
+          'property_name': invoice['property_name'],
+          'unit_number': invoice['unit_number'],
+          'installment_number': invoice['installment_number'],
+          'due_date': invoice['due_date'],
+          'installment_amount': invoice['net_amount'],
+          'allocated_amount': invoice['allocated_amount'],
+          'invoice_id': invoice['invoice_id'],
+        },
+      ),
+    ];
 
     pdf.addPage(
       pw.MultiPage(
@@ -718,6 +732,56 @@ class PrintUtils {
               ),
             ],
           ),
+          if (isReceipt && receiptAllocationRows.isNotEmpty) ...[
+            pw.SizedBox(height: 9),
+            _documentTitle('بيانات العقار والدفعة'),
+            pw.SizedBox(height: 5),
+            pw.TableHelper.fromTextArray(
+              headers: const [
+                'العقار',
+                'رقم الوحدة',
+                'رقم الدفعة / الفاتورة',
+                'تاريخ الاستحقاق',
+                'المبلغ المحصل',
+              ],
+              data: receiptAllocationRows
+                  .map(
+                    (allocation) => [
+                      allocation['property_name']?.toString() ?? '—',
+                      allocation['unit_number']?.toString() ?? '—',
+                      'رقم ${allocation['installment_number'] ?? '—'}'
+                          '${allocation['invoice_id'] == null ? '' : '\nفاتورة ${allocation['invoice_id']}'}',
+                      allocation['due_date']?.toString() ?? '—',
+                      formatPdfAmount(
+                        (allocation['allocated_amount'] as num?)?.toDouble() ??
+                            0,
+                      ),
+                    ],
+                  )
+                  .toList(),
+              headerStyle: pw.TextStyle(
+                fontSize: 8,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white,
+              ),
+              headerDecoration: pw.BoxDecoration(color: brandNavy),
+              cellStyle: const pw.TextStyle(fontSize: 8),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 5,
+                vertical: 5,
+              ),
+              tableDirection: pw.TextDirection.rtl,
+              headerDirection: pw.TextDirection.rtl,
+              columnWidths: const {
+                0: pw.FlexColumnWidth(1.8),
+                1: pw.FlexColumnWidth(0.9),
+                2: pw.FlexColumnWidth(1.25),
+                3: pw.FlexColumnWidth(1.15),
+                4: pw.FlexColumnWidth(1.1),
+              },
+              border: pw.TableBorder.all(color: softBorder, width: 0.5),
+            ),
+          ],
           pw.SizedBox(height: 9),
           pw.Container(
             padding: const pw.EdgeInsets.all(12),
@@ -755,20 +819,6 @@ class PrintUtils {
                           labelWidth: 100,
                           fontSize: 10.5,
                         ),
-                if (isReceipt && installmentAllocations.isNotEmpty)
-                  ...installmentAllocations.map(
-                    (installment) => buildLabelValue(
-                      'بيانات الدفعة',
-                      'رقم ${installment['installment_number'] ?? '—'}'
-                          ' | ${installment['property_name'] ?? 'العقار غير محدد'}'
-                          ' | الوحدة ${installment['unit_number'] ?? 'غير محددة'}'
-                          ' | الاستحقاق ${installment['due_date'] ?? '—'}'
-                          ' | مبلغ القسط ${formatPdfAmount((installment['installment_amount'] as num?)?.toDouble() ?? 0)}'
-                          ' | المخصص ${formatPdfAmount((installment['allocated_amount'] as num?)?.toDouble() ?? 0)}',
-                      labelWidth: 100,
-                      fontSize: 8.5,
-                    ),
-                  ),
                 pw.Row(
                   children: [
                     pw.Text(

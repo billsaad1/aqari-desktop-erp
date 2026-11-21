@@ -7389,6 +7389,7 @@ class DatabaseHelper {
     required int cashAccountId,
     required List<Map<String, dynamic>> installmentsToUpdate,
     int? invoiceId,
+    String? description,
   }) async {
     PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
     if (amount <= 0 ||
@@ -7398,6 +7399,23 @@ class DatabaseHelper {
         (invoiceId != null && installmentsToUpdate.isNotEmpty)) {
       throw ArgumentError('المبلغ والأقساط المطلوب تسديدها يجب أن تكون صحيحة');
     }
+    final enteredDescription = description?.trim();
+    final defaultVoucherDescription = invoiceId == null
+        ? 'تحصيل دفعة إيجار'
+        : 'سداد فاتورة رقم $invoiceId';
+    final voucherDescription = enteredDescription ?? defaultVoucherDescription;
+    final defaultJournalDescription = invoiceId == null
+        ? 'سند قبض مستأجر'
+        : 'سداد فاتورة داخلية رقم $invoiceId';
+    final journalDescription = voucherDescription.isEmpty
+        ? defaultJournalDescription
+        : voucherDescription;
+    final defaultReceiptLineDescription = invoiceId == null
+        ? 'تحصيل دفعة مستأجر'
+        : 'سداد فاتورة داخلية رقم $invoiceId';
+    final receiptLineDescription = voucherDescription.isEmpty
+        ? defaultReceiptLineDescription
+        : voucherDescription;
     final db = await instance.database;
     return db.transaction((txn) async {
       final tenantRows = await txn.query(
@@ -7637,9 +7655,7 @@ class DatabaseHelper {
 
       final journalId = await txn.insert('journal_entries', {
         'entry_date': voucherDate,
-        'description': invoiceId == null
-            ? 'سند قبض مستأجر'
-            : 'سداد فاتورة داخلية رقم $invoiceId',
+        'description': journalDescription,
         'is_posted': 1,
       });
       await txn.insert('journal_lines', {
@@ -7647,13 +7663,8 @@ class DatabaseHelper {
         'account_id': cashAccountId,
         'debit': amount,
         'credit': 0.0,
-        'description': invoiceId == null
-            ? 'تحصيل دفعة مستأجر'
-            : 'سداد فاتورة داخلية رقم $invoiceId',
+        'description': receiptLineDescription,
       });
-      final receiptLineDescription = invoiceId == null
-          ? 'تحصيل دفعة مستأجر'
-          : 'سداد فاتورة داخلية رقم $invoiceId';
       final receiptParts = <({int? costCenterId, int amountMinor})>[];
       for (final installment in verifiedUpdates) {
         receiptParts.add((
@@ -7696,9 +7707,7 @@ class DatabaseHelper {
         'tenant_id': tenantId,
         'party_name': tenantRows.first['name'],
         'journal_entry_id': journalId,
-        'description': invoiceId == null
-            ? 'تحصيل دفعة إيجار'
-            : 'سداد فاتورة رقم $invoiceId',
+        'description': voucherDescription,
       });
       if (invoiceId != null) {
         await txn.insert('voucher_invoice_allocations', {
