@@ -16,6 +16,9 @@ void main() {
   setUpAll(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pathProvider, (call) async {
+          if (call.method == 'getApplicationSupportDirectory') {
+            return testDirectory.path;
+          }
           if (call.method == 'getApplicationDocumentsDirectory') {
             return testDirectory.path;
           }

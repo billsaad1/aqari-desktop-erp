@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'database/database_helper.dart';
+import 'database/database_location_exception.dart';
 import 'providers/auth_provider.dart';
 import 'providers/navigation_provider.dart';
 import 'providers/accounting_provider.dart';
@@ -11,14 +12,26 @@ import 'providers/reports_provider.dart';
 import 'providers/sms_provider.dart';
 import 'providers/tenant_notices_provider.dart';
 import 'features/auth/login_screen.dart';
+import 'features/system_settings/database_startup_recovery_screen.dart';
 import 'core/app_theme.dart';
 import 'core/session_idle_guard.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Database
-  await DatabaseHelper.instance.database;
+  // Do not show the normal ERP until the live database is located and opened.
+  try {
+    await DatabaseHelper.instance.database;
+  } catch (error) {
+    final exception = error is DatabaseLocationException
+        ? error
+        : DatabaseLocationException(
+            message:
+                'تعذر تهيئة قاعدة البيانات بأمان. لم نحذف أي ملف. أرسل تفاصيل الخطأ للدعم: $error',
+          );
+    runApp(DatabaseStartupRecoveryApp(exception: exception));
+    return;
+  }
   try {
     await DatabaseHelper.instance.migrateLegacySmsCredentials();
   } catch (_) {

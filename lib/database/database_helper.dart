@@ -27,6 +27,8 @@ import '../models/tenant_aging_report_model.dart';
 import '../models/trial_balance_report_model.dart';
 import '../models/accounting_period_model.dart';
 import 'database_integrity_migrations.dart';
+import 'database_location_migrator.dart';
+import 'financial_query_indexes_schema.dart';
 import 'credit_note_schema.dart';
 import 'accounting_period_schema.dart';
 import 'internal_subledger_reconciliation_service.dart';
@@ -36,11 +38,14 @@ import 'property_sale_schema.dart';
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  static const int _schemaVersion = 33;
+  static Future<Database>? _databaseOpening;
+  static const int _schemaVersion = 34;
   static const int _maxFailedLoginAttempts = 5;
   static const Duration _loginLockoutDuration = Duration(minutes: 15);
   @visibleForTesting
   static Future<void> Function()? restorePostReplacementHookForTesting;
+  @visibleForTesting
+  static Future<void> Function()? databaseLocationBeforePublishHookForTesting;
 
   /// Current schema version, exposed so tests and diagnostics assert against a
   /// single source of truth instead of hardcoding a number that drifts.
@@ -81,6 +86,7 @@ class DatabaseHelper {
 
   DatabaseHelper._init();
   Future<void> _smsSettingsWriteQueue = Future<void>.value();
+  bool _allowFreshDatabaseReplacement = false;
 
   bool _hasCentPrecision(num value) {
     final scaled = value.toDouble() * 100;
@@ -128,11 +134,25 @@ class DatabaseHelper {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDB('desktop_erp.db');
-    return _database!;
+    final existingOpening = _databaseOpening;
+    if (existingOpening != null) return existingOpening;
+    final opening = _initDB('desktop_erp.db');
+    _databaseOpening = opening;
+    try {
+      final opened = await opening;
+      _database = opened;
+      return opened;
+    } finally {
+      if (identical(_databaseOpening, opening)) _databaseOpening = null;
+    }
   }
 
   Future<String> getDbPath() async {
+    final dbPath = await getApplicationSupportDirectory();
+    return join(dbPath.path, 'AbdullahAlNaqeebERP', 'desktop_erp.db');
+  }
+
+  Future<String> _getLegacyDbPath() async {
     final dbPath = await getApplicationDocumentsDirectory();
     return join(dbPath.path, 'AbdullahAlNaqeebERP', 'desktop_erp.db');
   }
@@ -1149,6 +1169,7 @@ class DatabaseHelper {
       'owner_settlements_owner_date_idx',
       'owner_settlements_cash_date_idx',
       'accounting_period_events_period_idx',
+      ...FinancialQueryIndexesSchema.indexNames,
     ];
     final missingIndexes = requiredIndexes
         .where((index) => !indexes.contains(index))
@@ -1227,6 +1248,7 @@ class DatabaseHelper {
     await current.execute('PRAGMA wal_checkpoint(TRUNCATE)');
     await current.close();
     _database = null;
+    _allowFreshDatabaseReplacement = true;
     try {
       await _deleteSqliteSidecars(path);
       await databaseFactory.deleteDatabase(path);
@@ -1262,6 +1284,8 @@ class DatabaseHelper {
       throw StateError(
         'فشلت التهيئة، وأُعيدت قاعدة التشغيل من نسخة الرجوع المحفوظة في $rollbackPath. السبب: $error',
       );
+    } finally {
+      _allowFreshDatabaseReplacement = false;
     }
   }
 
@@ -1272,26 +1296,35 @@ class DatabaseHelper {
       databaseFactory = databaseFactoryFfi;
     }
 
-    final dbPath = await getApplicationDocumentsDirectory();
-    final path = join(dbPath.path, 'AbdullahAlNaqeebERP', filePath);
-
-    // Ensure the directory exists
-    await Directory(
-      join(dbPath.path, 'AbdullahAlNaqeebERP'),
-    ).create(recursive: true);
-
-    return await databaseFactory.openDatabase(
-      path,
-      options: OpenDatabaseOptions(
-        version: _schemaVersion,
-        onConfigure: (db) async {
-          await db.execute('PRAGMA foreign_keys = ON');
-          await db.execute('PRAGMA secure_delete = ON');
-        },
-        onCreate: _createDB,
-        onUpgrade: _upgradeDB,
-      ),
+    final supportDirectory = await getApplicationSupportDirectory();
+    final activePath = join(
+      supportDirectory.path,
+      'AbdullahAlNaqeebERP',
+      filePath,
     );
+    final legacyPath = await _getLegacyDbPath();
+    final migrator = DatabaseLocationMigrator(
+      openDatabaseAtPath: (path) => databaseFactory.openDatabase(
+        path,
+        options: OpenDatabaseOptions(
+          version: _schemaVersion,
+          onConfigure: (db) async {
+            await db.execute('PRAGMA foreign_keys = ON');
+            await db.execute('PRAGMA secure_delete = ON');
+          },
+          onCreate: _createDB,
+          onUpgrade: _upgradeDB,
+        ),
+      ),
+      validateOpenDatabase: (db) =>
+          _validateOpenDatabase(db, requireCurrentSchema: true),
+      validateDatabaseFile: (path) async {
+        await _validateDatabaseFile(path, requireCurrentSchema: true);
+      },
+      allowFreshDatabaseReplacement: () => _allowFreshDatabaseReplacement,
+      beforePublishHook: databaseLocationBeforePublishHookForTesting,
+    );
+    return migrator.open(activePath: activePath, legacyPath: legacyPath);
   }
 
   Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
@@ -1731,6 +1764,9 @@ class DatabaseHelper {
     if (oldVersion < 33) {
       await _ensureColumn(db, 'contracts', 'early_termination_date', 'TEXT');
       await _ensureColumn(db, 'contracts', 'early_termination_reason', 'TEXT');
+    }
+    if (oldVersion < 34) {
+      await FinancialQueryIndexesSchema.install(db);
     }
   }
 
@@ -2972,6 +3008,7 @@ class DatabaseHelper {
     await _createAuditTrailSchema(db);
     await createOwnerSettlementSchema(db);
     await AccountingPeriodSchema.install(db);
+    await FinancialQueryIndexesSchema.install(db);
     await _insertSeedData(db);
   }
 
@@ -14140,10 +14177,19 @@ class DatabaseHelper {
   }
 
   Future close() async {
+    final opening = _databaseOpening;
+    if (opening != null) {
+      try {
+        await opening;
+      } catch (_) {
+        // The failed open has no live handle to close.
+      }
+    }
     final db = _database;
     if (db != null) {
       await db.close();
       _database = null;
     }
+    _databaseOpening = null;
   }
 }
