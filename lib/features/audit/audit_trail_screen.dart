@@ -39,6 +39,7 @@ class AuditTrailScreen extends StatefulWidget {
     'CREDIT_NOTE_POSTED': 'ترحيل إشعار دائن',
     'CREDIT_NOTE_REVERSED': 'عكس إشعار دائن بقيد',
     'TAX_INVOICE_ISSUED': 'إصدار فاتورة ضريبية',
+    'LEGACY_TENANT_ACCOUNT_LINK_REPAIRED': 'تصحيح ربط حساب مستأجر قديم',
     'CONTRACT_CREATED': 'إنشاء عقد',
     'CONTRACT_RENEWED': 'تجديد عقد',
     'contract_cancelled': 'إلغاء عقد',

@@ -259,9 +259,15 @@ class _TenantsScreenState extends State<TenantsScreen> {
                           } catch (error) {
                             if (!dialogContext.mounted) return;
                             setDialogState(() => isSaving = false);
+                            final errorMessage = error.toString().replaceFirst(
+                              RegExp(r'^Bad state:\s*'),
+                              '',
+                            );
                             ScaffoldMessenger.of(dialogContext).showSnackBar(
                               SnackBar(
-                                content: Text('تعذر حفظ البيانات: $error'),
+                                content: Text(
+                                  'تعذر حفظ البيانات: $errorMessage',
+                                ),
                               ),
                             );
                           }

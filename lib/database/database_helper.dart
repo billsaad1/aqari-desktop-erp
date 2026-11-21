@@ -3816,8 +3816,9 @@ class DatabaseHelper {
 
   Future<String> _nextAccountCodeTx(
     DatabaseExecutor executor,
-    int parentId,
-  ) async {
+    int parentId, {
+    bool allowDirectLegacyTenantLinks = false,
+  }) async {
     final parentRows = await executor.query(
       'accounts',
       columns: ['id', 'code', 'parent_id', 'account_type', 'balance'],
@@ -3846,6 +3847,7 @@ class DatabaseHelper {
       'users': 'cash_box_account_id',
     };
     for (final reference in linkedEntityColumns.entries) {
+      if (allowDirectLegacyTenantLinks && reference.key == 'tenants') continue;
       final linkedRows = await executor.query(
         reference.key,
         columns: ['id'],
@@ -3854,7 +3856,16 @@ class DatabaseHelper {
         limit: 1,
       );
       if (linkedRows.isNotEmpty) {
-        throw StateError('لا يمكن إضافة حساب فرعي لحساب مرتبط بسجل تشغيلي');
+        final linkedRecord = switch (reference.key) {
+          'owners' => 'ملف مالك',
+          'tenants' => 'ملف مستأجر قديم',
+          'banks' => 'سجل بنك',
+          'users' => 'حساب صندوق مستخدم',
+          _ => 'سجل تشغيلي',
+        };
+        throw StateError(
+          'لا يمكن إضافة حساب فرعي: الحساب $parentCode مرتبط مباشرةً بـ$linkedRecord. لم يتم تعديل أي بيانات؛ يلزم مراجعة الربط يدويًا.',
+        );
       }
     }
     if (children.isEmpty) {
@@ -3901,6 +3912,109 @@ class DatabaseHelper {
       if (!allCodes.contains(code) && !isAmbiguousPrefix) return code;
     }
     throw StateError('اكتمل عدد الحسابات الفرعية المتاح لهذا الحساب');
+  }
+
+  /// Repairs only legacy tenant-to-control-account links that have no ledger
+  /// activity and no balance. This is called within the new-tenant transaction
+  /// so either all links and audit rows are committed or none are.
+  Future<void> _repairUnusedLegacyTenantLinksTx(
+    DatabaseExecutor txn,
+    int parentId,
+  ) async {
+    final legacyTenants = await txn.query(
+      'tenants',
+      columns: ['id', 'name'],
+      where: 'account_id = ?',
+      whereArgs: [parentId],
+      orderBy: 'id',
+    );
+    if (legacyTenants.isEmpty) return;
+
+    final parentRows = await txn.query(
+      'accounts',
+      columns: ['code', 'balance'],
+      where: 'id = ?',
+      whereArgs: [parentId],
+      limit: 1,
+    );
+    if (parentRows.isEmpty) throw StateError('الحساب الأعلى غير موجود');
+    final parent = parentRows.first;
+    final parentCode = parent['code']?.toString() ?? parentId.toString();
+
+    const otherOperationalLinks = <String, (String, String)>{
+      'owners': ('account_id', 'ملف مالك'),
+      'banks': ('account_id', 'سجل بنك'),
+      'users': ('cash_box_account_id', 'حساب صندوق مستخدم'),
+    };
+    for (final reference in otherOperationalLinks.entries) {
+      final linkedRows = await txn.query(
+        reference.key,
+        columns: ['id'],
+        where: '${reference.value.$1} = ?',
+        whereArgs: [parentId],
+        limit: 1,
+      );
+      if (linkedRows.isNotEmpty) {
+        throw StateError(
+          'لا يمكن إضافة المستأجر: الحساب $parentCode مرتبط مباشرةً بـ${reference.value.$2}. لم يتم تعديل أي بيانات؛ يلزم مراجعة الربط يدويًا.',
+        );
+      }
+    }
+
+    final activity = await txn.query(
+      'journal_lines',
+      columns: ['id'],
+      where: 'account_id = ?',
+      whereArgs: [parentId],
+      limit: 1,
+    );
+    final balance = (parent['balance'] as num?)?.toDouble() ?? 0.0;
+    if (activity.isNotEmpty || !balance.isFinite || balance.abs() >= 0.005) {
+      throw StateError(
+        'لا يمكن إضافة المستأجر بأمان: الحساب $parentCode مرتبط بمستأجر قديم وله قيود أو رصيد. لم يتم تغيير الرابط أو أي حركة مالية؛ تلزم مراجعة محاسبية يدوية.',
+      );
+    }
+
+    for (final tenant in legacyTenants) {
+      final tenantId = (tenant['id'] as num).toInt();
+      final tenantName = tenant['name']?.toString().trim() ?? '';
+      final code = await _nextAccountCodeTx(
+        txn,
+        parentId,
+        allowDirectLegacyTenantLinks: true,
+      );
+      final accountId = await txn.insert('accounts', {
+        'code': code,
+        'name': tenantName.isEmpty ? 'مستأجر قديم $tenantId' : tenantName,
+        'parent_id': parentId,
+        'account_type': 'Asset',
+        'balance': 0.0,
+      });
+      final updated = await txn.update(
+        'tenants',
+        {'account_id': accountId},
+        where: 'id = ? AND account_id = ?',
+        whereArgs: [tenantId, parentId],
+      );
+      if (updated != 1) {
+        throw StateError(
+          'تعذر إصلاح ربط المستأجر القديم؛ أُلغيت العملية دون حفظ جزئي.',
+        );
+      }
+      await _recordAuditTx(
+        txn,
+        action: 'LEGACY_TENANT_ACCOUNT_LINK_REPAIRED',
+        entityType: 'tenant',
+        entityId: tenantId,
+        details: {
+          'source_account_id': parentId,
+          'source_account_code': parentCode,
+          'destination_account_id': accountId,
+          'destination_account_code': code,
+          'reason': 'unused_legacy_control_account_link',
+        },
+      );
+    }
   }
 
   Future<int> insertAccount(Map<String, dynamic> account) async {
@@ -5412,6 +5526,7 @@ class DatabaseHelper {
         throw Exception('حساب ذمم المستأجرين غير موجود (1201)');
 
       final parentId = parentResult.first['id'] as int;
+      await _repairUnusedLegacyTenantLinksTx(txn, parentId);
       final newCode = await _nextAccountCodeTx(txn, parentId);
 
       // 3. Create the sub-account
