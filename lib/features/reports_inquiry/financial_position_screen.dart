@@ -9,9 +9,12 @@ import '../../core/print_utils.dart';
 import '../../database/database_helper.dart';
 import '../../models/financial_position_report_model.dart';
 import '../../providers/reports_provider.dart';
+import '../../services/report_export_service.dart';
 
 class FinancialPositionScreen extends StatefulWidget {
-  const FinancialPositionScreen({super.key});
+  const FinancialPositionScreen({super.key, this.reportExportService});
+
+  final ReportExportService? reportExportService;
 
   @override
   State<FinancialPositionScreen> createState() =>
@@ -132,6 +135,65 @@ class _FinancialPositionScreenState extends State<FinancialPositionScreen> {
     }
   }
 
+  Future<void> _export(
+    FinancialPositionReport report,
+    ReportExportFormat format,
+  ) async {
+    final reports = Provider.of<ReportsProvider>(context, listen: false);
+    final reportGeneration = reports.financialPositionReportGeneration;
+    final authorizationUserId = PermissionRuntime.userId;
+    final authorizationRole = PermissionRuntime.role;
+    bool isAuthorizedAndCurrent() =>
+        mounted &&
+        PermissionRuntime.userId == authorizationUserId &&
+        PermissionRuntime.role == authorizationRole &&
+        PermissionRuntime.allows('reports', AppPermissionAction.view) &&
+        PermissionRuntime.allows('reports', AppPermissionAction.print) &&
+        identical(reports.financialPositionReport, report) &&
+        reports.financialPositionReportGeneration == reportGeneration &&
+        _asOfDateController.text == report.asOfDate;
+
+    if (!isAuthorizedAndCurrent()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا تملك صلاحية تصدير هذا التقرير')),
+      );
+      return;
+    }
+    try {
+      final result = await (widget.reportExportService ?? ReportExportService())
+          .exportReport(
+            data: ReportExportData.financialPosition(report),
+            format: format,
+            isAuthorized: isAuthorizedAndCurrent,
+          );
+      if (!mounted) return;
+      switch (result.status) {
+        case ReportExportStatus.saved:
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('تم حفظ التقرير في ${result.path}')),
+          );
+          break;
+        case ReportExportStatus.cancelled:
+          break;
+        case ReportExportStatus.permissionDenied:
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'انتهت صلاحية التصدير أو تغيّر التقرير؛ أعد تحميله.',
+              ),
+            ),
+          );
+          break;
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تعذر تصدير قائمة المركز المالي: $error')),
+        );
+      }
+    }
+  }
+
   String _amount(int minor) =>
       NumberFormat('#,##0.00;(#,##0.00)', 'en_US').format(minor / 100);
 
@@ -218,6 +280,30 @@ class _FinancialPositionScreenState extends State<FinancialPositionScreen> {
                                 : null,
                             icon: const Icon(Icons.picture_as_pdf_outlined),
                             label: const Text('معاينة / حفظ PDF'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed:
+                                isCurrentReport &&
+                                    PermissionRuntime.allows(
+                                      'reports',
+                                      AppPermissionAction.print,
+                                    )
+                                ? () => _export(report, ReportExportFormat.csv)
+                                : null,
+                            icon: const Icon(Icons.table_view_outlined),
+                            label: const Text('تصدير CSV'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed:
+                                isCurrentReport &&
+                                    PermissionRuntime.allows(
+                                      'reports',
+                                      AppPermissionAction.print,
+                                    )
+                                ? () => _export(report, ReportExportFormat.xlsx)
+                                : null,
+                            icon: const Icon(Icons.grid_on_outlined),
+                            label: const Text('تصدير Excel'),
                           ),
                         ],
                       ),

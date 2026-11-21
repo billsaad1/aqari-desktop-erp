@@ -31,6 +31,19 @@ class AuthProvider with ChangeNotifier {
   bool _isCurrentGeneration(int generation) =>
       !_disposed && generation == _sessionGeneration;
 
+  static const String _invalidLoginMessage =
+      'تعذر تسجيل الدخول. تحقق من البيانات أو انتظر انتهاء التقييد المؤقت.';
+
+  bool _hasActiveLoginLock(Map<String, dynamic> userRecord) {
+    final rawLockUntil = userRecord['login_locked_until_ms'];
+    if (rawLockUntil == null) return false;
+    final lockUntil = rawLockUntil is num
+        ? rawLockUntil.toInt()
+        : int.tryParse(rawLockUntil.toString());
+    if (lockUntil == null) return true;
+    return lockUntil > DateTime.now().toUtc().millisecondsSinceEpoch;
+  }
+
   Future<bool> login(String username, String password) async {
     if (_disposed) return false;
     final generation = ++_sessionGeneration;
@@ -47,14 +60,33 @@ class AuthProvider with ChangeNotifier {
       final userMap = await DatabaseHelper.instance
           .getAuthenticationRecordByUsername(username);
       if (!_isCurrentGeneration(generation)) return false;
-      if (userMap != null) {
+      if (userMap == null || _hasActiveLoginLock(userMap)) {
+        _errorMessage = _invalidLoginMessage;
+      } else {
         final passwordHash = userMap['password_hash']?.toString() ?? '';
         final user = User.fromMap(userMap);
-        if (CryptoUtils.verifyPassword(password, passwordHash)) {
-          if (!user.isActive) {
-            _errorMessage = 'هذا الحساب موقوف. تواصل مع مدير النظام.';
+        if (!CryptoUtils.verifyPassword(password, passwordHash)) {
+          if (user.id != null) {
+            await DatabaseHelper.instance.recordFailedLoginAttempt(
+              user.id!,
+              expectedPasswordHash: passwordHash,
+            );
+          }
+          if (!_isCurrentGeneration(generation)) return false;
+          _errorMessage = _invalidLoginMessage;
+        } else if (!user.isActive) {
+          _errorMessage = _invalidLoginMessage;
+        } else {
+          if (user.id == null) throw StateError('معرف المستخدم غير صالح');
+          final attemptsCleared = await DatabaseHelper.instance
+              .clearFailedLoginAttemptsAfterAuthentication(
+                user.id!,
+                expectedPasswordHash: passwordHash,
+              );
+          if (!_isCurrentGeneration(generation)) return false;
+          if (!attemptsCleared) {
+            _errorMessage = _invalidLoginMessage;
           } else {
-            if (user.id == null) throw StateError('معرف المستخدم غير صالح');
             PermissionRuntime.activate(
               userId: user.id,
               role: user.role,
@@ -112,7 +144,7 @@ class AuthProvider with ChangeNotifier {
           }
         }
       }
-      _errorMessage ??= 'اسم المستخدم أو كلمة المرور غير صحيحة';
+      _errorMessage ??= _invalidLoginMessage;
     } catch (_) {
       if (!_isCurrentGeneration(generation)) return false;
       _currentUser = null;
@@ -221,8 +253,9 @@ class AuthProvider with ChangeNotifier {
     final user = _currentUser;
     if (user == null || user.id == null)
       throw StateError('لا توجد جلسة مستخدم صالحة');
-    if (newPassword.length < 12)
-      throw ArgumentError('كلمة المرور يجب ألا تقل عن 12 حرفاً');
+    if (!CryptoUtils.isValidNumericPin(newPassword)) {
+      throw ArgumentError('كلمة المرور يجب أن تتكون من 4 أو 5 أرقام');
+    }
 
     final passwordHash = CryptoUtils.hashPassword(newPassword);
     await DatabaseHelper.instance.updateUserPassword(user.id!, passwordHash);

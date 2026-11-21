@@ -7,8 +7,10 @@ import 'package:provider/provider.dart';
 import '../../core/app_theme.dart';
 import '../../core/company_logo_mark.dart';
 import '../../core/permission_policy.dart';
+import '../../core/session_idle_guard.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/navigation_provider.dart';
+import '../../services/automatic_backup_service.dart';
 import '../auth/login_screen.dart';
 import '../audit/audit_trail_screen.dart';
 import '../dashboard/dashboard_screen.dart';
@@ -31,63 +33,86 @@ class MainShellScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Row(
-          children: [
-            const AppSidebar(),
-            Expanded(
-              child: Consumer<NavigationProvider>(
-                builder: (context, nav, child) {
-                  final auth = context.watch<AuthProvider>();
-                  final user = auth.currentUser;
-                  if (user == null) return const LoginScreen();
-                  final role = user.role;
-                  final module = AppPermissionCatalog.codeForNavigationIndex(
-                    nav.currentIndex,
-                  );
-                  final canAccess =
-                      module != null && auth.canAccessScreen(module);
-                  final fallbackIndex = _firstAccessibleIndex(auth);
-                  if (!canAccess && fallbackIndex != null) {
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (context.mounted) nav.setIndex(fallbackIndex);
-                    });
-                  }
-                  final index = canAccess ? nav.currentIndex : fallbackIndex;
-                  if (index == null) {
-                    return Column(
-                      children: [
-                        _DesktopTopBar(
-                          title: 'لا توجد شاشات متاحة',
-                          userName: user.fullName,
-                          role: role,
-                        ),
-                        const Expanded(
-                          child: Center(
-                            child: Text(
-                              'حسابك لا يملك صلاحية عرض أي قسم. تواصل مع مدير النظام.',
-                              textAlign: TextAlign.center,
+    return SessionIdleGuard(
+      idleTimeout: const Duration(minutes: 15),
+      onTimeout: () async {
+        final auth = context.read<AuthProvider>();
+        if (auth.currentUser == null) return;
+        try {
+          await auth.logout();
+        } catch (error) {
+          debugPrint('Automatic session logout failed: $error');
+        }
+        if (!context.mounted) return;
+        context.read<NavigationProvider>().reset();
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (route) => false,
+        );
+      },
+      child: _AutomaticBackupLifecycle(
+        child: Scaffold(
+          body: SafeArea(
+            child: Row(
+              children: [
+                const AppSidebar(),
+                Expanded(
+                  child: Consumer<NavigationProvider>(
+                    builder: (context, nav, child) {
+                      final auth = context.watch<AuthProvider>();
+                      final user = auth.currentUser;
+                      if (user == null) return const LoginScreen();
+                      final role = user.role;
+                      final module =
+                          AppPermissionCatalog.codeForNavigationIndex(
+                            nav.currentIndex,
+                          );
+                      final canAccess =
+                          module != null && auth.canAccessScreen(module);
+                      final fallbackIndex = _firstAccessibleIndex(auth);
+                      if (!canAccess && fallbackIndex != null) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (context.mounted) nav.setIndex(fallbackIndex);
+                        });
+                      }
+                      final index = canAccess
+                          ? nav.currentIndex
+                          : fallbackIndex;
+                      if (index == null) {
+                        return Column(
+                          children: [
+                            _DesktopTopBar(
+                              title: 'لا توجد شاشات متاحة',
+                              userName: user.fullName,
+                              role: role,
                             ),
+                            const Expanded(
+                              child: Center(
+                                child: Text(
+                                  'حسابك لا يملك صلاحية عرض أي قسم. تواصل مع مدير النظام.',
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                      return Column(
+                        children: [
+                          _DesktopTopBar(
+                            title: _screenTitle(index),
+                            userName: user.fullName,
+                            role: role,
                           ),
-                        ),
-                      ],
-                    );
-                  }
-                  return Column(
-                    children: [
-                      _DesktopTopBar(
-                        title: _screenTitle(index),
-                        userName: user.fullName,
-                        role: role,
-                      ),
-                      Expanded(child: _getScreenForIndex(index)),
-                    ],
-                  );
-                },
-              ),
+                          Expanded(child: _getScreenForIndex(index)),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -142,6 +167,33 @@ class MainShellScreen extends StatelessWidget {
       _ => const DashboardScreen(),
     };
   }
+}
+
+class _AutomaticBackupLifecycle extends StatefulWidget {
+  const _AutomaticBackupLifecycle({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_AutomaticBackupLifecycle> createState() =>
+      _AutomaticBackupLifecycleState();
+}
+
+class _AutomaticBackupLifecycleState extends State<_AutomaticBackupLifecycle> {
+  @override
+  void initState() {
+    super.initState();
+    unawaited(AutomaticBackupService.instance.start());
+  }
+
+  @override
+  void dispose() {
+    unawaited(AutomaticBackupService.instance.stop());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class _DesktopTopBar extends StatelessWidget {

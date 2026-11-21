@@ -46,4 +46,30 @@ class AccountStatementReport {
   final List<AccountStatementLine> lines;
 
   bool get hasActivity => lines.isNotEmpty;
+
+  AccountStatementReport forSelectedPeriodOnly() => AccountStatementReport(
+    accountId: accountId,
+    accountCode: accountCode,
+    accountName: accountName,
+    accountType: accountType,
+    currency: currency,
+    startDate: startDate,
+    endDate: endDate,
+    openingBalance: 0,
+    totalDebit: totalDebit,
+    totalCredit: totalCredit,
+    closingBalance: closingBalance - openingBalance,
+    lines: lines
+        .map(
+          (line) => AccountStatementLine(
+            date: line.date,
+            journalEntryId: line.journalEntryId,
+            description: line.description,
+            debit: line.debit,
+            credit: line.credit,
+            runningBalance: line.runningBalance - openingBalance,
+          ),
+        )
+        .toList(growable: false),
+  );
 }

@@ -14,6 +14,7 @@ import '../../core/lease_contract_terms.dart';
 import '../../core/permission_policy.dart';
 import '../../core/print_utils.dart';
 import '../../database/database_helper.dart';
+import '../../services/automatic_backup_service.dart';
 import '../../models/company_info_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/navigation_provider.dart';
@@ -747,11 +748,17 @@ class MaintenanceTab extends StatefulWidget {
 class _MaintenanceTabState extends State<MaintenanceTab> {
   String _localBackupPath = '';
   String _externalBackupPath = '';
+  String? _lastAutomaticBackupTime;
+  String? _lastAutomaticBackupPaths;
+  String? _lastAutomaticBackupError;
+  bool _automaticBackupEnabled = true;
+  int _automaticBackupRetention = AutomaticBackupService.defaultRetentionCount;
   bool _isBackingUp = false;
   bool _isRestoring = false;
   final _localBackupPathController = TextEditingController();
   final _externalBackupPathController = TextEditingController();
   final _confirmController = TextEditingController();
+  final _factoryResetPasswordController = TextEditingController();
 
   @override
   void initState() {
@@ -761,6 +768,7 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
 
   Future<void> _loadBackupPaths() async {
     final prefs = await SharedPreferences.getInstance();
+    final lastSuccess = prefs.getInt(AutomaticBackupService.lastSuccessKey);
     if (!mounted) return;
     setState(() {
       _localBackupPath =
@@ -768,9 +776,43 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
           prefs.getString('backup_path') ??
           '';
       _externalBackupPath = prefs.getString('backup_external_path') ?? '';
+      _automaticBackupEnabled =
+          prefs.getBool(AutomaticBackupService.enabledKey) ?? true;
+      _automaticBackupRetention =
+          (prefs.getInt(AutomaticBackupService.retentionKey) ??
+                  AutomaticBackupService.defaultRetentionCount)
+              .clamp(1, 90)
+              .toInt();
+      _lastAutomaticBackupTime = lastSuccess == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(
+              lastSuccess,
+            ).toLocal().toString().substring(0, 19);
+      _lastAutomaticBackupPaths = prefs.getString(
+        AutomaticBackupService.lastPathsKey,
+      );
+      _lastAutomaticBackupError = prefs.getString(
+        AutomaticBackupService.lastErrorKey,
+      );
       _localBackupPathController.text = _localBackupPath;
       _externalBackupPathController.text = _externalBackupPath;
     });
+  }
+
+  Future<void> _setAutomaticBackupEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AutomaticBackupService.enabledKey, enabled);
+    if (!mounted) return;
+    setState(() => _automaticBackupEnabled = enabled);
+    if (enabled) unawaited(AutomaticBackupService.instance.runNow());
+  }
+
+  Future<void> _setAutomaticBackupRetention(int count) async {
+    final bounded = count.clamp(1, 90).toInt();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(AutomaticBackupService.retentionKey, bounded);
+    if (!mounted) return;
+    setState(() => _automaticBackupRetention = bounded);
   }
 
   Future<void> _selectBackupFolder({required bool external}) async {
@@ -980,6 +1022,7 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
 
   void _showFactoryResetDialog() {
     _confirmController.clear();
+    _factoryResetPasswordController.clear();
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -1012,18 +1055,36 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
                     ),
                     onChanged: (val) => setStateDialog(() {}),
                   ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _factoryResetPasswordController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'كلمة المرور الحالية',
+                    ),
+                    onChanged: (val) => setStateDialog(() {}),
+                  ),
                 ],
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () {
+                    _factoryResetPasswordController.clear();
+                    Navigator.pop(context);
+                  },
                   child: const Text('إلغاء'),
                 ),
                 ElevatedButton(
-                  onPressed: _confirmController.text == 'تأكيد'
+                  onPressed:
+                      _confirmController.text == 'تأكيد' &&
+                          _factoryResetPasswordController.text.isNotEmpty
                       ? () async {
+                          final currentPassword =
+                              _factoryResetPasswordController.text;
                           Navigator.pop(context);
-                          await _performFactoryReset();
+                          _factoryResetPasswordController.clear();
+                          await _performFactoryReset(currentPassword);
                         }
                       : null,
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
@@ -1040,14 +1101,16 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
     );
   }
 
-  Future<void> _performFactoryReset() async {
+  Future<void> _performFactoryReset(String currentPassword) async {
     final authProvider = Provider.of<AuthProvider>(context, listen: false);
     final navigationProvider = Provider.of<NavigationProvider>(
       context,
       listen: false,
     );
     try {
-      final rollbackPath = await DatabaseHelper.instance.factoryReset();
+      final rollbackPath = await DatabaseHelper.instance.factoryReset(
+        currentPassword: currentPassword,
+      );
       await authProvider.logout();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1068,13 +1131,21 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
     } catch (e) {
       if (!mounted) return;
       final rollbackFailed = e.toString().contains('تعذرت الاستعادة التلقائية');
+      late final String errorText;
+      if (e.toString().contains('كلمة المرور الحالية غير صحيحة')) {
+        errorText = 'لم تتم التهيئة؛ كلمة المرور غير صحيحة ولم تُمسح البيانات.';
+      } else if (e.toString().contains('مقيد مؤقتًا')) {
+        errorText = 'لم تتم التهيئة؛ أُوقف التحقق مؤقتًا بعد محاولات خاطئة.';
+      } else {
+        errorText = 'فشلت التهيئة؛ راجع حالة قاعدة البيانات: $e';
+      }
       if (rollbackFailed) {
         await authProvider.logout();
         if (!mounted) return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('فشلت التهيئة؛ راجع حالة قاعدة البيانات: $e'),
+          content: Text(errorText),
           duration: const Duration(seconds: 10),
         ),
       );
@@ -1093,6 +1164,7 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
     _localBackupPathController.dispose();
     _externalBackupPathController.dispose();
     _confirmController.dispose();
+    _factoryResetPasswordController.dispose();
     super.dispose();
   }
 
@@ -1149,6 +1221,101 @@ class _MaintenanceTabState extends State<MaintenanceTab> {
               'اختر وجهة محلية، خارجية (مثل USB)، أو كلتيهما. يلزم إذن تعديل إعدادات النظام. النسخة لا تحتوي مفتاح SMS السري؛ أعد إدخاله بعد الاستعادة. كل نسخة تُفحص ولا يُستبدل ملف موجود.',
             ),
             const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SwitchListTile(
+                      value: _automaticBackupEnabled,
+                      onChanged:
+                          PermissionRuntime.allows(
+                                'system_settings',
+                                AppPermissionAction.edit,
+                              ) &&
+                              !_isBackingUp &&
+                              !_isRestoring
+                          ? _setAutomaticBackupEnabled
+                          : null,
+                      title: const Text('نسخ احتياطي تلقائي يوميًا'),
+                      subtitle: const Text(
+                        'يبدأ بعد تسجيل الدخول، ويعمل أثناء فتح البرنامج فقط. إذا لم تحدد مجلدًا محليًا، تُحفظ النسخ في مجلد دعم التطبيق. يحتفظ النظام بعدد النسخ المحدد لكل وجهة.',
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsetsDirectional.fromSTEB(
+                        16,
+                        0,
+                        16,
+                        12,
+                      ),
+                      child: SizedBox(
+                        width: 260,
+                        child: DropdownButtonFormField<int>(
+                          value: _automaticBackupRetention,
+                          decoration: const InputDecoration(
+                            labelText: 'عدد النسخ التلقائية المحتفظ بها',
+                            border: OutlineInputBorder(),
+                          ),
+                          items: const [7, 14, 30]
+                              .map(
+                                (count) => DropdownMenuItem<int>(
+                                  value: count,
+                                  child: Text('$count'),
+                                ),
+                              )
+                              .toList(),
+                          onChanged:
+                              PermissionRuntime.allows(
+                                    'system_settings',
+                                    AppPermissionAction.edit,
+                                  ) &&
+                                  !_isBackingUp &&
+                                  !_isRestoring
+                              ? (count) {
+                                  if (count != null) {
+                                    unawaited(
+                                      _setAutomaticBackupRetention(count),
+                                    );
+                                  }
+                                }
+                              : null,
+                        ),
+                      ),
+                    ),
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.schedule_outlined),
+                      title: Text(
+                        'آخر نسخة تلقائية: ${_lastAutomaticBackupTime ?? "لم تُنشأ بعد"}',
+                      ),
+                      subtitle: _lastAutomaticBackupPaths == null
+                          ? null
+                          : SelectableText(
+                              _lastAutomaticBackupPaths!,
+                              textDirection: TextDirection.ltr,
+                            ),
+                    ),
+                    if (_lastAutomaticBackupError?.isNotEmpty == true)
+                      Padding(
+                        padding: const EdgeInsetsDirectional.fromSTEB(
+                          16,
+                          0,
+                          16,
+                          12,
+                        ),
+                        child: Text(
+                          'ملاحظة النسخ الأخير: $_lastAutomaticBackupError',
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
             _backupLocationRow(
               label: 'مجلد النسخ المحلي',
               controller: _localBackupPathController,

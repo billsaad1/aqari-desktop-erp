@@ -65,8 +65,51 @@ void main() {
     );
   });
 
+  test(
+    'period-only statement starts at zero and keeps selected-period movement',
+    () {
+      final report = AccountStatementReport(
+        accountId: 501,
+        accountCode: '120901',
+        accountName: 'ذمم مستأجر التقرير',
+        accountType: 'Asset',
+        currency: 'SAR',
+        startDate: '2026-03-01',
+        endDate: '2026-03-31',
+        openingBalance: 145.25,
+        totalDebit: 220,
+        totalCredit: 45.50,
+        closingBalance: 319.75,
+        lines: const [
+          AccountStatementLine(
+            date: '2026-03-05',
+            journalEntryId: 11,
+            description: 'مدين خلال الفترة',
+            debit: 220,
+            credit: 0,
+            runningBalance: 365.25,
+          ),
+          AccountStatementLine(
+            date: '2026-03-20',
+            journalEntryId: 12,
+            description: 'دائن خلال الفترة',
+            debit: 0,
+            credit: 45.50,
+            runningBalance: 319.75,
+          ),
+        ],
+      ).forSelectedPeriodOnly();
+
+      expect(report.openingBalance, 0);
+      expect(report.totalDebit, 220);
+      expect(report.totalCredit, 45.50);
+      expect(report.closingBalance, 174.50);
+      expect(report.lines.map((line) => line.runningBalance), [220, 174.50]);
+    },
+  );
+
   testWidgets(
-    'viewer can read an opening-only tenant statement but cannot print or save it',
+    'viewer sees only the selected period and cannot print or save it',
     (tester) async {
       final reports = ReportsProvider(
         tenantStatementAccountsLoader: () async => [_tenantRow()],
@@ -92,11 +135,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('كشف حساب المستأجر'), findsOneWidget);
-      expect(find.text('145.25 ريال سعودي'), findsNWidgets(2));
+      expect(find.text('الرصيد الافتتاحي'), findsNothing);
+      expect(find.text('145.25 ريال سعودي'), findsNothing);
+      expect(find.text('0.00 ريال سعودي'), findsNWidgets(3));
       expect(
-        find.text(
-          'لا توجد حركات مرحلة في الفترة المحددة؛ الرصيد الافتتاحي والختامي معروضان أعلاه.',
-        ),
+        find.text('لا توجد حركات مرحلة داخل الفترة المحددة.'),
         findsOneWidget,
       );
       expect(

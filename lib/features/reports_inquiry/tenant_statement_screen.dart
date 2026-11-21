@@ -135,6 +135,7 @@ class _TenantStatementScreenState extends State<TenantStatementScreen> {
         statementTitle: 'كشف حساب المستأجر',
         partyName: tenant.tenantName,
         accountLabel: 'حساب الذمم',
+        periodOnly: true,
       );
       if (!mounted) return;
       await PdfDocumentPreviewDialog.show(
@@ -179,7 +180,9 @@ class _TenantStatementScreenState extends State<TenantStatementScreen> {
             report.accountId == selectedTenant.accountId &&
             report.startDate == _startDateController.text &&
             report.endDate == _endDateController.text;
-        final visibleReport = isCurrentReport ? report : null;
+        final visibleReport = isCurrentReport
+            ? report.forSelectedPeriodOnly()
+            : null;
         final reportForActions = visibleReport;
         final tenantForActions = selectedTenant;
         final canPrint = PermissionRuntime.allows(
@@ -198,7 +201,7 @@ class _TenantStatementScreenState extends State<TenantStatementScreen> {
               ),
               const SizedBox(height: 8),
               const Text(
-                'يعرض القيود المرحلة على حساب ذمم المستأجر المرتبط فقط. لا يمثل هذا الكشف بديلًا عن تفاصيل القسط أو الفاتورة، وقد لا يشمل سجلات تاريخية غير مرتبطة بدفتر الأستاذ.',
+                'يعرض حركات حساب ذمم المستأجر داخل الفترة المحددة فقط، ويبدأ رصيد الفترة من صفر دون ترحيل رصيد سابق. لا يمثل هذا الكشف بديلًا عن تقرير التحصيل أو تفاصيل القسط والفاتورة.',
               ),
               const SizedBox(height: 18),
               Wrap(
@@ -379,10 +382,6 @@ class _TenantStatementScreenState extends State<TenantStatementScreen> {
           '${tenant.accountCode ?? ''} - ${tenant.accountName ?? ''}',
         ),
         _summaryCard(
-          'الرصيد الافتتاحي',
-          '${_amount(report.openingBalance)} $currency',
-        ),
-        _summaryCard(
           'إجمالي المدين',
           '${_amount(report.totalDebit)} $currency',
         ),
@@ -391,7 +390,7 @@ class _TenantStatementScreenState extends State<TenantStatementScreen> {
           '${_amount(report.totalCredit)} $currency',
         ),
         _summaryCard(
-          'الرصيد الختامي',
+          'صافي حركة الفترة',
           '${_amount(report.closingBalance)} $currency',
         ),
       ],
@@ -416,7 +415,7 @@ class _TenantStatementScreenState extends State<TenantStatementScreen> {
     if (report.lines.isEmpty) {
       return const Center(
         child: Text(
-          'لا توجد حركات مرحلة في الفترة المحددة؛ الرصيد الافتتاحي والختامي معروضان أعلاه.',
+          'لا توجد حركات مرحلة داخل الفترة المحددة.',
           textAlign: TextAlign.center,
         ),
       );
@@ -433,7 +432,7 @@ class _TenantStatementScreenState extends State<TenantStatementScreen> {
               DataColumn(label: Text('البيان')),
               DataColumn(label: Text('مدين')),
               DataColumn(label: Text('دائن')),
-              DataColumn(label: Text('الرصيد')),
+              DataColumn(label: Text('رصيد الفترة')),
             ],
             rows: report.lines
                 .map(

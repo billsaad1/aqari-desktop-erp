@@ -755,6 +755,20 @@ class PrintUtils {
                           labelWidth: 100,
                           fontSize: 10.5,
                         ),
+                if (isReceipt && installmentAllocations.isNotEmpty)
+                  ...installmentAllocations.map(
+                    (installment) => buildLabelValue(
+                      'بيانات الدفعة',
+                      'رقم ${installment['installment_number'] ?? '—'}'
+                          ' | ${installment['property_name'] ?? 'العقار غير محدد'}'
+                          ' | الوحدة ${installment['unit_number'] ?? 'غير محددة'}'
+                          ' | الاستحقاق ${installment['due_date'] ?? '—'}'
+                          ' | مبلغ القسط ${formatPdfAmount((installment['installment_amount'] as num?)?.toDouble() ?? 0)}'
+                          ' | المخصص ${formatPdfAmount((installment['allocated_amount'] as num?)?.toDouble() ?? 0)}',
+                      labelWidth: 100,
+                      fontSize: 8.5,
+                    ),
+                  ),
                 pw.Row(
                   children: [
                     pw.Text(
@@ -858,11 +872,12 @@ class PrintUtils {
             _documentTitle('تفاصيل القيد المحاسبي'),
             pw.SizedBox(height: 5),
             pw.TableHelper.fromTextArray(
-              headers: ['الحساب', 'مدين', 'دائن'],
+              headers: ['الحساب', 'البيان', 'مدين', 'دائن'],
               data: journalLines
                   .map(
                     (line) => [
                       line['account_name']?.toString() ?? '',
+                      line['description']?.toString() ?? '',
                       formatPdfAmount((line['debit'] as num?)?.toDouble() ?? 0),
                       formatPdfAmount(
                         (line['credit'] as num?)?.toDouble() ?? 0,
@@ -884,9 +899,10 @@ class PrintUtils {
               tableDirection: pw.TextDirection.rtl,
               headerDirection: pw.TextDirection.rtl,
               columnWidths: const {
-                0: pw.FlexColumnWidth(2.4),
-                1: pw.FlexColumnWidth(1),
+                0: pw.FlexColumnWidth(2),
+                1: pw.FlexColumnWidth(2),
                 2: pw.FlexColumnWidth(1),
+                3: pw.FlexColumnWidth(1),
               },
               border: pw.TableBorder.all(color: softBorder, width: 0.5),
             ),

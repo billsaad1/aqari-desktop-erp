@@ -519,6 +519,97 @@ void main() {
   );
 
   test(
+    'filters collection report rows and totals to the selected tenant',
+    () async {
+      final db = await helper.database;
+      await helper.insertTenantWithAccount({
+        'name': 'مستأجر كشف مفلتر أول',
+        'mobile': '777810201',
+      });
+      await helper.insertTenantWithAccount({
+        'name': 'مستأجر كشف مفلتر ثان',
+        'mobile': '777810202',
+      });
+      final tenants = await db.query(
+        'tenants',
+        columns: ['id', 'name', 'account_id'],
+        where: 'name LIKE ?',
+        whereArgs: ['مستأجر كشف مفلتر%'],
+        orderBy: 'name',
+      );
+      expect(tenants, hasLength(2));
+      final cashAccountId =
+          ((await db.query(
+                    'accounts',
+                    columns: ['id'],
+                    where: 'code = ?',
+                    whereArgs: ['1101'],
+                    limit: 1,
+                  )).single['id']
+                  as num)
+              .toInt();
+
+      Future<void> addReceipt(
+        Map<String, Object?> tenant,
+        double amount,
+      ) async {
+        final tenantId = (tenant['id'] as num).toInt();
+        final tenantAccountId = (tenant['account_id'] as num).toInt();
+        final journalId = await db.insert('journal_entries', {
+          'entry_date': '2026-02-10',
+          'description': 'قبض مستأجر لاختبار المرشح',
+          'is_posted': 1,
+        });
+        await db.insert('journal_lines', {
+          'journal_entry_id': journalId,
+          'account_id': cashAccountId,
+          'debit': amount,
+          'credit': 0.0,
+        });
+        await db.insert('journal_lines', {
+          'journal_entry_id': journalId,
+          'account_id': tenantAccountId,
+          'debit': 0.0,
+          'credit': amount,
+        });
+        await db.insert('vouchers', {
+          'voucher_type': 'قبض مستأجر',
+          'voucher_date': '2026-02-10',
+          'amount': amount,
+          'tenant_id': tenantId,
+          'party_name': tenant['name'],
+          'journal_entry_id': journalId,
+          'description': 'قبض اختباري',
+        });
+      }
+
+      await addReceipt(tenants[0], 25.0);
+      await addReceipt(tenants[1], 75.0);
+
+      final completeReport = await helper.getTenantCollectionReport(
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+      );
+      expect(completeReport.rows, hasLength(2));
+      expect(completeReport.grossReceiptsMinor, 10000);
+
+      final firstTenantId = (tenants[0]['id'] as num).toInt();
+      final firstTenantReport = await helper.getTenantCollectionReport(
+        startDate: '2026-02-01',
+        endDate: '2026-02-28',
+        tenantId: firstTenantId,
+      );
+      expect(firstTenantReport.tenantId, firstTenantId);
+      expect(firstTenantReport.tenantName, tenants[0]['name']);
+      expect(firstTenantReport.rows, hasLength(1));
+      expect(firstTenantReport.rows.single.tenantId, firstTenantId);
+      expect(firstTenantReport.rows.single.tenantName, tenants[0]['name']);
+      expect(firstTenantReport.grossReceiptsMinor, 2500);
+      expect(firstTenantReport.netCollectedMinor, 2500);
+    },
+  );
+
+  test(
     'does not verify refunds after cumulative source cap is exceeded',
     () async {
       final db = await helper.database;

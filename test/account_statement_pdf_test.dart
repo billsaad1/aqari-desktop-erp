@@ -69,12 +69,13 @@ void main() {
         lines: const [],
       );
       final bytes = await AccountStatementPdf.build(
-        report: report,
+        report: report.forSelectedPeriodOnly(),
         companyInfo: null,
         currency: 'ريال سعودي',
         statementTitle: 'كشف حساب المستأجر',
         partyName: 'مستأجر للاختبار',
         accountLabel: 'حساب الذمم',
+        periodOnly: true,
       );
 
       expect(bytes, isNotEmpty);

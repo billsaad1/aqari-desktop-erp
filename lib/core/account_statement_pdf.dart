@@ -15,6 +15,7 @@ class AccountStatementPdf {
     String? partyName,
     String partyLabel = 'المستأجر',
     String accountLabel = 'الحساب',
+    bool periodOnly = false,
   }) async {
     final pdf = pw.Document();
     final theme = await PrintUtils.loadArabicTheme();
@@ -134,21 +135,42 @@ class AccountStatementPdf {
               borderRadius: pw.BorderRadius.circular(5),
             ),
             child: pw.Column(
-              children: [
-                pw.Row(
-                  children: [
-                    _summaryCell('الرصيد الافتتاحي', report.openingBalance),
-                    _summaryCell('إجمالي المدين', report.totalDebit),
-                  ],
-                ),
-                pw.SizedBox(height: 6),
-                pw.Row(
-                  children: [
-                    _summaryCell('إجمالي الدائن', report.totalCredit),
-                    _summaryCell('الرصيد الختامي', report.closingBalance),
-                  ],
-                ),
-              ],
+              children: periodOnly
+                  ? [
+                      pw.Row(
+                        children: [
+                          _summaryCell('إجمالي المدين', report.totalDebit),
+                          _summaryCell('إجمالي الدائن', report.totalCredit),
+                        ],
+                      ),
+                      pw.SizedBox(height: 6),
+                      pw.Row(
+                        children: [
+                          _summaryCell(
+                            'صافي حركة الفترة',
+                            report.closingBalance,
+                          ),
+                        ],
+                      ),
+                    ]
+                  : [
+                      pw.Row(
+                        children: [
+                          _summaryCell(
+                            'الرصيد الافتتاحي',
+                            report.openingBalance,
+                          ),
+                          _summaryCell('إجمالي المدين', report.totalDebit),
+                        ],
+                      ),
+                      pw.SizedBox(height: 6),
+                      pw.Row(
+                        children: [
+                          _summaryCell('إجمالي الدائن', report.totalCredit),
+                          _summaryCell('الرصيد الختامي', report.closingBalance),
+                        ],
+                      ),
+                    ],
             ),
           ),
           pw.SizedBox(height: 12),
@@ -159,7 +181,7 @@ class AccountStatementPdf {
               'البيان',
               'مدين',
               'دائن',
-              'الرصيد',
+              periodOnly ? 'رصيد الفترة' : 'الرصيد',
             ],
             data: tableData,
             headerStyle: pw.TextStyle(
@@ -200,7 +222,9 @@ class AccountStatementPdf {
             pw.Padding(
               padding: const pw.EdgeInsets.all(12),
               child: pw.Text(
-                'لا توجد حركات مرحلة خلال الفترة المحددة؛ يظهر الرصيد الافتتاحي والختامي أعلاه.',
+                periodOnly
+                    ? 'لا توجد حركات مرحلة داخل الفترة المحددة.'
+                    : 'لا توجد حركات مرحلة خلال الفترة المحددة؛ يظهر الرصيد الافتتاحي والختامي أعلاه.',
                 textDirection: pw.TextDirection.rtl,
                 textAlign: pw.TextAlign.center,
                 style: const pw.TextStyle(color: PdfColors.grey700),

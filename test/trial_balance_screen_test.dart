@@ -124,6 +124,22 @@ void main() {
             .onPressed,
         isNotNull,
       );
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, 'تصدير CSV'),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, 'تصدير Excel'),
+            )
+            .onPressed,
+        isNull,
+      );
 
       PermissionRuntime.activate(
         userId: 44,

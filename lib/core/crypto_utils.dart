@@ -50,6 +50,9 @@ class CryptoUtils {
 
   static bool isLegacyHash(String hash) => !hash.startsWith('pbkdf2_sha256\$');
 
+  static bool isValidNumericPin(String value) =>
+      RegExp(r'^[0-9٠-٩۰-۹]{4,5}$').hasMatch(value);
+
   static List<int> _pbkdf2(
     List<int> password,
     List<int> salt,

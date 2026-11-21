@@ -11,12 +11,14 @@ import '../../core/income_expense_report_pdf.dart';
 import '../../database/database_helper.dart';
 import '../../models/income_expense_report_model.dart';
 import '../../providers/reports_provider.dart';
+import '../../services/report_export_service.dart';
 
 class IncomeExpenseReportScreen extends StatefulWidget {
   const IncomeExpenseReportScreen({
     super.key,
     this.companyInfoLoader,
     this.pdfBuilder,
+    this.reportExportService,
   });
 
   final Future<Map<String, dynamic>?> Function()? companyInfoLoader;
@@ -26,6 +28,7 @@ class IncomeExpenseReportScreen extends StatefulWidget {
     String currency,
   )?
   pdfBuilder;
+  final ReportExportService? reportExportService;
 
   @override
   State<IncomeExpenseReportScreen> createState() =>
@@ -263,6 +266,77 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
     }
   }
 
+  Future<void> _export(
+    IncomeExpenseReport report,
+    ReportExportFormat format,
+  ) async {
+    final reportsProvider = Provider.of<ReportsProvider>(
+      context,
+      listen: false,
+    );
+    final sourceReport = reportsProvider.incomeExpenseReport;
+    final sourceGeneration = reportsProvider.incomeExpenseReportGeneration;
+    final selectedFilterKey = report.costCenterFilterKey;
+    final authorizationUserId = PermissionRuntime.userId;
+    final authorizationRole = PermissionRuntime.role;
+    bool isAuthorizedAndCurrent() =>
+        mounted &&
+        PermissionRuntime.userId == authorizationUserId &&
+        PermissionRuntime.role == authorizationRole &&
+        PermissionRuntime.allows('reports', AppPermissionAction.view) &&
+        PermissionRuntime.allows('reports', AppPermissionAction.print) &&
+        sourceReport != null &&
+        identical(reportsProvider.incomeExpenseReport, sourceReport) &&
+        reportsProvider.incomeExpenseReportGeneration == sourceGeneration &&
+        _selectedCostCenterKey == selectedFilterKey &&
+        report.startDate == _startDateController.text &&
+        report.endDate == _endDateController.text &&
+        sourceReport.startDate == report.startDate &&
+        sourceReport.endDate == report.endDate;
+
+    if (!isAuthorizedAndCurrent()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا تملك صلاحية تصدير هذا التقرير')),
+      );
+      return;
+    }
+    try {
+      final result = await (widget.reportExportService ?? ReportExportService())
+          .exportReport(
+            data: ReportExportData.incomeExpense(report),
+            format: format,
+            isAuthorized: isAuthorizedAndCurrent,
+          );
+      if (!mounted) return;
+      switch (result.status) {
+        case ReportExportStatus.saved:
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('تم حفظ التقرير في ${result.path}')),
+          );
+          break;
+        case ReportExportStatus.cancelled:
+          break;
+        case ReportExportStatus.permissionDenied:
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'انتهت صلاحية التصدير أو تغيّر التقرير؛ أعد تحميله.',
+              ),
+            ),
+          );
+          break;
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('تعذر تصدير تقرير الإيرادات والمصروفات: $error'),
+          ),
+        );
+      }
+    }
+  }
+
   String _amount(int minor) =>
       NumberFormat('#,##0.00', 'en_US').format(minor / 100);
 
@@ -362,6 +436,36 @@ class _IncomeExpenseReportScreenState extends State<IncomeExpenseReportScreen> {
                                 : null,
                             icon: const Icon(Icons.picture_as_pdf_outlined),
                             label: const Text('معاينة التقرير'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed:
+                                visibleReport != null &&
+                                    PermissionRuntime.allows(
+                                      'reports',
+                                      AppPermissionAction.print,
+                                    )
+                                ? () => _export(
+                                    visibleReport,
+                                    ReportExportFormat.csv,
+                                  )
+                                : null,
+                            icon: const Icon(Icons.table_view_outlined),
+                            label: const Text('تصدير CSV'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed:
+                                visibleReport != null &&
+                                    PermissionRuntime.allows(
+                                      'reports',
+                                      AppPermissionAction.print,
+                                    )
+                                ? () => _export(
+                                    visibleReport,
+                                    ReportExportFormat.xlsx,
+                                  )
+                                : null,
+                            icon: const Icon(Icons.grid_on_outlined),
+                            label: const Text('تصدير Excel'),
                           ),
                         ],
                       ),

@@ -12,6 +12,7 @@ import 'providers/sms_provider.dart';
 import 'providers/tenant_notices_provider.dart';
 import 'features/auth/login_screen.dart';
 import 'core/app_theme.dart';
+import 'core/session_idle_guard.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -92,6 +93,13 @@ class ERPApp extends StatelessWidget {
       title: 'مؤسسة عبدالله النقيب التجارية - ERP',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
+      builder: (context, child) => Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => SessionIdleGuard.notifyGlobalActivity(),
+        onPointerMove: (_) => SessionIdleGuard.notifyGlobalActivity(),
+        onPointerSignal: (_) => SessionIdleGuard.notifyGlobalActivity(),
+        child: child ?? const SizedBox.shrink(),
+      ),
       scrollBehavior: const MaterialScrollBehavior().copyWith(scrollbars: true),
       // RTL Support for Arabic
       localizationsDelegates: const [

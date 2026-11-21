@@ -112,4 +112,17 @@ class LeasingProvider with ChangeNotifier {
     await DatabaseHelper.instance.cancelContract(contractId, reason: reason);
     await loadInitialData();
   }
+
+  Future<void> terminateContractEarly(
+    int contractId, {
+    required String effectiveDate,
+    required String reason,
+  }) async {
+    await DatabaseHelper.instance.terminateContractEarly(
+      contractId,
+      effectiveDate: effectiveDate,
+      reason: reason,
+    );
+    await loadInitialData();
+  }
 }
