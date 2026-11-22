@@ -716,7 +716,7 @@ class PrintUtils {
         footer: (context) => buildPageFooter(context, companyInfo),
         build: (_) => [
           _documentTitle(voucherType),
-          pw.SizedBox(height: 6),
+          pw.SizedBox(height: 3),
           pw.Row(
             children: [
               pw.Expanded(
@@ -733,9 +733,9 @@ class PrintUtils {
             ],
           ),
           if (isReceipt && receiptAllocationRows.isNotEmpty) ...[
-            pw.SizedBox(height: 9),
-            _documentTitle('بيانات العقار والدفعة'),
             pw.SizedBox(height: 5),
+            _documentTitle('بيانات العقار والدفعة'),
+            pw.SizedBox(height: 4),
             pw.TableHelper.fromTextArray(
               headers: const [
                 'العقار',
@@ -782,9 +782,12 @@ class PrintUtils {
               border: pw.TableBorder.all(color: softBorder, width: 0.5),
             ),
           ],
-          pw.SizedBox(height: 9),
+          pw.SizedBox(height: 6),
           pw.Container(
-            padding: const pw.EdgeInsets.all(12),
+            padding: const pw.EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 8,
+            ),
             decoration: pw.BoxDecoration(
               color: softSurface,
               border: pw.Border.all(color: softBorder),
@@ -896,7 +899,7 @@ class PrintUtils {
               ],
             ),
           ),
-          pw.SizedBox(height: 18),
+          pw.SizedBox(height: 6),
           pw.Row(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
@@ -1264,7 +1267,7 @@ class PrintUtils {
             color: brandNavy,
           ),
         ),
-        pw.SizedBox(height: 24),
+        pw.SizedBox(height: 16),
         pw.Padding(
           padding: const pw.EdgeInsets.symmetric(horizontal: 12),
           child: pw.Container(height: 0.7, color: PdfColors.grey700),
