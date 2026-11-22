@@ -83,11 +83,14 @@ class LookupTab extends StatefulWidget {
   final List<String> displayFields;
   @visibleForTesting
   final Future<List<Map<String, dynamic>>> Function()? dataLoader;
+  @visibleForTesting
+  final Future<List<Map<String, dynamic>>> Function()? bankAccountLoader;
   const LookupTab({
     super.key,
     required this.config,
     required this.displayFields,
     this.dataLoader,
+    this.bankAccountLoader,
   });
 
   @override
@@ -96,6 +99,7 @@ class LookupTab extends StatefulWidget {
 
 class _LookupTabState extends State<LookupTab> {
   List<Map<String, dynamic>> _data = [];
+  List<Map<String, dynamic>> _bankAccounts = [];
   bool _isLoading = true;
   final TextEditingController _searchController = TextEditingController();
 
@@ -123,9 +127,24 @@ class _LookupTabState extends State<LookupTab> {
     if (query.isEmpty) return _data;
     return _data.where((row) {
       return ['id', ...widget.displayFields].any((field) {
-        return (row[field]?.toString() ?? '').toLowerCase().contains(query);
+        return _displayFieldValue(row, field).toLowerCase().contains(query);
       });
     }).toList();
+  }
+
+  String _displayFieldValue(Map<String, dynamic> row, String field) {
+    if (widget.config.tableName == 'banks' && field == 'account_id') {
+      final rawId = row[field];
+      if (rawId == null) return 'غير مرتبط';
+      final id = rawId is num ? rawId.toInt() : int.tryParse(rawId.toString());
+      for (final account in _bankAccounts) {
+        if ((account['id'] as num).toInt() == id) {
+          return '${account['code']} — ${account['name']}';
+        }
+      }
+      return 'حساب غير صالح (#$rawId)';
+    }
+    return row[field]?.toString() ?? '';
   }
 
   Future<void> _loadData() async {
@@ -133,27 +152,52 @@ class _LookupTabState extends State<LookupTab> {
     final data = loader == null
         ? await DatabaseHelper.instance.getLookupData(widget.config.tableName)
         : await loader();
+    final bankAccounts = widget.config.tableName == 'banks'
+        ? await (widget.bankAccountLoader == null
+              ? DatabaseHelper.instance.getBankLookupAccounts()
+              : widget.bankAccountLoader!())
+        : <Map<String, dynamic>>[];
     if (!mounted) return;
     setState(() {
       _data = data;
+      _bankAccounts = bankAccounts;
       _isLoading = false;
     });
   }
 
-  void _showAddEditDialog([Map<String, dynamic>? item]) {
+  Future<void> _showAddEditDialog([Map<String, dynamic>? item]) async {
+    final isBank = widget.config.tableName == 'banks';
+    final bankAccounts = isBank
+        ? await (widget.bankAccountLoader == null
+              ? DatabaseHelper.instance.getBankLookupAccounts()
+              : widget.bankAccountLoader!())
+        : <Map<String, dynamic>>[];
+    if (!mounted) return;
+
     final formKey = GlobalKey<FormState>();
     final Map<String, TextEditingController> controllers = {};
+    final rawInitialAccountId = item?['account_id'];
+    final initialBankAccountId = rawInitialAccountId is num
+        ? rawInitialAccountId.toInt()
+        : int.tryParse(rawInitialAccountId?.toString() ?? '');
+    var selectedBankAccountId =
+        bankAccounts.any(
+          (account) => (account['id'] as num).toInt() == initialBankAccountId,
+        )
+        ? initialBankAccountId
+        : null;
 
     for (var field in widget.config.fields) {
+      if (isBank && field == 'account_id') continue;
       controllers[field] = TextEditingController(
         text: item != null ? item[field]?.toString() : '',
       );
     }
 
-    showDialog(
+    await showDialog<void>(
       context: context,
-      builder: (context) {
-        return AlertDialog(
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
           title: Text(
             item == null
                 ? 'إضافة ${widget.config.title}'
@@ -163,13 +207,48 @@ class _LookupTabState extends State<LookupTab> {
             key: formKey,
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              children: widget.config.fields.map((field) {
-                return TextFormField(
-                  controller: controllers[field],
-                  decoration: InputDecoration(labelText: field),
-                  validator: (v) => v!.isEmpty ? 'مطلوب' : null,
-                );
-              }).toList(),
+              children: [
+                for (final field in widget.config.fields)
+                  if (isBank && field == 'account_id') ...[
+                    if (initialBankAccountId != null &&
+                        selectedBankAccountId == null)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          'الحساب المرتبط حاليًا غير صالح. اختر حسابًا تفصيليًا من النقدية والبنوك لإصلاح الربط.',
+                          style: TextStyle(color: Colors.deepOrange),
+                        ),
+                      ),
+                    DropdownButtonFormField<int>(
+                      initialValue: selectedBankAccountId,
+                      items: bankAccounts
+                          .map(
+                            (account) => DropdownMenuItem<int>(
+                              value: (account['id'] as num).toInt(),
+                              child: Text(
+                                '${account['code']} — ${account['name']}',
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) =>
+                          setDialogState(() => selectedBankAccountId = value),
+                      decoration: const InputDecoration(
+                        labelText: 'الحساب البنكي المحاسبي',
+                        helperText:
+                            'اختر حسابًا تفصيليًا تحت النقدية والبنوك (11)',
+                      ),
+                      validator: (value) =>
+                          value == null ? 'اختر حسابًا بنكيًا صالحًا' : null,
+                    ),
+                  ] else
+                    TextFormField(
+                      controller: controllers[field],
+                      decoration: InputDecoration(labelText: field),
+                      validator: (value) =>
+                          value?.trim().isEmpty ?? true ? 'مطلوب' : null,
+                    ),
+              ],
             ),
           ),
           actions: [
@@ -179,12 +258,14 @@ class _LookupTabState extends State<LookupTab> {
             ),
             ElevatedButton(
               onPressed: () async {
-                if (formKey.currentState!.validate()) {
-                  final Map<String, dynamic> data = {};
-                  for (var field in widget.config.fields) {
-                    data[field] = controllers[field]!.text;
-                  }
-
+                if (!(formKey.currentState?.validate() ?? false)) return;
+                final data = <String, dynamic>{
+                  for (final field in widget.config.fields)
+                    if (!(isBank && field == 'account_id'))
+                      field: controllers[field]!.text.trim(),
+                };
+                if (isBank) data['account_id'] = selectedBankAccountId;
+                try {
                   if (item == null) {
                     await DatabaseHelper.instance.insertLookupData(
                       widget.config.tableName,
@@ -200,16 +281,24 @@ class _LookupTabState extends State<LookupTab> {
 
                   if (context.mounted) {
                     Navigator.pop(context);
-                    _loadData();
+                    await _loadData();
                   }
+                } catch (error) {
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('تعذر حفظ البيانات: $error')),
+                  );
                 }
               },
               child: const Text('حفظ'),
             ),
           ],
-        );
-      },
+        ),
+      ),
     );
+    for (final controller in controllers.values) {
+      controller.dispose();
+    }
   }
 
   void _deleteItem(int id) async {
@@ -291,7 +380,7 @@ class _LookupTabState extends State<LookupTab> {
                             DataCell(Text(row['id'].toString())),
                             ...widget.displayFields.map(
                               (field) => DataCell(
-                                Text(row[field]?.toString() ?? ''),
+                                Text(_displayFieldValue(row, field)),
                               ),
                             ),
                             DataCell(
@@ -303,10 +392,11 @@ class _LookupTabState extends State<LookupTab> {
                                       Icons.edit,
                                       color: AppPalette.navy,
                                     ),
-                                    onPressed: PermissionRuntime.allows(
-                                      'lookups',
-                                      AppPermissionAction.edit,
-                                    )
+                                    onPressed:
+                                        PermissionRuntime.allows(
+                                          'lookups',
+                                          AppPermissionAction.edit,
+                                        )
                                         ? () => _showAddEditDialog(row)
                                         : null,
                                   ),
@@ -315,10 +405,11 @@ class _LookupTabState extends State<LookupTab> {
                                       Icons.delete,
                                       color: Colors.red,
                                     ),
-                                    onPressed: PermissionRuntime.allows(
-                                      'lookups',
-                                      AppPermissionAction.delete,
-                                    )
+                                    onPressed:
+                                        PermissionRuntime.allows(
+                                          'lookups',
+                                          AppPermissionAction.delete,
+                                        )
                                         ? () => _deleteItem(row['id'])
                                         : null,
                                   ),

@@ -63,6 +63,17 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   String _displayAmount(dynamic value) =>
       NumberFormat('#,##0.00').format(((value as num?) ?? 0).toDouble());
 
+  bool _isFutureDueDate(Object? value) {
+    final dueDate = DateTime.tryParse(value?.toString() ?? '');
+    if (dueDate == null) return false;
+    final today = DateTime.now();
+    return DateTime(
+      dueDate.year,
+      dueDate.month,
+      dueDate.day,
+    ).isAfter(DateTime(today.year, today.month, today.day));
+  }
+
   Future<void> _pickDate() async {
     final current = DateTime.tryParse(_dateController.text) ?? DateTime.now();
     final date = await showDatePicker(
@@ -574,10 +585,13 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                             final paid =
                                 ((installment['paid_amount'] as num?) ?? 0)
                                     .toDouble();
+                            final isFuture = _isFutureDueDate(
+                              installment['due_date'],
+                            );
                             return DropdownMenuItem<int>(
                               value: id,
                               child: Text(
-                                'الدفعة ${installment['installment_number'] ?? '—'} | ${installment['property_name'] ?? 'العقار'} - ${installment['unit_number'] ?? 'الوحدة'} | ${installment['due_date']} | المتبقي ${_displayAmount(total - paid)}',
+                                'الدفعة ${installment['installment_number'] ?? '—'}${isFuture ? ' (مستقبلية)' : ''} | ${installment['property_name'] ?? 'العقار'} - ${installment['unit_number'] ?? 'الوحدة'} | ${installment['due_date']} | المتبقي ${_displayAmount(total - paid)}',
                                 overflow: TextOverflow.ellipsis,
                               ),
                             );
@@ -594,6 +608,10 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                         ),
                         if (_selectedInstallment != null) ...[
                           const SizedBox(height: 8),
+                          const Text(
+                            'يمكن تحصيل القسط قبل موعده. إذا كان القسط مرتبطًا بفاتورة، اختر «سداد فاتورة».',
+                            style: TextStyle(fontSize: 12),
+                          ),
                           Text(
                             'الدفعة ${_selectedInstallment!['installment_number'] ?? '—'} — المبلغ: ${_displayAmount(_selectedInstallment!['amount'])} — الاستحقاق: ${_selectedInstallment!['due_date']}',
                             style: const TextStyle(fontWeight: FontWeight.w600),

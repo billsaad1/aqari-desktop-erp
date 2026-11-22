@@ -46,7 +46,9 @@ class MainShellScreen extends StatelessWidget {
         if (!context.mounted) return;
         context.read<NavigationProvider>().reset();
         Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          MaterialPageRoute(
+            builder: (_) => const LoginScreen(sessionExpired: true),
+          ),
           (route) => false,
         );
       },

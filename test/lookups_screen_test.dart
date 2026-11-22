@@ -67,7 +67,9 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: LookupTab(
-            config: LookupConfig('مراكز التكلفة', 'cost_centers', const ['name']),
+            config: LookupConfig('مراكز التكلفة', 'cost_centers', const [
+              'name',
+            ]),
             displayFields: const ['code', 'name'],
             dataLoader: () async => const [
               {'id': 1, 'code': 'CC927', 'name': targetName},
@@ -83,5 +85,44 @@ void main() {
     await tester.pumpAndSettle();
     expect(tableCellText(targetName), findsOneWidget);
     expect(tableCellText(otherName), findsNothing);
+  });
+
+  testWidgets('bank lookup repairs invalid account links using cash accounts', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: LookupTab(
+            config: LookupConfig('البنوك', 'banks', const [
+              'name',
+              'account_id',
+            ]),
+            displayFields: const ['name', 'account_id'],
+            dataLoader: () async => const [
+              {'id': 1, 'name': 'بنك تجريبي', 'account_id': 5},
+            ],
+            bankAccountLoader: () async => const [
+              {'id': 9, 'code': '1102', 'name': 'البنك'},
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tableCellText('حساب غير صالح (#5)'), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.edit));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('الحساب المرتبط حاليًا غير صالح'),
+      findsOneWidget,
+    );
+    expect(find.byType(DropdownButtonFormField<int>), findsOneWidget);
+    expect(find.byType(TextFormField), findsOneWidget);
+    await tester.tap(find.byType(DropdownButtonFormField<int>));
+    await tester.pumpAndSettle();
+    expect(find.text('1102 — البنك'), findsOneWidget);
   });
 }

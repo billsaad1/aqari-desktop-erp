@@ -3736,6 +3736,63 @@ class DatabaseHelper {
     return await db.query(tableName);
   }
 
+  Future<List<Map<String, dynamic>>> getBankLookupAccounts() async {
+    _requireLookupReadPermission('banks');
+    final db = await instance.database;
+    final candidates = await db.query(
+      'accounts',
+      columns: ['id', 'code', 'name'],
+      where: 'account_type = ?',
+      whereArgs: ['Asset'],
+      orderBy: 'code COLLATE NOCASE, id',
+    );
+    final validAccounts = <Map<String, dynamic>>[];
+    for (final candidate in candidates) {
+      final id = (candidate['id'] as num).toInt();
+      try {
+        final account = await _requireOwnerSettlementCashAccountTx(db, id);
+        validAccounts.add({
+          'id': (account['id'] as num).toInt(),
+          'code': account['code'],
+          'name': account['name'],
+        });
+      } on ArgumentError {
+        continue;
+      } on StateError {
+        continue;
+      }
+    }
+    _requireLookupReadPermission('banks');
+    return validAccounts;
+  }
+
+  Future<int> _validatedBankAccountIdTx(
+    DatabaseExecutor executor,
+    Object? rawAccountId,
+  ) async {
+    int? accountId;
+    if (rawAccountId is int) {
+      accountId = rawAccountId;
+    } else if (rawAccountId is num) {
+      final value = rawAccountId.toDouble();
+      if (value.isFinite && value == value.roundToDouble()) {
+        accountId = value.toInt();
+      }
+    } else {
+      accountId = int.tryParse(rawAccountId?.toString().trim() ?? '');
+    }
+    if (accountId == null || accountId <= 0) {
+      throw ArgumentError(
+        'اختر حسابًا بنكيًا صالحًا من حسابات النقدية والبنوك',
+      );
+    }
+    final account = await _requireOwnerSettlementCashAccountTx(
+      executor,
+      accountId,
+    );
+    return (account['id'] as num).toInt();
+  }
+
   Future<int> insertLookupData(
     String tableName,
     Map<String, dynamic> data,
@@ -3743,6 +3800,20 @@ class DatabaseHelper {
     _validateLookupTable(tableName);
     PermissionRuntime.require('lookups', AppPermissionAction.add);
     final db = await instance.database;
+
+    if (tableName == 'banks') {
+      final values = Map<String, dynamic>.from(data);
+      final name = values['name']?.toString().trim() ?? '';
+      if (name.isEmpty) throw ArgumentError('اسم البنك مطلوب');
+      return db.transaction((txn) async {
+        values['name'] = name;
+        values['account_id'] = await _validatedBankAccountIdTx(
+          txn,
+          values['account_id'],
+        );
+        return txn.insert(tableName, values);
+      });
+    }
 
     // Auto-generate code for cost_centers
     if (tableName == 'cost_centers' &&
@@ -3775,6 +3846,31 @@ class DatabaseHelper {
     _validateLookupTable(tableName);
     PermissionRuntime.require('lookups', AppPermissionAction.edit);
     final db = await instance.database;
+    if (tableName == 'banks') {
+      final values = Map<String, dynamic>.from(data);
+      final id = values['id'];
+      if (id is! int || id <= 0) throw ArgumentError('معرف البنك غير صالح');
+      final name = values['name']?.toString().trim() ?? '';
+      if (name.isEmpty) throw ArgumentError('اسم البنك مطلوب');
+      return db.transaction((txn) async {
+        final existing = await txn.query(
+          'banks',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [id],
+          limit: 1,
+        );
+        if (existing.isEmpty) throw StateError('سجل البنك المطلوب غير موجود');
+        values
+          ..remove('id')
+          ..['name'] = name
+          ..['account_id'] = await _validatedBankAccountIdTx(
+            txn,
+            values['account_id'],
+          );
+        return txn.update('banks', values, where: 'id = ?', whereArgs: [id]);
+      });
+    }
     return await db.update(
       tableName,
       data,

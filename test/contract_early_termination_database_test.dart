@@ -331,4 +331,91 @@ void main() {
       );
     },
   );
+
+  test(
+    'lists and allows prepayment of an installment whose due date is in the future',
+    () async {
+      final db = await helper.database;
+      final today = DateTime.now();
+      String date(DateTime value) => value.toIso8601String().substring(0, 10);
+      final startDate = DateTime(today.year + 1, 1, 1);
+      final endDate = ContractTerm.endDateForMonths(startDate, 1);
+
+      await helper.insertTenantWithAccount({
+        'name': 'مستأجر سداد قسط مستقبلي',
+        'mobile': '777810103',
+      });
+      final tenant = (await db.query(
+        'tenants',
+        columns: ['id'],
+        where: 'name = ?',
+        whereArgs: ['مستأجر سداد قسط مستقبلي'],
+        limit: 1,
+      )).single;
+      final tenantId = (tenant['id'] as num).toInt();
+      final ownerId = await db.insert('owners', {'name': 'مالك السداد المبكر'});
+      final propertyId = await db.insert('properties', {
+        'name': 'عقار السداد المبكر',
+        'owner_id': ownerId,
+      });
+      final unitId = await db.insert('units', {
+        'property_id': propertyId,
+        'unit_number': 'FP-01',
+        'status': 'شاغرة',
+        'default_rent': 100.0,
+        'default_rent_period': 'monthly',
+      });
+      final contractId = await helper.insertContractWithInstallments(
+        {
+          'tenant_id': tenantId,
+          'unit_id': unitId,
+          'start_date': date(startDate),
+          'end_date': date(endDate),
+          'rent_amount': 100.0,
+          'payment_method': 'شهري',
+          'status': 'Active',
+        },
+        [
+          {
+            'amount': 100.0,
+            'paid_amount': 0.0,
+            'due_date': date(startDate),
+            'status': 'Unpaid',
+          },
+        ],
+      );
+
+      final receivables = await helper.getUnbilledInstallmentsForTenant(
+        tenantId,
+      );
+      expect(receivables, hasLength(1));
+      expect(receivables.single['due_date'], date(startDate));
+      final installmentId = (receivables.single['id'] as num).toInt();
+      final cashAccountId =
+          ((await db.query(
+                    'accounts',
+                    columns: ['id'],
+                    where: 'code = ?',
+                    whereArgs: ['1101'],
+                    limit: 1,
+                  )).single['id']
+                  as num)
+              .toInt();
+
+      final receiptId = await helper.insertTenantReceiptVoucher(
+        tenantId: tenantId,
+        amount: 100.0,
+        voucherDate: date(today),
+        cashAccountId: cashAccountId,
+        installmentsToUpdate: [
+          {'id': installmentId, 'paid_amount': 100.0, 'status': 'Paid'},
+        ],
+      );
+
+      expect(receiptId, greaterThan(0));
+      final paid = (await helper.getInstallmentsForContract(contractId)).single;
+      expect(paid['status'], 'Paid');
+      expect(paid['paid_amount'], 100.0);
+    },
+  );
 }
