@@ -2340,6 +2340,11 @@ void main() {
       );
       expect(String.fromCharCodes(detailedVoucherPdf.take(5)), '%PDF-');
       expect(detailedVoucherPdf.length, greaterThan(pdf.length));
+      final detailedPdfText = latin1.decode(detailedVoucherPdf);
+      final detailedPdfPageCount = RegExp(
+        r'/Type\s*/Page\b',
+      ).allMatches(detailedPdfText).length;
+      expect(detailedPdfPageCount, 2);
       expect(PrintUtils.suggestedPdfName('سند قبض/17'), 'سند_قبض_17.pdf');
       expect(PrintUtils.currencyInArabic('YER'), 'ريال يمني');
       expect(PrintUtils.currencyInArabic('ريال سعودي (SAR)'), 'ريال سعودي');
