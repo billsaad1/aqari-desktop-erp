@@ -266,4 +266,54 @@ void main() {
       );
     },
   );
+
+  test(
+    'bank lookup must use a cash account and cannot occupy tenant control account',
+    () async {
+      final db = await helper.database;
+      final tenantParentId = await parentAccountId(db);
+
+      await expectLater(
+        helper.insertLookupData('banks', {
+          'name': 'بنك مربوط خطأ بذمم المستأجرين',
+          'account_id': tenantParentId,
+        }),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(
+        await db.query(
+          'banks',
+          where: 'name = ?',
+          whereArgs: ['بنك مربوط خطأ بذمم المستأجرين'],
+        ),
+        isEmpty,
+      );
+
+      final cashRows = await db.query(
+        'accounts',
+        columns: ['id'],
+        where: 'code = ?',
+        whereArgs: ['1102'],
+        limit: 1,
+      );
+      final bankAccountId = (cashRows.single['id'] as num).toInt();
+      await helper.insertLookupData('banks', {
+        'name': 'بنك مربوط بحساب النقدية الصحيح',
+        'account_id': bankAccountId,
+      });
+
+      await helper.insertTenantWithAccount({
+        'name': 'مستأجر بعد إعداد البنك بشكل صحيح',
+        'mobile': '7777001010',
+      });
+      expect(
+        await db.query(
+          'tenants',
+          where: 'name = ?',
+          whereArgs: ['مستأجر بعد إعداد البنك بشكل صحيح'],
+        ),
+        hasLength(1),
+      );
+    },
+  );
 }

@@ -9,7 +9,9 @@ import '../../providers/auth_provider.dart';
 import '../main_shell/main_shell_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.sessionExpired = false});
+
+  final bool sessionExpired;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -269,6 +271,23 @@ class _LoginScreenState extends State<LoginScreen> {
                   context,
                 ).textTheme.bodyMedium?.copyWith(color: AppPalette.mutedText),
               ),
+              if (widget.sessionExpired) ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.amber.withValues(alpha: 0.45),
+                    ),
+                  ),
+                  child: const Text(
+                    'انتهت الجلسة بسبب عدم النشاط، وقد يحدث ذلك أثناء سكون الجهاز. سجّل الدخول للمتابعة؛ لا يلزم إغلاق التطبيق.',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ],
               const SizedBox(height: 28),
               TextFormField(
                 controller: _usernameController,
