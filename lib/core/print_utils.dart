@@ -664,7 +664,8 @@ class PrintUtils {
     final pdf = pw.Document();
     final theme = await loadArabicTheme();
     final currencyLabel = currencyInArabic(companyInfo?['default_currency']);
-    final isReceipt = voucherType.contains('قبض');
+    final isCorrectionReversal = voucherType == 'عكس قبض مستأجر';
+    final isReceipt = voucherType.contains('قبض') && !isCorrectionReversal;
     final hasParty = targetName != null && targetName.trim().isNotEmpty;
     final normalizedMethod = paymentMethod?.trim();
     final normalizedPeriodStart = _firstNonEmpty(periodStartDate);
@@ -735,27 +736,27 @@ class PrintUtils {
           if (isReceipt && receiptAllocationRows.isNotEmpty) ...[
             // Keep a compact gap close to the removed heading's former height
             // so the allocation table moves up slightly without crowding it.
-            pw.SizedBox(height: 24),
+            pw.SizedBox(height: 8),
             pw.TableHelper.fromTextArray(
               headers: const [
-                'العقار',
-                'رقم الوحدة',
-                'رقم الدفعة / الفاتورة',
-                'تاريخ الاستحقاق',
                 'المبلغ المحصل',
+                'تاريخ الاستحقاق',
+                'رقم الدفعة / الفاتورة',
+                'رقم الوحدة',
+                'العقار',
               ],
               data: receiptAllocationRows
                   .map(
                     (allocation) => [
-                      allocation['property_name']?.toString() ?? '—',
-                      allocation['unit_number']?.toString() ?? '—',
-                      'رقم ${allocation['installment_number'] ?? '—'}'
-                          '${allocation['invoice_id'] == null ? '' : '\nفاتورة ${allocation['invoice_id']}'}',
-                      allocation['due_date']?.toString() ?? '—',
                       formatPdfAmount(
                         (allocation['allocated_amount'] as num?)?.toDouble() ??
                             0,
                       ),
+                      allocation['due_date']?.toString() ?? '—',
+                      'رقم ${allocation['installment_number'] ?? '—'}'
+                          '${allocation['invoice_id'] == null ? '' : '\nفاتورة ${allocation['invoice_id']}'}',
+                      allocation['unit_number']?.toString() ?? '—',
+                      allocation['property_name']?.toString() ?? '—',
                     ],
                   )
                   .toList(),
@@ -766,6 +767,7 @@ class PrintUtils {
               ),
               headerDecoration: pw.BoxDecoration(color: brandNavy),
               cellStyle: const pw.TextStyle(fontSize: 8),
+              cellAlignment: pw.Alignment.center,
               cellPadding: const pw.EdgeInsets.symmetric(
                 horizontal: 5,
                 vertical: 5,
@@ -773,21 +775,18 @@ class PrintUtils {
               tableDirection: pw.TextDirection.rtl,
               headerDirection: pw.TextDirection.rtl,
               columnWidths: const {
-                0: pw.FlexColumnWidth(1.8),
-                1: pw.FlexColumnWidth(0.9),
+                0: pw.FlexColumnWidth(1.1),
+                1: pw.FlexColumnWidth(1.15),
                 2: pw.FlexColumnWidth(1.25),
-                3: pw.FlexColumnWidth(1.15),
-                4: pw.FlexColumnWidth(1.1),
+                3: pw.FlexColumnWidth(0.9),
+                4: pw.FlexColumnWidth(1.8),
               },
               border: pw.TableBorder.all(color: softBorder, width: 0.5),
             ),
           ],
-          pw.SizedBox(height: 6),
+          pw.SizedBox(height: 3),
           pw.Container(
-            padding: const pw.EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 8,
-            ),
+            padding: const pw.EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: pw.BoxDecoration(
               color: softSurface,
               border: pw.Border.all(color: softBorder),
@@ -822,42 +821,41 @@ class PrintUtils {
                           labelWidth: 100,
                           fontSize: 10.5,
                         ),
-                pw.Row(
-                  children: [
-                    pw.Text(
-                      isReceipt ? 'مبلغ وقدره (رقماً)' : 'المبلغ',
-                      textDirection: pw.TextDirection.rtl,
-                      style: const pw.TextStyle(
-                        fontSize: 9,
-                        color: PdfColors.grey700,
+                buildLabelWidget(
+                  isReceipt ? 'مبلغ وقدره (رقماً)' : 'المبلغ',
+                  pw.Directionality(
+                    textDirection: pw.TextDirection.rtl,
+                    child: pw.Align(
+                      alignment: pw.Alignment.centerRight,
+                      child: pw.Row(
+                        mainAxisSize: pw.MainAxisSize.min,
+                        children: [
+                          pw.Text(
+                            formatPdfAmount(amount),
+                            textDirection: pw.TextDirection.ltr,
+                            style: pw.TextStyle(
+                              fontSize: 16,
+                              fontWeight: pw.FontWeight.bold,
+                              color: brandNavy,
+                            ),
+                          ),
+                          pw.SizedBox(width: 7),
+                          pw.Text(
+                            currencyLabel,
+                            textDirection: pw.TextDirection.rtl,
+                            textAlign: pw.TextAlign.start,
+                            overflow: pw.TextOverflow.visible,
+                            style: pw.TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: pw.FontWeight.bold,
+                              color: brandEmerald,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    pw.SizedBox(width: 10),
-                    pw.Text(
-                      formatPdfAmount(amount),
-                      textDirection: pw.TextDirection.ltr,
-                      style: pw.TextStyle(
-                        fontSize: 16,
-                        fontWeight: pw.FontWeight.bold,
-                        color: brandNavy,
-                      ),
-                    ),
-                    pw.SizedBox(width: 7),
-                    pw.Padding(
-                      padding: const pw.EdgeInsets.symmetric(horizontal: 3),
-                      child: pw.Text(
-                        currencyLabel,
-                        textDirection: pw.TextDirection.rtl,
-                        textAlign: pw.TextAlign.start,
-                        overflow: pw.TextOverflow.visible,
-                        style: pw.TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: pw.FontWeight.bold,
-                          color: brandEmerald,
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
+                  labelWidth: 100,
                 ),
                 if (isReceipt)
                   buildLabelValue(
@@ -893,19 +891,22 @@ class PrintUtils {
                   buildLabelValue(
                     'الحساب',
                     accountName,
-                    labelWidth: 72,
+                    labelWidth: 100,
                     fontSize: 9,
                   ),
               ],
             ),
           ),
-          pw.SizedBox(height: 6),
+          pw.SizedBox(height: isReceipt ? 14 : 6),
           pw.Row(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              _signature('توقيع المحاسب'),
-              _signature('الختم الرسمي'),
-              _signature(isReceipt ? 'توقيع المستلم' : 'توقيع المستفيد'),
+              _signature('توقيع المحاسب', blankHeight: isReceipt ? 22 : 16),
+              _signature('الختم الرسمي', blankHeight: isReceipt ? 22 : 16),
+              _signature(
+                isReceipt ? 'توقيع المستلم' : 'توقيع المستفيد',
+                blankHeight: isReceipt ? 22 : 16,
+              ),
             ],
           ),
           if (journalLines.isNotEmpty ||
@@ -966,27 +967,27 @@ class PrintUtils {
             pw.SizedBox(height: 5),
             pw.TableHelper.fromTextArray(
               headers: [
-                'العقار',
-                'الوحدة',
-                'تاريخ الاستحقاق',
-                'مبلغ القسط',
                 'المبلغ المخصص',
+                'مبلغ القسط',
+                'تاريخ الاستحقاق',
+                'الوحدة',
+                'العقار',
               ],
               data: standaloneInstallmentAllocations
                   .map(
                     (installment) => [
-                      installment['property_name']?.toString() ?? '',
-                      installment['unit_number']?.toString() ?? '',
-                      installment['due_date']?.toString() ?? '',
+                      formatPdfAmount(
+                        (installment['allocated_amount'] as num?)?.toDouble() ??
+                            0,
+                      ),
                       formatPdfAmount(
                         (installment['installment_amount'] as num?)
                                 ?.toDouble() ??
                             0,
                       ),
-                      formatPdfAmount(
-                        (installment['allocated_amount'] as num?)?.toDouble() ??
-                            0,
-                      ),
+                      installment['due_date']?.toString() ?? '',
+                      installment['unit_number']?.toString() ?? '',
+                      installment['property_name']?.toString() ?? '',
                     ],
                   )
                   .toList(),
@@ -997,6 +998,7 @@ class PrintUtils {
               ),
               headerDecoration: pw.BoxDecoration(color: brandNavy),
               cellStyle: const pw.TextStyle(fontSize: 7.5),
+              cellAlignment: pw.Alignment.center,
               cellPadding: const pw.EdgeInsets.symmetric(
                 horizontal: 3,
                 vertical: 4,
@@ -1004,11 +1006,11 @@ class PrintUtils {
               tableDirection: pw.TextDirection.rtl,
               headerDirection: pw.TextDirection.rtl,
               columnWidths: const {
-                0: pw.FlexColumnWidth(1.7),
-                1: pw.FlexColumnWidth(0.8),
+                0: pw.FlexColumnWidth(1.2),
+                1: pw.FlexColumnWidth(1.2),
                 2: pw.FlexColumnWidth(1.4),
-                3: pw.FlexColumnWidth(1.2),
-                4: pw.FlexColumnWidth(1.2),
+                3: pw.FlexColumnWidth(0.8),
+                4: pw.FlexColumnWidth(1.7),
               },
               border: pw.TableBorder.all(color: softBorder, width: 0.5),
             ),
@@ -1207,6 +1209,39 @@ class PrintUtils {
     ],
   );
 
+  static pw.Widget buildLabelWidget(
+    String label,
+    pw.Widget value, {
+    double labelWidth = 100,
+  }) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 4.5),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.SizedBox(
+          width: labelWidth,
+          child: pw.Padding(
+            padding: const pw.EdgeInsets.only(left: 2, right: 4),
+            child: pw.Text(
+              label,
+              textDirection: pw.TextDirection.rtl,
+              textAlign: pw.TextAlign.start,
+              overflow: pw.TextOverflow.visible,
+              style: const pw.TextStyle(color: PdfColors.grey700),
+            ),
+          ),
+        ),
+        pw.SizedBox(width: 6),
+        pw.Expanded(
+          child: pw.Padding(
+            padding: const pw.EdgeInsets.only(left: 3, right: 5),
+            child: value,
+          ),
+        ),
+      ],
+    ),
+  );
+
   static pw.Widget buildLabelValue(
     String label,
     String value, {
@@ -1253,28 +1288,29 @@ class PrintUtils {
     );
   }
 
-  static pw.Widget _signature(String title) => pw.Expanded(
-    child: pw.Column(
-      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-      children: [
-        pw.Text(
-          title,
-          textDirection: pw.TextDirection.rtl,
-          textAlign: pw.TextAlign.center,
-          style: pw.TextStyle(
-            fontWeight: pw.FontWeight.bold,
-            fontSize: 9,
-            color: brandNavy,
-          ),
+  static pw.Widget _signature(String title, {double blankHeight = 16}) =>
+      pw.Expanded(
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+          children: [
+            pw.Text(
+              title,
+              textDirection: pw.TextDirection.rtl,
+              textAlign: pw.TextAlign.center,
+              style: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold,
+                fontSize: 9,
+                color: brandNavy,
+              ),
+            ),
+            pw.SizedBox(height: blankHeight),
+            pw.Padding(
+              padding: const pw.EdgeInsets.symmetric(horizontal: 12),
+              child: pw.Container(height: 0.7, color: PdfColors.grey700),
+            ),
+          ],
         ),
-        pw.SizedBox(height: 16),
-        pw.Padding(
-          padding: const pw.EdgeInsets.symmetric(horizontal: 12),
-          child: pw.Container(height: 0.7, color: PdfColors.grey700),
-        ),
-      ],
-    ),
-  );
+      );
 
   static Future<void> printVoucher({
     required String voucherType,

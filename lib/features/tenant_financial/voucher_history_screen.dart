@@ -20,6 +20,7 @@ class _VoucherHistoryScreenState extends State<VoucherHistoryScreen> {
     'قبض عام',
     'صرف عام',
     'قبض مستأجر',
+    'عكس قبض مستأجر',
     'صرف مستأجر',
     'صرف مستحقات مالك',
   ];
@@ -211,19 +212,32 @@ class _VoucherHistoryScreenState extends State<VoucherHistoryScreen> {
                     separatorBuilder: (_, _) => const SizedBox(height: 4),
                     itemBuilder: (context, index) {
                       final voucher = vouchers[index];
-                      final isReceipt = (voucher['voucher_type'] as String)
-                          .contains('قبض');
+                      final isCorrectionReversal =
+                          voucher['voucher_type'] == 'عكس قبض مستأجر';
+                      final isReceipt =
+                          !isCorrectionReversal &&
+                          (voucher['voucher_type'] as String).contains('قبض');
                       final amount = (voucher['amount'] as num).toDouble();
                       final party = (voucher['party_name'] as String?)?.trim();
                       return Card(
                         child: ListTile(
                           leading: CircleAvatar(
-                            backgroundColor: isReceipt
+                            backgroundColor: isCorrectionReversal
+                                ? Colors.amber.shade100
+                                : isReceipt
                                 ? Colors.green.shade100
                                 : Colors.red.shade100,
                             child: Icon(
-                              isReceipt ? Icons.call_received : Icons.call_made,
-                              color: isReceipt ? Colors.green : Colors.red,
+                              isCorrectionReversal
+                                  ? Icons.sync_alt
+                                  : isReceipt
+                                  ? Icons.call_received
+                                  : Icons.call_made,
+                              color: isCorrectionReversal
+                                  ? Colors.deepOrange
+                                  : isReceipt
+                                  ? Colors.green
+                                  : Colors.red,
                             ),
                           ),
                           title: Text(
@@ -373,6 +387,344 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
     }
   }
 
+  Future<void> _correctReceiptDescription(String currentDescription) async {
+    if (_isWorking) return;
+    final descriptionController = TextEditingController(
+      text: currentDescription,
+    );
+    final reasonController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('تصحيح بيان سند القبض'),
+        content: SizedBox(
+          width: 480,
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: descriptionController,
+                  autofocus: true,
+                  maxLength: 500,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'البيان المصحح',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return 'أدخل البيان المصحح';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: reasonController,
+                  maxLength: 500,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'سبب التصحيح (مطلوب للتدقيق)',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return 'اذكر سبب التصحيح';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'لن يتغير المبلغ أو القيد المالي. سيُحفظ البيان السابق والجديد وسبب التعديل في سجل التدقيق.',
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              if (formKey.currentState?.validate() ?? false) {
+                Navigator.of(dialogContext).pop(true);
+              }
+            },
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('حفظ التصحيح'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      descriptionController.dispose();
+      reasonController.dispose();
+      return;
+    }
+
+    setState(() => _isWorking = true);
+    try {
+      await DatabaseHelper.instance.correctTenantReceiptVoucherDescription(
+        voucherId: widget.voucherId,
+        newDescription: descriptionController.text,
+        reason: reasonController.text,
+      );
+      await _loadDetails();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تم تصحيح البيان مع حفظ أثر التعديل في سجل التدقيق.'),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('تعذر تصحيح البيان: $error')));
+      }
+    } finally {
+      descriptionController.dispose();
+      reasonController.dispose();
+      if (mounted) setState(() => _isWorking = false);
+    }
+  }
+
+  Future<void> _correctReceiptAmount(Map<String, dynamic> voucher) async {
+    if (_isWorking) return;
+    List<Map<String, dynamic>> candidates;
+    setState(() => _isWorking = true);
+    try {
+      candidates = await DatabaseHelper.instance
+          .getTenantReceiptCorrectionInstallments(widget.voucherId);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('لا يمكن تصحيح هذا السند: $error')),
+        );
+      }
+      return;
+    } finally {
+      if (mounted) setState(() => _isWorking = false);
+    }
+    if (!mounted || candidates.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('لا يوجد قسط متاح للتخصيص البديل.')),
+        );
+      }
+      return;
+    }
+
+    final amountController = TextEditingController(
+      text: ((voucher['amount'] as num).toDouble()).toStringAsFixed(2),
+    );
+    final descriptionController = TextEditingController(
+      text: voucher['description']?.toString() ?? '',
+    );
+    final reasonController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final originalInstallments = _data?['installments'];
+    final originalInstallmentId =
+        originalInstallments is List &&
+            originalInstallments.isNotEmpty &&
+            originalInstallments.first is Map
+        ? ((originalInstallments.first as Map)['installment_id'] as num?)
+              ?.toInt()
+        : null;
+    var selectedInstallmentId =
+        candidates.any(
+          (row) =>
+              (row['installment_id'] as num?)?.toInt() == originalInstallmentId,
+        )
+        ? originalInstallmentId
+        : (candidates.first['installment_id'] as num).toInt();
+    var confirmsActualAmount = false;
+    final correctionDate = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('تصحيح مبلغ أو تخصيص سند القبض'),
+          content: SizedBox(
+            width: 600,
+            child: SingleChildScrollView(
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: amountController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: 'المبلغ الصحيح المقبوض فعليًا',
+                        suffixText: _currency,
+                        border: const OutlineInputBorder(),
+                      ),
+                      validator: (value) {
+                        final amount = double.tryParse(
+                          value?.trim().replaceAll(',', '') ?? '',
+                        );
+                        if (amount == null || amount <= 0) {
+                          return 'أدخل مبلغًا صحيحًا أكبر من صفر';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<int>(
+                      initialValue: selectedInstallmentId,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'القسط / العقار / الوحدة الصحيح',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: candidates.map((row) {
+                        final id = (row['installment_id'] as num).toInt();
+                        final remaining =
+                            (row['remaining_after_reversal'] as num?)
+                                ?.toDouble() ??
+                            0;
+                        return DropdownMenuItem<int>(
+                          value: id,
+                          child: Text(
+                            'العقار ${row['property_name']} — الوحدة ${row['unit_number']} — العقد ${row['contract_id']} — القسط $id (${row['due_date']}) — المتاح ${NumberFormat('#,##0.00').format(remaining)}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (value) =>
+                          setDialogState(() => selectedInstallmentId = value),
+                      validator: (value) =>
+                          value == null ? 'اختر القسط الصحيح' : null,
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: descriptionController,
+                      maxLength: 500,
+                      maxLines: 2,
+                      decoration: const InputDecoration(
+                        labelText: 'بيان سند القبض البديل',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (value) =>
+                          value == null || value.trim().isEmpty
+                          ? 'أدخل بيان السند البديل'
+                          : null,
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: reasonController,
+                      maxLength: 500,
+                      maxLines: 2,
+                      decoration: const InputDecoration(
+                        labelText: 'سبب التصحيح (مطلوب للتدقيق)',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (value) =>
+                          value == null || value.trim().isEmpty
+                          ? 'اذكر سبب التصحيح'
+                          : null,
+                    ),
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Text('تاريخ القيدين: $correctionDate'),
+                    ),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: confirmsActualAmount,
+                      onChanged: (value) => setDialogState(
+                        () => confirmsActualAmount = value ?? false,
+                      ),
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: const Text(
+                        'أؤكد أن المبلغ المدخل هو المبلغ المستلم فعليًا، وأن هذا تصحيح محاسبي وليس ردًا نقديًا.',
+                      ),
+                    ),
+                    const Text(
+                      'سيُبقى السند الأصلي دون تغيير، ويُنشأ قيد عكس مرتبط وسند قبض بديل داخل معاملة واحدة. لا يُنشأ سند صرف ولا حركة رد نقدي. يدعم هذا المسار القبض القياسي على الأقساط فقط؛ لا يدعم الفواتير/الضريبة أو السندات ذات الاسترداد السابق.',
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton.icon(
+              onPressed: () {
+                if (!confirmsActualAmount) return;
+                if (formKey.currentState?.validate() ?? false) {
+                  Navigator.of(dialogContext).pop(true);
+                }
+              },
+              icon: const Icon(Icons.rule_folder_outlined),
+              label: const Text('تنفيذ التصحيح'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      amountController.dispose();
+      descriptionController.dispose();
+      reasonController.dispose();
+      return;
+    }
+
+    setState(() => _isWorking = true);
+    try {
+      final correctedAmount = double.parse(
+        amountController.text.trim().replaceAll(',', ''),
+      );
+      final replacementVoucherId = await DatabaseHelper.instance
+          .correctTenantReceiptVoucher(
+            sourceVoucherId: widget.voucherId,
+            replacementInstallmentId: selectedInstallmentId!,
+            correctedAmount: correctedAmount,
+            correctionDate: correctionDate,
+            description: descriptionController.text,
+            reason: reasonController.text,
+          );
+      await _loadDetails();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'تم التصحيح محاسبيًا؛ السند البديل رقم $replacementVoucherId مرتبط بالأصل. لا يوجد سند صرف أو استرداد نقدي.',
+            ),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('تعذر تنفيذ التصحيح؛ لم يُحفظ جزء منه: $error'),
+          ),
+        );
+      }
+    } finally {
+      amountController.dispose();
+      descriptionController.dispose();
+      reasonController.dispose();
+      if (mounted) setState(() => _isWorking = false);
+    }
+  }
+
   Widget _detailTile(String label, String value) => Container(
     constraints: const BoxConstraints(minWidth: 190, maxWidth: 320),
     padding: const EdgeInsets.all(12),
@@ -402,9 +754,45 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         : '${NumberFormat('#,##0.00').format(amount)} $_currency';
   }
 
+  Future<void> _openRelatedVoucher(int voucherId) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _VoucherDetailsDialog(voucherId: voucherId),
+    );
+  }
+
+  Widget _correctionVoucherLink({
+    required String label,
+    required dynamic rawId,
+    required bool isCurrent,
+  }) {
+    final id = rawId is num ? rawId.toInt() : null;
+    if (id == null) return Text('$label: —');
+    return OutlinedButton.icon(
+      onPressed: isCurrent ? null : () => _openRelatedVoucher(id),
+      icon: Icon(isCurrent ? Icons.check_circle_outline : Icons.open_in_new),
+      label: Text('$label #$id${isCurrent ? ' (الحالي)' : ''}'),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.sizeOf(context);
+    final rawVoucher = _data?['voucher'];
+    final voucher = rawVoucher is Map
+        ? Map<String, dynamic>.from(rawVoucher)
+        : null;
+    final rawCorrections = _data?['receipt_corrections'];
+    final hasReceiptCorrection =
+        rawCorrections is List && rawCorrections.isNotEmpty;
+    final canCorrectDescription =
+        voucher?['voucher_type'] == 'قبض مستأجر' &&
+        !hasReceiptCorrection &&
+        PermissionRuntime.allows('tenant_financial', AppPermissionAction.edit);
+    final canCorrectAmount =
+        canCorrectDescription &&
+        PermissionRuntime.allows('tenant_financial', AppPermissionAction.post);
     return Dialog(
       insetPadding: const EdgeInsets.all(16),
       child: SizedBox(
@@ -446,9 +834,29 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
             const Divider(height: 1),
             Padding(
               padding: const EdgeInsets.all(12),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
                 children: [
+                  if (canCorrectAmount)
+                    OutlinedButton.icon(
+                      onPressed: _isWorking
+                          ? null
+                          : () => _correctReceiptAmount(voucher!),
+                      icon: const Icon(Icons.currency_exchange),
+                      label: const Text('تصحيح المبلغ / القسط'),
+                    ),
+                  if (canCorrectDescription)
+                    OutlinedButton.icon(
+                      onPressed: _isWorking
+                          ? null
+                          : () => _correctReceiptDescription(
+                              voucher?['description']?.toString() ?? '',
+                            ),
+                      icon: const Icon(Icons.edit_note),
+                      label: const Text('تعديل البيان'),
+                    ),
                   OutlinedButton.icon(
                     onPressed:
                         _isWorking ||
@@ -509,6 +917,13 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
               .map((refund) => Map<String, dynamic>.from(refund))
               .toList()
         : <Map<String, dynamic>>[];
+    final rawReceiptCorrections = _data!['receipt_corrections'];
+    final receiptCorrections = rawReceiptCorrections is List
+        ? rawReceiptCorrections
+              .whereType<Map>()
+              .map((correction) => Map<String, dynamic>.from(correction))
+              .toList()
+        : <Map<String, dynamic>>[];
     final rawOwnerSettlement = _data!['owner_settlement'];
     final ownerSettlement = rawOwnerSettlement is Map
         ? Map<String, dynamic>.from(rawOwnerSettlement)
@@ -522,8 +937,7 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
       final id = installment['installment_id'];
       return id is! num || !invoicedInstallmentIds.contains(id.toInt());
     }).toList();
-    final isReceipt =
-        voucher['voucher_type']?.toString().contains('قبض') == true;
+    final isReceipt = voucher['voucher_type'] == 'قبض مستأجر';
     final amount = (voucher['amount'] as num).toDouble();
     final detailTiles = <Widget>[
       _detailTile('نوع السند', 'سند ${voucher['voucher_type']}'),
@@ -567,6 +981,57 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Wrap(spacing: 10, runSpacing: 10, children: detailTiles),
+          if (receiptCorrections.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            Card(
+              color: Colors.amber.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'مجموعة تصحيح محاسبي — ليست استردادًا نقديًا',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 6),
+                    Text('السبب: ${receiptCorrections.first['reason'] ?? '—'}'),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _correctionVoucherLink(
+                          label: 'السند الأصلي',
+                          rawId: receiptCorrections.first['source_voucher_id'],
+                          isCurrent:
+                              voucher['id'] ==
+                              receiptCorrections.first['source_voucher_id'],
+                        ),
+                        _correctionVoucherLink(
+                          label: 'عكس التصحيح',
+                          rawId:
+                              receiptCorrections.first['reversal_voucher_id'],
+                          isCurrent:
+                              voucher['id'] ==
+                              receiptCorrections.first['reversal_voucher_id'],
+                        ),
+                        _correctionVoucherLink(
+                          label: 'السند البديل',
+                          rawId: receiptCorrections
+                              .first['replacement_voucher_id'],
+                          isCurrent:
+                              voucher['id'] ==
+                              receiptCorrections
+                                  .first['replacement_voucher_id'],
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 22),
           const Text(
             'الحسابات والحركة المحاسبية',

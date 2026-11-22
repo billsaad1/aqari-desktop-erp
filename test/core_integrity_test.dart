@@ -5895,8 +5895,34 @@ void main() {
         'description': 'صرف قديم غير مربوط بالمصدر',
       });
       await db.execute('PRAGMA foreign_keys = OFF');
+      await db.execute(
+        'DROP TRIGGER IF EXISTS tenant_receipt_corrections_valid',
+      );
+      await db.execute(
+        'DROP TRIGGER IF EXISTS tenant_receipt_correction_allocations_valid',
+      );
+      await db.execute(
+        'DROP TRIGGER IF EXISTS tenant_receipt_corrections_no_update',
+      );
+      await db.execute(
+        'DROP TRIGGER IF EXISTS tenant_receipt_corrections_no_delete',
+      );
+      await db.execute(
+        'DROP TRIGGER IF EXISTS tenant_receipt_correction_allocations_no_update',
+      );
+      await db.execute(
+        'DROP TRIGGER IF EXISTS tenant_receipt_correction_allocations_no_delete',
+      );
+      await db.execute('DROP TRIGGER IF EXISTS refund_allocations_source_cap');
       await db.execute('DROP VIEW IF EXISTS credit_note_refund_balances');
       await db.execute('DROP VIEW collection_allocation_balances');
+      await db.execute(
+        'DROP VIEW IF EXISTS tenant_receipt_correction_journal_integrity',
+      );
+      await db.execute(
+        'DROP TABLE IF EXISTS tenant_receipt_correction_allocations',
+      );
+      await db.execute('DROP TABLE IF EXISTS tenant_receipt_corrections');
       await db.execute('DROP TABLE refund_allocations');
       await db.execute('DROP TABLE collection_allocations');
       await db.execute('DROP TABLE legacy_tenant_payment_reviews');

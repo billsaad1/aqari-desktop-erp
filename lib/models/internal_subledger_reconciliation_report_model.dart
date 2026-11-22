@@ -1,6 +1,7 @@
 enum InternalSubledgerSource {
   invoice,
   tenantReceipt,
+  tenantReceiptCorrectionReversal,
   tenantRefund,
   ownerSettlement,
   legacyOwnerVoucher,
@@ -14,6 +15,8 @@ extension InternalSubledgerSourceLabel on InternalSubledgerSource {
   String get label => switch (this) {
     InternalSubledgerSource.invoice => 'فاتورة مستأجر',
     InternalSubledgerSource.tenantReceipt => 'قبض مستأجر',
+    InternalSubledgerSource.tenantReceiptCorrectionReversal =>
+      'عكس تصحيح قبض مستأجر',
     InternalSubledgerSource.tenantRefund => 'رد مستأجر',
     InternalSubledgerSource.ownerSettlement => 'سداد مستحقات مالك',
     InternalSubledgerSource.legacyOwnerVoucher => 'سند مالك تاريخي',
@@ -53,6 +56,9 @@ class InternalSubledgerReconciliationRow {
     this.controlCreditMinor = 0,
     this.allocatedMinor,
     this.allocationStatus,
+    this.correctionSourceVoucherId,
+    this.correctionReversalVoucherId,
+    this.correctionReplacementVoucherId,
   });
 
   final InternalSubledgerSource source;
@@ -72,7 +78,14 @@ class InternalSubledgerReconciliationRow {
   final int? allocatedMinor;
   final String? allocationStatus;
 
+  /// Voucher IDs tying the original receipt, accounting reversal and replacement together.
+  final int? correctionSourceVoucherId;
+  final int? correctionReversalVoucherId;
+  final int? correctionReplacementVoucherId;
+
   bool get isLedgerMatched => state == InternalSubledgerRowState.matched;
+  bool get isTenantReceiptCorrectionReversal =>
+      source == InternalSubledgerSource.tenantReceiptCorrectionReversal;
   bool get hasReviewablePostedJournal =>
       journalEntryId != null &&
       journalPosted &&
@@ -86,7 +99,9 @@ class InternalSubledgerReconciliationRow {
       return journalEntryId == null || hasReviewablePostedJournal;
     }
     if (state != InternalSubledgerRowState.needsReview ||
-        !hasReviewablePostedJournal) return false;
+        !hasReviewablePostedJournal) {
+      return false;
+    }
     return source == InternalSubledgerSource.directJournal ||
         source == InternalSubledgerSource.generalVoucher;
   }
@@ -95,9 +110,7 @@ class InternalSubledgerReconciliationRow {
       ? 0
       : (amountMinor - allocatedMinor!).clamp(0, amountMinor).toInt();
 
-  factory InternalSubledgerReconciliationRow.fromMap(
-    Map<String, Object?> row,
-  ) {
+  factory InternalSubledgerReconciliationRow.fromMap(Map<String, Object?> row) {
     int value(String key) => (row[key] as num?)?.toInt() ?? 0;
     int? optional(String key) => (row[key] as num?)?.toInt();
     final source = InternalSubledgerSource.values.firstWhere(
@@ -144,13 +157,10 @@ class InternalSubledgerReconciliationReport {
 
   int get matchedCount => rows.where((row) => row.isLedgerMatched).length;
   int get reviewCount => rows.length - matchedCount;
-  int get unallocatedCount => rows
-      .where((row) => row.unallocatedMinor > 0)
-      .length;
-  int get unallocatedMinor => rows.fold(
-    0,
-    (sum, row) => sum + row.unallocatedMinor,
-  );
+  int get unallocatedCount =>
+      rows.where((row) => row.unallocatedMinor > 0).length;
+  int get unallocatedMinor =>
+      rows.fold(0, (sum, row) => sum + row.unallocatedMinor);
   int get legacyReviewCount => rows
       .where((row) => row.state == InternalSubledgerRowState.legacyReview)
       .length;

@@ -21,15 +21,28 @@ class TenantCollectionReportPdf {
             row.voucherId.toString(),
             row.voucherDate,
             row.tenantName,
-            row.isRefund
+            row.isCorrectionReversal
+                ? row.isVerifiedCorrectionReversal
+                      ? 'عكس تصحيح قبض\n(غير نقدي)'
+                      : 'عكس تصحيح قبض\n(غير نقدي - للمراجعة)'
+                : row.isRefund
                 ? row.isVerifiedRefund
-                      ? 'استرداد مرتبط'
-                      : 'استرداد للمراجعة'
-                : 'قبض',
+                      ? 'استرداد نقدي مرتبط'
+                      : 'استرداد نقدي للمراجعة'
+                : 'قبض نقدي',
             PrintUtils.formatPdfAmount(row.amountMinor / 100),
-            row.isRefund ? row.sourceReceiptVoucherIds : '—',
+            row.sourceReceiptVoucherIds.isEmpty
+                ? '—'
+                : row.isCorrectionReversal
+                ? 'الأصل: ${row.sourceReceiptVoucherIds}\n'
+                      'البديل: ${row.replacementReceiptVoucherId ?? '—'}'
+                : row.sourceReceiptVoucherIds,
             row.allocationStatus,
-            row.sourceConsistencyStatus,
+            row.isCorrectionReversal &&
+                    row.correctionReason?.trim().isNotEmpty == true
+                ? '${row.sourceConsistencyStatus}\n'
+                      'السبب: ${row.correctionReason}'
+                : row.sourceConsistencyStatus,
           ],
         )
         .toList(growable: false);
@@ -112,14 +125,17 @@ class TenantCollectionReportPdf {
             child: pw.Row(
               children: [
                 _summaryCell(
-                  'إجمالي القبوضات المرحلة',
+                  'إجمالي القبوضات النقدية المرحلة',
                   report.grossReceiptsMinor,
                 ),
                 _summaryCell(
-                  'الاستردادات المرتبطة المطابقة',
+                  'الاستردادات النقدية المرتبطة المطابقة',
                   report.linkedRefundsMinor,
                 ),
-                _summaryCell('صافي التحصيل المؤكد', report.netCollectedMinor),
+                _summaryCell(
+                  'صافي التحصيل النقدي المؤكد',
+                  report.grossReceiptsMinor - report.linkedRefundsMinor,
+                ),
                 _summaryCell(
                   'قبوض بلا تخصيص مثبت',
                   report.unallocatedReceiptsMinor,
@@ -131,9 +147,53 @@ class TenantCollectionReportPdf {
               ],
             ),
           ),
+          if (report.rows.any((row) => row.isCorrectionReversal)) ...[
+            pw.SizedBox(height: 6),
+            pw.Container(
+              padding: const pw.EdgeInsets.all(8),
+              decoration: pw.BoxDecoration(
+                color: PdfColors.indigo50,
+                border: pw.Border.all(color: PdfColors.indigo200),
+                borderRadius: pw.BorderRadius.circular(5),
+              ),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+                children: [
+                  pw.Text(
+                    'عكوس تصحيح القبض — حركات محاسبية غير نقدية',
+                    textDirection: pw.TextDirection.rtl,
+                    style: pw.TextStyle(
+                      fontSize: 9,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PrintUtils.brandNavy,
+                    ),
+                  ),
+                  pw.SizedBox(height: 6),
+                  pw.Row(
+                    children: [
+                      _summaryCell(
+                        'عكوس تصحيح موثقة (غير نقدية)',
+                        report.linkedReceiptCorrectionsMinor,
+                      ),
+                      _summaryCell(
+                        'عكوس تصحيح تحتاج مراجعة (غير نقدية)',
+                        report.unverifiedCorrectionReversalsMinor,
+                      ),
+                      _summaryCountCell(
+                        'عدد عكوس التصحيح غير النقدية',
+                        report.rows
+                            .where((row) => row.isCorrectionReversal)
+                            .length,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
           pw.SizedBox(height: 6),
           pw.Text(
-            'يقارن التقرير التخصيصات التفصيلية بالسجلات التاريخية للفواتير والأقساط. لا يُخصم الاسترداد إلا إذا طابق سند الرد والمصدر المرحّل للمستأجر نفسه وبقي ضمن سقف المبلغ الأصلي بعد احتساب جميع الردود.',
+            'يقارن التقرير التخصيصات التفصيلية بالسجلات التاريخية للفواتير والأقساط. لا يُخصم الاسترداد النقدي إلا إذا طابق سند الرد والمصدر المرحّل للمستأجر نفسه وبقي ضمن سقف المبلغ الأصلي بعد احتساب جميع الردود. عكس تصحيح القبض حركة محاسبية غير نقدية، وتُعرض منفصلة عن القبوضات والاستردادات وصافي التحصيل النقدي.',
             textDirection: pw.TextDirection.rtl,
             style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
           ),
@@ -157,7 +217,7 @@ class TenantCollectionReportPdf {
                 'المستأجر',
                 'النوع',
                 'المبلغ (موقّع)',
-                'سند القبض المصدر',
+                'السند المصدر / الأصل',
                 'حالة التخصيص',
                 'اتساق مرجع التخصيص',
               ],
@@ -195,6 +255,8 @@ class TenantCollectionReportPdf {
             'عدد سندات القبض: ${report.receiptCount}    '
             'الاستردادات الموثقة والمطابقة: ${report.linkedRefundCount}    '
             'استردادات للمراجعة: ${report.unverifiedRefundCount}    '
+            'عكوس تصحيح القبض (غير نقدية): '
+            '${report.rows.where((row) => row.isCorrectionReversal).length}    '
             'سندات تخصيصها يحتاج مراجعة: ${report.sourceMismatchVoucherCount}',
             textDirection: pw.TextDirection.rtl,
             style: pw.TextStyle(
@@ -228,6 +290,31 @@ class TenantCollectionReportPdf {
             fontSize: 9,
             fontWeight: pw.FontWeight.bold,
             color: minor < 0 ? PdfColors.red : PrintUtils.brandNavy,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  static pw.Widget _summaryCountCell(String label, int count) => pw.Expanded(
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+      children: [
+        pw.Text(
+          label,
+          textDirection: pw.TextDirection.rtl,
+          textAlign: pw.TextAlign.center,
+          style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey700),
+        ),
+        pw.SizedBox(height: 3),
+        pw.Text(
+          '$count',
+          textDirection: pw.TextDirection.ltr,
+          textAlign: pw.TextAlign.center,
+          style: pw.TextStyle(
+            fontSize: 9,
+            fontWeight: pw.FontWeight.bold,
+            color: PrintUtils.brandNavy,
           ),
         ),
       ],

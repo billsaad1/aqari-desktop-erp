@@ -34,6 +34,8 @@ class AuditTrailScreen extends StatefulWidget {
     'GENERAL_VOUCHER_POSTED': 'ترحيل سند عام',
     'OWNER_SETTLEMENT_POSTED': 'ترحيل سند سداد مالك',
     'TENANT_RECEIPT_POSTED': 'ترحيل سند قبض مستأجر',
+    'TENANT_RECEIPT_DESCRIPTION_CORRECTED': 'تصحيح بيان سند قبض مستأجر',
+    'TENANT_RECEIPT_CORRECTED': 'عكس واستبدال سند قبض مستأجر',
     'TENANT_REFUND_POSTED': 'ترحيل استرداد مستأجر',
     'CREDIT_NOTE_DRAFT_CREATED': 'إنشاء مسودة إشعار دائن',
     'CREDIT_NOTE_POSTED': 'ترحيل إشعار دائن',
