@@ -804,7 +804,7 @@ class PrintUtils {
                             bottom: 7,
                           ),
                           child: pw.Text(
-                            'استلمنا من الأخ/الأخت ${targetName.trim()}',
+                            'استلمنا من: ${targetName.trim()}',
                             textDirection: pw.TextDirection.rtl,
                             textAlign: pw.TextAlign.start,
                             overflow: pw.TextOverflow.visible,
@@ -828,29 +828,70 @@ class PrintUtils {
                     child: pw.Align(
                       alignment: pw.Alignment.centerRight,
                       child: pw.Row(
-                        mainAxisSize: pw.MainAxisSize.min,
+                        mainAxisSize: showPaymentMethod && isReceipt
+                            ? pw.MainAxisSize.max
+                            : pw.MainAxisSize.min,
+                        mainAxisAlignment: showPaymentMethod && isReceipt
+                            ? pw.MainAxisAlignment.spaceBetween
+                            : pw.MainAxisAlignment.start,
+                        crossAxisAlignment: pw.CrossAxisAlignment.center,
                         children: [
-                          pw.Text(
-                            formatPdfAmount(amount),
-                            textDirection: pw.TextDirection.ltr,
-                            style: pw.TextStyle(
-                              fontSize: 16,
-                              fontWeight: pw.FontWeight.bold,
-                              color: brandNavy,
-                            ),
+                          pw.Row(
+                            mainAxisSize: pw.MainAxisSize.min,
+                            children: [
+                              pw.Text(
+                                formatPdfAmount(amount),
+                                textDirection: pw.TextDirection.ltr,
+                                style: pw.TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: pw.FontWeight.bold,
+                                  color: brandNavy,
+                                ),
+                              ),
+                              pw.SizedBox(width: 7),
+                              pw.Text(
+                                currencyLabel,
+                                textDirection: pw.TextDirection.rtl,
+                                textAlign: pw.TextAlign.start,
+                                overflow: pw.TextOverflow.visible,
+                                style: pw.TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: pw.FontWeight.bold,
+                                  color: brandEmerald,
+                                ),
+                              ),
+                            ],
                           ),
-                          pw.SizedBox(width: 7),
-                          pw.Text(
-                            currencyLabel,
-                            textDirection: pw.TextDirection.rtl,
-                            textAlign: pw.TextAlign.start,
-                            overflow: pw.TextOverflow.visible,
-                            style: pw.TextStyle(
-                              fontSize: 10.5,
-                              fontWeight: pw.FontWeight.bold,
-                              color: brandEmerald,
+                          if (showPaymentMethod && isReceipt) ...[
+                            pw.SizedBox(width: 8),
+                            pw.Flexible(
+                              child: pw.Container(
+                                padding: const pw.EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 4,
+                                ),
+                                decoration: pw.BoxDecoration(
+                                  color: softSurface,
+                                  border: pw.Border.all(
+                                    color: softBorder,
+                                    width: 0.7,
+                                  ),
+                                  borderRadius: pw.BorderRadius.circular(5),
+                                ),
+                                child: pw.Text(
+                                  normalizedMethod,
+                                  textDirection: pw.TextDirection.rtl,
+                                  textAlign: pw.TextAlign.center,
+                                  maxLines: 2,
+                                  style: pw.TextStyle(
+                                    fontSize: 8.5,
+                                    fontWeight: pw.FontWeight.bold,
+                                    color: brandEmerald,
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ),
@@ -880,7 +921,7 @@ class PrintUtils {
                     labelWidth: 100,
                     fontSize: 10,
                   ),
-                if (showPaymentMethod)
+                if (showPaymentMethod && !isReceipt)
                   buildLabelValue(
                     'طريقة الدفع',
                     normalizedMethod,
