@@ -6804,6 +6804,8 @@ class DatabaseHelper {
             AND (DATE(earlier.due_date) < DATE(ci.due_date)
               OR (DATE(earlier.due_date) = DATE(ci.due_date)
                 AND earlier.id < ci.id))) AS installment_number,
+        p.id AS property_id,
+        u.id AS unit_id,
         p.name AS property_name,
         u.unit_number
       FROM contract_installments ci
@@ -6840,6 +6842,8 @@ class DatabaseHelper {
             AND (DATE(earlier.due_date) < DATE(ci.due_date)
               OR (DATE(earlier.due_date) = DATE(ci.due_date)
                 AND earlier.id < ci.id))) AS installment_number,
+        p.id AS property_id,
+        u.id AS unit_id,
         p.name AS property_name,
         u.unit_number,
         ti.invoice_date,

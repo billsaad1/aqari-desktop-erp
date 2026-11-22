@@ -29,6 +29,8 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   int? _selectedCashAccountId;
   int? _selectedInvoiceId;
   int? _selectedInstallmentId;
+  int? _selectedPropertyId;
+  int? _selectedContractId;
   bool _isInvoicePaymentMode = false;
 
   List<Map<String, dynamic>> _unpaidInstallments = [];
@@ -56,6 +58,71 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       }
     }
     return null;
+  }
+
+  List<Map<String, dynamic>> get _allReceivables => _isInvoicePaymentMode
+      ? _openTaxInvoices
+      : _unpaidInstallments;
+
+  int? _rowId(Map<String, dynamic> row, String key) {
+    final value = row[key];
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  List<Map<String, dynamic>> _propertyOptions(
+    Iterable<Map<String, dynamic>> rows,
+  ) {
+    final options = <int, Map<String, dynamic>>{};
+    for (final row in rows) {
+      final id = _rowId(row, 'property_id');
+      if (id != null) options.putIfAbsent(id, () => row);
+    }
+    final result = options.values.toList();
+    result.sort(
+      (a, b) => (a['property_name'] ?? '').toString().toLowerCase().compareTo(
+        (b['property_name'] ?? '').toString().toLowerCase(),
+      ),
+    );
+    return result;
+  }
+
+  List<Map<String, dynamic>> _contractOptions(
+    Iterable<Map<String, dynamic>> rows, {
+    int? propertyId,
+  }) {
+    final options = <int, Map<String, dynamic>>{};
+    for (final row in rows) {
+      if (propertyId != null && _rowId(row, 'property_id') != propertyId) {
+        continue;
+      }
+      final id = _rowId(row, 'contract_id');
+      if (id != null) options.putIfAbsent(id, () => row);
+    }
+    return options.values.toList();
+  }
+
+  bool get _needsPropertySelection =>
+      _propertyOptions(_allReceivables).length > 1 &&
+      _selectedPropertyId == null;
+
+  bool get _needsContractSelection {
+    if (_needsPropertySelection) return false;
+    return _contractOptions(
+          _allReceivables,
+          propertyId: _selectedPropertyId,
+        ).length >
+        1 &&
+        _selectedContractId == null;
+  }
+
+  List<Map<String, dynamic>> get _visibleReceivables {
+    if (_needsPropertySelection || _needsContractSelection) return const [];
+    return filterTenantReceivables(
+      receivables: _allReceivables,
+      propertyId: _selectedPropertyId,
+      contractId: _selectedContractId,
+    );
   }
 
   String _amountInput(dynamic value) =>
@@ -99,6 +166,8 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _openTaxInvoices = [];
       _selectedInvoiceId = null;
       _selectedInstallmentId = null;
+      _selectedPropertyId = null;
+      _selectedContractId = null;
       _amountController.clear();
       if (tenantId == null) {
         _legacyPayments = [];
@@ -120,9 +189,18 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           tenantId,
         ),
       ]);
-      final receivables = invoiceMode
-          ? results[0]
-          : sortInstallmentsByDueDate(results[0]);
+      final receivables = sortInstallmentsByDueDate(results[0]);
+      final properties = _propertyOptions(receivables);
+      final propertyId = properties.length == 1
+          ? _rowId(properties.single, 'property_id')
+          : null;
+      final contracts = _contractOptions(
+        receivables,
+        propertyId: propertyId,
+      );
+      final contractId = contracts.length == 1
+          ? _rowId(contracts.single, 'contract_id')
+          : null;
       if (!mounted ||
           requestId != _receivablesRequestId ||
           tenantId != _selectedTenantId ||
@@ -130,6 +208,8 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         return;
       }
       setState(() {
+        _selectedPropertyId = propertyId;
+        _selectedContractId = contractId;
         _legacyPayments = results[1];
         _legacyInvoices = results[2];
         _legacyPaymentsError = null;
@@ -169,6 +249,8 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _selectedTenantId = tenantId;
       _selectedInvoiceId = null;
       _selectedInstallmentId = null;
+      _selectedPropertyId = null;
+      _selectedContractId = null;
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _amountController.clear();
@@ -186,12 +268,40 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _isInvoicePaymentMode = invoiceMode;
       _selectedInvoiceId = null;
       _selectedInstallmentId = null;
+      _selectedPropertyId = null;
+      _selectedContractId = null;
       _unpaidInstallments = [];
       _openTaxInvoices = [];
       _amountController.clear();
       _descriptionController.clear();
     });
     _loadTenantReceivables(_selectedTenantId);
+  }
+
+  void _onPropertyChanged(int? propertyId) {
+    final contracts = _contractOptions(
+      _allReceivables,
+      propertyId: propertyId,
+    );
+    final contractId = contracts.length == 1
+        ? _rowId(contracts.single, 'contract_id')
+        : null;
+    setState(() {
+      _selectedPropertyId = propertyId;
+      _selectedContractId = contractId;
+      _selectedInvoiceId = null;
+      _selectedInstallmentId = null;
+      _amountController.clear();
+    });
+  }
+
+  void _onContractChanged(int? contractId) {
+    setState(() {
+      _selectedContractId = contractId;
+      _selectedInvoiceId = null;
+      _selectedInstallmentId = null;
+      _amountController.clear();
+    });
   }
 
   void _onInvoiceChanged(int? invoiceId) {
@@ -477,6 +587,12 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                   a['parent_id'] != null,
             )
             .toList();
+        final propertyOptions = _propertyOptions(_allReceivables);
+        final contractOptions = _contractOptions(
+          _allReceivables,
+          propertyId: _selectedPropertyId,
+        );
+        final visibleReceivables = _visibleReceivables;
 
         return Padding(
           padding: const EdgeInsets.all(24.0),
@@ -486,9 +602,10 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
               // Left Panel: Form
               Expanded(
                 flex: 1,
-                child: Form(
-                  key: _formKey,
-                  child: Column(
+                child: SingleChildScrollView(
+                  child: Form(
+                    key: _formKey,
+                    child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       const Text(
@@ -550,20 +667,102 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                           border: OutlineInputBorder(),
                         ),
                       ),
-                      if (_isInvoicePaymentMode) ...[
+                      if (_selectedTenantId != null &&
+                          !_isLoadingReceivables &&
+                          _allReceivables.isNotEmpty) ...[
                         const SizedBox(height: 16),
                         DropdownButtonFormField<int>(
-                          initialValue: _selectedInvoiceId,
-                          items: _openTaxInvoices.map((invoice) {
-                            final id = (invoice['id'] as num).toInt();
+                          key: ValueKey('property-$_selectedPropertyId'),
+                          initialValue: _selectedPropertyId,
+                          items: propertyOptions.map((property) {
+                            final id = _rowId(property, 'property_id')!;
                             return DropdownMenuItem<int>(
                               value: id,
                               child: Text(
-                                'فاتورة #$id | المتبقي: ${_displayAmount(invoice['remaining_amount'])}',
+                                property['property_name']?.toString() ??
+                                    'العقار رقم $id',
+                                overflow: TextOverflow.ellipsis,
                               ),
                             );
                           }).toList(),
-                          onChanged: _isProcessing ? null : _onInvoiceChanged,
+                          onChanged: _isProcessing || propertyOptions.isEmpty
+                              ? null
+                              : _onPropertyChanged,
+                          decoration: const InputDecoration(
+                            labelText: 'العقار الذي سيتم التحصيل منه',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<int>(
+                          key: ValueKey('contract-$_selectedContractId'),
+                          initialValue: _selectedContractId,
+                          items: contractOptions.map((contract) {
+                            final id = _rowId(contract, 'contract_id')!;
+                            final propertyName =
+                                contract['property_name']?.toString() ??
+                                'العقار';
+                            final unitNumber =
+                                contract['unit_number']?.toString() ??
+                                'غير محدد';
+                            return DropdownMenuItem<int>(
+                              value: id,
+                              child: Text(
+                                '$propertyName — الوحدة $unitNumber — العقد #$id',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: _isProcessing ||
+                                  contractOptions.isEmpty ||
+                                  (_needsPropertySelection &&
+                                      propertyOptions.length > 1)
+                              ? null
+                              : _onContractChanged,
+                          decoration: const InputDecoration(
+                            labelText: 'الوحدة / العقد',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _needsPropertySelection
+                              ? 'اختر العقار أولاً لعرض وحداته وعقوده.'
+                              : _needsContractSelection
+                              ? 'اختر الوحدة أو العقد المطلوب؛ ستظهر أقساط هذا العقد فقط.'
+                              : 'اختر العقار والوحدة/العقد الصحيحين قبل تحديد القسط.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                      if (_isInvoicePaymentMode) ...[
+                        const SizedBox(height: 16),
+                        DropdownButtonFormField<int>(
+                          key: ValueKey('invoice-$_selectedInvoiceId'),
+                          initialValue: _selectedInvoiceId,
+                          items: visibleReceivables.map((invoice) {
+                            final id = (invoice['id'] as num).toInt();
+                            final propertyName =
+                                invoice['property_name']?.toString() ??
+                                'العقار';
+                            final unitNumber =
+                                invoice['unit_number']?.toString() ??
+                                'غير محدد';
+                            return DropdownMenuItem<int>(
+                              value: id,
+                              child: Text(
+                                'فاتورة #$id | $propertyName — الوحدة $unitNumber | المتبقي: ${_displayAmount(invoice['remaining_amount'])}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: _isProcessing ||
+                                  _needsPropertySelection ||
+                                  _needsContractSelection
+                              ? null
+                              : _onInvoiceChanged,
                           validator: (value) => value == null ? 'مطلوب' : null,
                           decoration: const InputDecoration(
                             labelText: 'الفاتورة المراد سدادها',
@@ -574,8 +773,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                       if (!_isInvoicePaymentMode) ...[
                         const SizedBox(height: 16),
                         DropdownButtonFormField<int>(
+                          key: ValueKey('installment-$_selectedInstallmentId'),
                           initialValue: _selectedInstallmentId,
-                          items: _unpaidInstallments.map((installment) {
+                          items: visibleReceivables.map((installment) {
                             final id = (installment['id'] as num).toInt();
                             final total = (installment['amount'] as num)
                                 .toDouble();
@@ -593,7 +793,10 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                               ),
                             );
                           }).toList(),
-                          onChanged: _isProcessing || _isLoadingReceivables
+                          onChanged: _isProcessing ||
+                                  _isLoadingReceivables ||
+                                  _needsPropertySelection ||
+                                  _needsContractSelection
                               ? null
                               : _onInstallmentChanged,
                           validator: (value) =>
@@ -761,6 +964,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                   ),
                 ),
               ),
+              ),
               const SizedBox(width: 24),
               // Right Panel: Receivables for the selected mode
               Expanded(
@@ -788,6 +992,14 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                       )
                     else if (_isLoadingReceivables)
                       const Center(child: CircularProgressIndicator())
+                    else if (_needsPropertySelection)
+                      const Center(
+                        child: Text('اختر العقار أولاً لعرض المستحقات التابعة له'),
+                      )
+                    else if (_needsContractSelection)
+                      const Center(
+                        child: Text('اختر الوحدة أو العقد لعرض أقساطه فقط'),
+                      )
                     else if (_isInvoicePaymentMode && _openTaxInvoices.isEmpty)
                       const Center(
                         child: Text(
@@ -813,9 +1025,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                       Expanded(
                         child: _isInvoicePaymentMode
                             ? ListView.builder(
-                                itemCount: _openTaxInvoices.length,
+                                itemCount: visibleReceivables.length,
                                 itemBuilder: (context, index) {
-                                  final invoice = _openTaxInvoices[index];
+                                  final invoice = visibleReceivables[index];
                                   final id = (invoice['id'] as num).toInt();
                                   final isSelected = id == _selectedInvoiceId;
                                   return Card(
@@ -832,7 +1044,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                                         Icons.receipt_long,
                                         color: Colors.deepOrange,
                                       ),
-                                      title: Text('فاتورة رقم $id'),
+                                      title: Text(
+                                        'فاتورة رقم $id | ${invoice['property_name'] ?? 'العقار'} — الوحدة ${invoice['unit_number'] ?? '—'}',
+                                      ),
                                       subtitle: Text(
                                         'تاريخ الفاتورة: ${invoice['invoice_date']} | الاستحقاق: ${invoice['due_date']}\n'
                                         'العقد: ${invoice['contract_id']} | القسط: ${invoice['installment_id']}\n'
@@ -850,10 +1064,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                                 },
                               )
                             : ListView.builder(
-                                itemCount: _unpaidInstallments.length,
+                                itemCount: visibleReceivables.length,
                                 itemBuilder: (context, index) {
-                                  final installment =
-                                      _unpaidInstallments[index];
+                                  final installment = visibleReceivables[index];
                                   final total = (installment['amount'] as num)
                                       .toDouble();
                                   final paid =
