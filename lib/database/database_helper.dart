@@ -3479,6 +3479,63 @@ class DatabaseHelper {
     );
   }
 
+  Future<int> resetUserPassword({
+    required int userId,
+    required String temporaryPassword,
+  }) async {
+    PermissionRuntime.require('system_settings', AppPermissionAction.edit);
+    if (!CryptoUtils.isValidNumericPin(temporaryPassword)) {
+      throw ArgumentError('الرمز المؤقت يجب أن يتكون من 4 أو 5 أرقام');
+    }
+    final actorId = PermissionRuntime.userId;
+    if (actorId == null || actorId == userId) {
+      throw StateError('إعادة تعيين الرمز من هذه الشاشة تتطلب مستخدمًا آخر');
+    }
+
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      final targets = await txn.query(
+        'users',
+        columns: ['role'],
+        where: 'id = ?',
+        whereArgs: [userId],
+        limit: 1,
+      );
+      if (targets.isEmpty) return 0;
+      if (targets.first['role'] == 'SuperAdmin' &&
+          PermissionRuntime.role != 'SuperAdmin') {
+        throw StateError(
+          'إعادة تعيين رمز مدير النظام الأعلى تتطلب صلاحية مدير النظام الأعلى',
+        );
+      }
+
+      final updated = await txn.update(
+        'users',
+        {
+          'password_hash': CryptoUtils.hashPassword(temporaryPassword),
+          'must_change_password': 1,
+          'login_failed_attempts': 0,
+          'login_locked_until_ms': null,
+        },
+        where: 'id = ?',
+        whereArgs: [userId],
+      );
+      if (updated > 0) {
+        await _recordAuditTx(
+          txn,
+          action: 'USER_PASSWORD_RESET',
+          entityType: 'user',
+          entityId: userId,
+          details: {
+            'temporary_pin_set': true,
+            'must_change_on_next_login': true,
+          },
+        );
+      }
+      return updated;
+    });
+  }
+
   Future<int> setUserActive(int userId, bool isActive) async {
     PermissionRuntime.require('system_settings', AppPermissionAction.edit);
     if (!isActive && userId == PermissionRuntime.userId) {

@@ -49,6 +49,7 @@ class AuditTrailScreen extends StatefulWidget {
     'ACCOUNT_DELETE': 'حذف حساب',
     'USER_CREATE': 'إنشاء مستخدم',
     'USER_UPDATE': 'تعديل مستخدم',
+    'USER_PASSWORD_RESET': 'إعادة تعيين رمز مستخدم',
     'USER_PERMISSIONS_UPDATE': 'تعديل صلاحيات',
     'LOGIN': 'تسجيل دخول',
     'LOGOUT': 'تسجيل خروج',

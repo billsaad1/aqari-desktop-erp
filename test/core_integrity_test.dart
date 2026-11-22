@@ -1777,6 +1777,113 @@ void main() {
       },
     );
 
+    test(
+      'existing passwords outside the numeric PIN policy require a new PIN after login',
+      () async {
+        const oldPassword = '012345678901';
+        final username = 'legacy_pin_${DateTime.now().microsecondsSinceEpoch}';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'مستخدم رمز قديم',
+          'password_hash': CryptoUtils.hashPassword(oldPassword),
+          'role': 'DataEntry',
+          'must_change_password': 0,
+        });
+        final auth = AuthProvider();
+        try {
+          expect(await auth.login(username, oldPassword), isTrue);
+          expect(auth.currentUser?.mustChangePassword, isTrue);
+          final db = await DatabaseHelper.instance.database;
+          final savedUser = (await db.query(
+            'users',
+            columns: ['must_change_password'],
+            where: 'id = ?',
+            whereArgs: [userId],
+            limit: 1,
+          )).single;
+          expect(savedUser['must_change_password'], 1);
+
+          await auth.changePassword('54321');
+          expect(auth.currentUser?.mustChangePassword, isFalse);
+          await auth.logout();
+          expect(await auth.login(username, oldPassword), isFalse);
+          expect(await auth.login(username, '54321'), isTrue);
+          expect(auth.currentUser?.mustChangePassword, isFalse);
+        } finally {
+          await auth.logout();
+          auth.dispose();
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          await DatabaseHelper.instance.deleteUser(userId);
+        }
+      },
+    );
+
+    test(
+      'administrator password reset sets a temporary PIN and requires replacement',
+      () async {
+        final username = 'reset_pin_${DateTime.now().microsecondsSinceEpoch}';
+        final userId = await DatabaseHelper.instance.insertUser({
+          'username': username,
+          'full_name': 'مستخدم إعادة تعيين الرمز',
+          'password_hash': CryptoUtils.hashPassword('2468'),
+          'role': 'DataEntry',
+          'must_change_password': 0,
+        });
+        final auth = AuthProvider();
+        try {
+          await DatabaseHelper.instance.resetUserPassword(
+            userId: userId,
+            temporaryPassword: '86420',
+          );
+          final db = await DatabaseHelper.instance.database;
+          final savedUser = (await db.query(
+            'users',
+            columns: ['password_hash', 'must_change_password'],
+            where: 'id = ?',
+            whereArgs: [userId],
+            limit: 1,
+          )).single;
+          expect(
+            CryptoUtils.verifyPassword(
+              '86420',
+              savedUser['password_hash'] as String,
+            ),
+            isTrue,
+          );
+          expect(savedUser['must_change_password'], 1);
+          final resetAudit = await db.query(
+            'audit_logs',
+            columns: ['details'],
+            where: 'action = ? AND entity_id = ?',
+            whereArgs: ['USER_PASSWORD_RESET', userId],
+          );
+          expect(resetAudit, hasLength(1));
+          expect(resetAudit.single['details'], isNot(contains('86420')));
+
+          expect(await auth.login(username, '86420'), isTrue);
+          expect(auth.currentUser?.mustChangePassword, isTrue);
+          await auth.changePassword('13579');
+          expect(auth.currentUser?.mustChangePassword, isFalse);
+          await auth.logout();
+          expect(await auth.login(username, '86420'), isFalse);
+          expect(await auth.login(username, '13579'), isTrue);
+        } finally {
+          await auth.logout();
+          auth.dispose();
+          PermissionRuntime.activate(
+            userId: 1,
+            role: 'SuperAdmin',
+            permissionRows: const [],
+          );
+          await DatabaseHelper.instance.deleteUser(userId);
+        }
+      },
+    );
+
     test('disposing auth invalidates an in-flight session refresh', () async {
       final username = 'disposed_auth_${DateTime.now().microsecondsSinceEpoch}';
       final userId = await DatabaseHelper.instance.insertUser({
