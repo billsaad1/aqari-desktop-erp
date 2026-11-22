@@ -733,9 +733,9 @@ class PrintUtils {
             ],
           ),
           if (isReceipt && receiptAllocationRows.isNotEmpty) ...[
-            pw.SizedBox(height: 5),
-            _documentTitle('بيانات العقار والدفعة'),
-            pw.SizedBox(height: 4),
+            // Keep a compact gap close to the removed heading's former height
+            // so the allocation table moves up slightly without crowding it.
+            pw.SizedBox(height: 24),
             pw.TableHelper.fromTextArray(
               headers: const [
                 'العقار',

@@ -3614,6 +3614,14 @@ void main() {
       )).single;
       expect(refundedInstallment['paid_amount'], 0.0);
       expect(refundedInstallment['status'], 'Unpaid');
+      final tenantUnbilledInstallments = await DatabaseHelper.instance
+          .getUnbilledInstallmentsForTenant(tenantId);
+      final tenantUnbilledInstallment = tenantUnbilledInstallments.singleWhere(
+        (row) => row['id'] == storedInstallments[0]['id'],
+      );
+      expect(tenantUnbilledInstallment['property_id'], propertyId);
+      expect(tenantUnbilledInstallment['unit_id'], unitId);
+      expect(tenantUnbilledInstallment['contract_id'], contractId);
 
       final taxAccountId =
           (await db.query(
@@ -3816,6 +3824,9 @@ void main() {
       );
       expect(historicOpenInvoice['paid_amount'], 50.0);
       expect(historicOpenInvoice['remaining_amount'], 65.0);
+      expect(historicOpenInvoice['property_id'], propertyId);
+      expect(historicOpenInvoice['unit_id'], unitId);
+      expect(historicOpenInvoice['contract_id'], contractId);
       final partialInvoiceReceiptId = await DatabaseHelper.instance
           .insertTenantReceiptVoucher(
             tenantId: tenantId,
