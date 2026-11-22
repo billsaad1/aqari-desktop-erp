@@ -6,6 +6,7 @@ import '../../core/print_utils.dart';
 import '../../core/pdf_preview_dialog.dart';
 import '../../core/permission_policy.dart';
 import '../../database/database_helper.dart';
+import '../../models/tenant_receipt_payment_method.dart';
 
 class VoucherHistoryScreen extends StatefulWidget {
   const VoucherHistoryScreen({super.key});
@@ -347,15 +348,30 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
       final voucherType = voucher['voucher_type']?.toString() ?? '';
       final isGeneralVoucher = voucherType.contains('عام');
       final partyName = voucher['party_name']?.toString().trim() ?? '';
+      final currentTenantName =
+          voucher['current_tenant_name']?.toString().trim() ?? '';
+      final isTenantReceipt = voucherType == 'قبض مستأجر';
+      final receiptTenantName = currentTenantName.isNotEmpty
+          ? currentTenantName
+          : partyName;
+      final storedPaymentMethod = TenantReceiptPaymentMethod.displayLabel(
+        method: voucher['payment_method'],
+        reference: voucher['payment_reference'],
+        bankName: voucher['payment_bank_name'],
+      );
       final periodFrom = voucher['period_from_date']?.toString().trim();
       final periodTo = voucher['period_to_date']?.toString().trim();
       final pdfBytes = await PrintUtils.buildVoucherPdf(
         voucherType: 'سند $voucherType',
         voucherNo: widget.voucherId,
         date: voucher['voucher_date'].toString(),
-        targetName: isGeneralVoucher || partyName.isEmpty ? null : partyName,
+        targetName: isTenantReceipt
+            ? (receiptTenantName.isEmpty ? null : receiptTenantName)
+            : isGeneralVoucher || partyName.isEmpty
+            ? null
+            : partyName,
         amount: (voucher['amount'] as num).toDouble(),
-        paymentMethod: null,
+        paymentMethod: isTenantReceipt ? storedPaymentMethod : null,
         accountName: '',
         description: voucher['description']?.toString(),
         periodStartDate: periodFrom,
@@ -939,6 +955,13 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
     }).toList();
     final isReceipt = voucher['voucher_type'] == 'قبض مستأجر';
     final amount = (voucher['amount'] as num).toDouble();
+    final receiptPaymentLabel = TenantReceiptPaymentMethod.displayLabel(
+      method: voucher['payment_method'],
+      reference: voucher['payment_reference'],
+      bankName: voucher['payment_bank_name'],
+    );
+    final paymentReference = voucher['payment_reference']?.toString().trim();
+    final paymentBankName = voucher['payment_bank_name']?.toString().trim();
     final detailTiles = <Widget>[
       _detailTile('نوع السند', 'سند ${voucher['voucher_type']}'),
       _detailTile('التاريخ', voucher['voucher_date'].toString()),
@@ -947,6 +970,12 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         'المبلغ',
         '${NumberFormat('#,##0.00').format(amount)} $_currency',
       ),
+      if (isReceipt)
+        _detailTile('طريقة القبض', receiptPaymentLabel ?? 'غير مسجلة في هذا السند'),
+      if (isReceipt && (paymentReference?.isNotEmpty ?? false))
+        _detailTile('رقم الشيك / مرجع الحوالة', paymentReference!),
+      if (isReceipt && (paymentBankName?.isNotEmpty ?? false))
+        _detailTile('البنك', paymentBankName!),
       _detailTile(
         'رقم القيد المحاسبي',
         voucher['journal_entry_id']?.toString() ?? '—',

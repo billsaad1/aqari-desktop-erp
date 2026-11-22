@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
@@ -8,6 +10,7 @@ import '../../database/database_helper.dart';
 import '../../core/print_utils.dart';
 import '../../core/pdf_preview_dialog.dart';
 import '../../core/permission_policy.dart';
+import '../../models/tenant_receipt_payment_method.dart';
 import 'tenant_receivable_sorter.dart';
 
 class TenantReceiptScreen extends StatefulWidget {
@@ -21,6 +24,8 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   final _formKey = GlobalKey<FormState>();
   final _amountController = TextEditingController();
   final _descriptionController = TextEditingController();
+  final _paymentReferenceController = TextEditingController();
+  final _paymentBankNameController = TextEditingController();
   final _dateController = TextEditingController(
     text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
   );
@@ -29,12 +34,18 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
   int? _selectedCashAccountId;
   int? _selectedInvoiceId;
   int? _selectedInstallmentId;
+  int? _selectedBankId;
   int? _selectedPropertyId;
   int? _selectedContractId;
   bool _isInvoicePaymentMode = false;
+  TenantReceiptPaymentMethod _selectedPaymentMethod =
+      TenantReceiptPaymentMethod.cash;
 
   List<Map<String, dynamic>> _unpaidInstallments = [];
   List<Map<String, dynamic>> _openTaxInvoices = [];
+  List<Map<String, dynamic>> _bankOptions = [];
+  bool _isLoadingBanks = true;
+  String? _bankOptionsError;
   bool _isLoadingReceivables = false;
   bool _isProcessing = false;
   List<Map<String, dynamic>> _legacyPayments = [];
@@ -130,6 +141,59 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
 
   String _displayAmount(dynamic value) =>
       NumberFormat('#,##0.00').format(((value as num?) ?? 0).toDouble());
+
+  Map<String, dynamic>? get _selectedBank {
+    for (final bank in _bankOptions) {
+      if (_rowId(bank, 'bank_id') == _selectedBankId) return bank;
+    }
+    return null;
+  }
+
+  Future<void> _loadBankOptions() async {
+    try {
+      final options = await DatabaseHelper.instance
+          .getTenantReceiptBankOptions();
+      if (!mounted) return;
+      setState(() {
+        _bankOptions = options;
+        _bankOptionsError = null;
+        _isLoadingBanks = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _bankOptions = [];
+        _bankOptionsError = error.toString();
+        _isLoadingBanks = false;
+      });
+    }
+  }
+
+  void _onPaymentMethodChanged(String? value) {
+    final method = TenantReceiptPaymentMethod.fromDatabase(value);
+    if (method == null) return;
+    setState(() {
+      _selectedPaymentMethod = method;
+      _selectedCashAccountId = null;
+      _selectedBankId = null;
+      _paymentReferenceController.clear();
+      _paymentBankNameController.clear();
+    });
+  }
+
+  void _onBankChanged(int? bankId) {
+    Map<String, dynamic>? bank;
+    for (final option in _bankOptions) {
+      if (_rowId(option, 'bank_id') == bankId) {
+        bank = option;
+        break;
+      }
+    }
+    setState(() {
+      _selectedBankId = bankId;
+      _selectedCashAccountId = bank == null ? null : _rowId(bank, 'account_id');
+    });
+  }
 
   bool _isFutureDueDate(Object? value) {
     final dueDate = DateTime.tryParse(value?.toString() ?? '');
@@ -417,6 +481,12 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
 
     final receiptTenantId = _selectedTenantId!;
     final cashAccountId = _selectedCashAccountId!;
+    final paymentReference = _paymentReferenceController.text.trim();
+    final paymentBankName = _paymentBankNameController.text.trim();
+    final paymentBankId =
+        _selectedPaymentMethod == TenantReceiptPaymentMethod.bankTransfer
+        ? _selectedBankId
+        : null;
     final receiptDate = _dateController.text;
     final invoiceId = invoice == null ? null : (invoice['id'] as num).toInt();
     final invoiceMode = _isInvoicePaymentMode;
@@ -454,6 +524,14 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           installmentsToUpdate: const [],
           invoiceId: invoiceId!,
           description: _descriptionController.text.trim(),
+          paymentMethod: _selectedPaymentMethod.databaseValue,
+          paymentBankId: paymentBankId,
+          paymentReference: paymentReference.isEmpty ? null : paymentReference,
+          paymentBankName:
+              _selectedPaymentMethod == TenantReceiptPaymentMethod.check &&
+                  paymentBankName.isNotEmpty
+              ? paymentBankName
+              : null,
         );
       } else {
         voucherId = await DatabaseHelper.instance.insertTenantReceiptVoucher(
@@ -463,6 +541,14 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           cashAccountId: cashAccountId,
           installmentsToUpdate: updates,
           description: _descriptionController.text.trim(),
+          paymentMethod: _selectedPaymentMethod.databaseValue,
+          paymentBankId: paymentBankId,
+          paymentReference: paymentReference.isEmpty ? null : paymentReference,
+          paymentBankName:
+              _selectedPaymentMethod == TenantReceiptPaymentMethod.check &&
+                  paymentBankName.isNotEmpty
+              ? paymentBankName
+              : null,
         );
       }
     } catch (e) {
@@ -497,6 +583,14 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       if (voucherDetails == null) {
         throw StateError('تعذر تحميل تخصيصات سند الفاتورة');
       }
+      final savedVoucher = Map<String, dynamic>.from(
+        voucherDetails['voucher'] as Map,
+      );
+      final savedPaymentMethod = TenantReceiptPaymentMethod.displayLabel(
+        method: savedVoucher['payment_method'],
+        reference: savedVoucher['payment_reference'],
+        bankName: savedVoucher['payment_bank_name'],
+      );
       final installmentAllocations = voucherDetails['installments'] is List
           ? (voucherDetails['installments'] as List)
                 .whereType<Map>()
@@ -515,7 +609,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
         date: receiptDate,
         targetName: tenantName,
         amount: amountCents / 100,
-        paymentMethod: null,
+        paymentMethod: savedPaymentMethod,
         accountName: accountName,
         description: _descriptionController.text.trim(),
         installmentAllocations: installmentAllocations,
@@ -559,14 +653,23 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
     if (mounted) {
       _amountController.clear();
       _descriptionController.clear();
+      _paymentReferenceController.clear();
       setState(() => _isProcessing = false);
     }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadBankOptions());
   }
 
   @override
   void dispose() {
     _amountController.dispose();
     _descriptionController.dispose();
+    _paymentReferenceController.dispose();
+    _paymentBankNameController.dispose();
     _dateController.dispose();
     super.dispose();
   }
@@ -579,7 +682,7 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           return const Center(child: CircularProgressIndicator());
         }
 
-        final cashAccounts = accProv.detailAccounts
+        final liquidAccounts = accProv.detailAccounts
             .where(
               (a) =>
                   a['account_type'] == 'Asset' &&
@@ -587,6 +690,15 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                   a['parent_id'] != null,
             )
             .toList();
+        final cashAccounts = liquidAccounts.where((account) {
+          final code = account['code']?.toString() ?? '';
+          final name = account['name']?.toString() ?? '';
+          return code == '1101' || name.contains('صندوق') || name.contains('خزينة');
+        }).toList();
+        final accountOptions =
+            _selectedPaymentMethod == TenantReceiptPaymentMethod.check
+            ? liquidAccounts
+            : cashAccounts;
         final propertyOptions = _propertyOptions(_allReceivables);
         final contractOptions = _contractOptions(
           _allReceivables,
@@ -667,6 +779,128 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                           border: OutlineInputBorder(),
                         ),
                       ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        key: ValueKey(
+                          'receipt-payment-method-${_selectedPaymentMethod.databaseValue}',
+                        ),
+                        initialValue: _selectedPaymentMethod.databaseValue,
+                        items: const [
+                          DropdownMenuItem<String>(
+                            value: 'cash',
+                            child: Text('نقداً للصندوق'),
+                          ),
+                          DropdownMenuItem<String>(
+                            value: 'bank_transfer',
+                            child: Text('حوالة بنكية'),
+                          ),
+                          DropdownMenuItem<String>(
+                            value: 'check',
+                            child: Text('شيك'),
+                          ),
+                        ],
+                        onChanged: _isProcessing ? null : _onPaymentMethodChanged,
+                        decoration: const InputDecoration(
+                          labelText: 'طريقة القبض',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      if (_selectedPaymentMethod ==
+                          TenantReceiptPaymentMethod.bankTransfer) ...[
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<int>(
+                          key: ValueKey('receipt-bank-$_selectedBankId'),
+                          initialValue: _selectedBankId,
+                          isExpanded: true,
+                          items: _bankOptions.map((bank) {
+                            final id = _rowId(bank, 'bank_id')!;
+                            return DropdownMenuItem<int>(
+                              value: id,
+                              child: Text(
+                                '${bank['bank_name']} — ${bank['account_code']} ${bank['account_name']}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: _isProcessing || _isLoadingBanks
+                              ? null
+                              : _onBankChanged,
+                          validator: (value) {
+                            if (value != null) return null;
+                            if (_bankOptionsError != null) {
+                              return 'تعذر تحميل البنوك المسجلة';
+                            }
+                            return _isLoadingBanks
+                                ? 'جارٍ تحميل البنوك'
+                                : 'اختر البنك المرتبط بالحساب المحصل';
+                          },
+                          decoration: const InputDecoration(
+                            labelText: 'البنك المستلم للحوالة',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        if (_bankOptionsError != null ||
+                            (!_isLoadingBanks && _bankOptions.isEmpty)) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            _bankOptionsError ??
+                                'لا توجد بنوك مربوطة بحسابات 11xx. أضف البنك واربطه بحسابه من إدارة البنوك.',
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                        if (_selectedBank != null) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            'سيُرحّل الطرف المدين تلقائيًا إلى الحساب ${_selectedBank!['account_code']} — ${_selectedBank!['account_name']}.',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ],
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _paymentReferenceController,
+                          enabled: !_isProcessing,
+                          maxLength: 100,
+                          decoration: const InputDecoration(
+                            labelText: 'مرجع الحوالة (اختياري)',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ],
+                      if (_selectedPaymentMethod ==
+                          TenantReceiptPaymentMethod.check) ...[
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _paymentReferenceController,
+                          enabled: !_isProcessing,
+                          maxLength: 100,
+                          decoration: const InputDecoration(
+                            labelText: 'رقم الشيك',
+                            border: OutlineInputBorder(),
+                          ),
+                          validator: (value) =>
+                              value == null || value.trim().isEmpty
+                              ? 'رقم الشيك مطلوب'
+                              : null,
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _paymentBankNameController,
+                          enabled: !_isProcessing,
+                          maxLength: 100,
+                          decoration: const InputDecoration(
+                            labelText: 'البنك المصدر للشيك (اختياري)',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'للمعالجة المحاسبية، اختر حساب شيكات برسم التحصيل إن كان متاحًا؛ لا يعتبر النظام الشيك محصّلًا في البنك تلقائيًا.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ],
                       if (_selectedTenantId != null &&
                           !_isLoadingReceivables &&
                           _allReceivables.isNotEmpty) ...[
@@ -819,25 +1053,40 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
                         ],
                       ],
                       const SizedBox(height: 16),
-                      DropdownButtonFormField<int>(
-                        initialValue: _selectedCashAccountId,
-                        items: cashAccounts
-                            .map(
-                              (a) => DropdownMenuItem<int>(
-                                value: (a['id'] as num).toInt(),
-                                child: Text('${a['code']} - ${a['name']}'),
+                      if (_selectedPaymentMethod !=
+                          TenantReceiptPaymentMethod.bankTransfer)
+                        DropdownButtonFormField<int>(
+                          key: ValueKey(
+                            'receipt-account-${_selectedPaymentMethod.databaseValue}-$_selectedCashAccountId',
+                          ),
+                          initialValue: _selectedCashAccountId,
+                          isExpanded: true,
+                          items: accountOptions.map((account) {
+                            return DropdownMenuItem<int>(
+                              value: (account['id'] as num).toInt(),
+                              child: Text(
+                                '${account['code']} - ${account['name']}',
+                                overflow: TextOverflow.ellipsis,
                               ),
-                            )
-                            .toList(),
-                        onChanged: _isProcessing
-                            ? null
-                            : (val) =>
-                                  setState(() => _selectedCashAccountId = val),
-                        decoration: const InputDecoration(
-                          labelText: 'يُقبض إلى حساب (الصندوق/البنك)',
-                          border: OutlineInputBorder(),
+                            );
+                          }).toList(),
+                          onChanged: _isProcessing
+                              ? null
+                              : (value) => setState(
+                                  () => _selectedCashAccountId = value,
+                                ),
+                          validator: (value) => value == null
+                              ? 'اختر حساب المعالجة المحاسبي'
+                              : null,
+                          decoration: InputDecoration(
+                            labelText:
+                                _selectedPaymentMethod ==
+                                    TenantReceiptPaymentMethod.check
+                                ? 'حساب المعالجة المحاسبي للشيك'
+                                : 'حساب الصندوق النقدي',
+                            border: const OutlineInputBorder(),
+                          ),
                         ),
-                      ),
                       const SizedBox(height: 16),
                       TextFormField(
                         controller: _dateController,

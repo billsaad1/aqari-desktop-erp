@@ -35,12 +35,13 @@ import 'internal_subledger_reconciliation_service.dart';
 import 'owner_settlement_schema.dart';
 import 'property_sale_schema.dart';
 import 'tenant_receipt_correction_schema.dart';
+import '../models/tenant_receipt_payment_method.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
   static Future<Database>? _databaseOpening;
-  static const int _schemaVersion = 35;
+  static const int _schemaVersion = 36;
   static const int _maxFailedLoginAttempts = 5;
   static const Duration _loginLockoutDuration = Duration(minutes: 15);
   @visibleForTesting
@@ -688,6 +689,9 @@ class DatabaseHelper {
         'description',
         'period_from_date',
         'period_to_date',
+        'payment_method',
+        'payment_reference',
+        'payment_bank_name',
       ],
       'voucher_installment_allocations': [
         'id',
@@ -1772,6 +1776,16 @@ class DatabaseHelper {
     if (oldVersion < 35) {
       await FinancialQueryIndexesSchema.install(db);
       await TenantReceiptCorrectionSchema.install(db);
+    }
+    if (oldVersion < 36) {
+      await _ensureColumn(
+        db,
+        'vouchers',
+        'payment_method',
+        "TEXT CHECK (payment_method IS NULL OR payment_method IN ('cash', 'bank_transfer', 'check'))",
+      );
+      await _ensureColumn(db, 'vouchers', 'payment_reference', 'TEXT');
+      await _ensureColumn(db, 'vouchers', 'payment_bank_name', 'TEXT');
     }
   }
 
@@ -2920,6 +2934,9 @@ class DatabaseHelper {
         description TEXT,
         period_from_date TEXT,
         period_to_date TEXT,
+        payment_method TEXT CHECK (payment_method IS NULL OR payment_method IN ('cash', 'bank_transfer', 'check')),
+        payment_reference TEXT,
+        payment_bank_name TEXT,
         FOREIGN KEY (tenant_id) REFERENCES tenants (id),
         FOREIGN KEY (journal_entry_id) REFERENCES journal_entries (id)
       )
@@ -7582,6 +7599,44 @@ class DatabaseHelper {
 
   // --- Tenant Financial Operations ---
 
+  Future<List<Map<String, dynamic>>> getTenantReceiptBankOptions() async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    final rows = await db.rawQuery('''
+      SELECT b.id AS bank_id, TRIM(b.name) AS bank_name, b.account_id,
+             a.code AS account_code, a.name AS account_name
+      FROM banks b
+      JOIN accounts a ON a.id = b.account_id
+      WHERE a.account_type = 'Asset'
+        AND a.code LIKE '11%'
+        AND a.code != '1101'
+        AND a.name NOT LIKE '%صندوق%'
+        AND a.name NOT LIKE '%خزينة%'
+      ORDER BY b.name COLLATE NOCASE, b.id
+    ''');
+    final options = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      final bankName = row['bank_name']?.toString().trim() ?? '';
+      final accountId = (row['account_id'] as num?)?.toInt();
+      if (bankName.isEmpty || accountId == null) continue;
+      try {
+        final account = await _requireOwnerSettlementCashAccountTx(db, accountId);
+        options.add({
+          'bank_id': (row['bank_id'] as num).toInt(),
+          'bank_name': bankName,
+          'account_id': accountId,
+          'account_code': account['code'],
+          'account_name': account['name'],
+        });
+      } on ArgumentError {
+        continue;
+      } on StateError {
+        continue;
+      }
+    }
+    return options;
+  }
+
   Future<int> insertTenantReceiptVoucher({
     required int tenantId,
     required double amount,
@@ -7590,6 +7645,10 @@ class DatabaseHelper {
     required List<Map<String, dynamic>> installmentsToUpdate,
     int? invoiceId,
     String? description,
+    String? paymentMethod,
+    int? paymentBankId,
+    String? paymentReference,
+    String? paymentBankName,
   }) async {
     PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
     if (amount <= 0 ||
@@ -7628,13 +7687,88 @@ class DatabaseHelper {
       await _ensureNoPendingLegacyInvoicesForTenant(txn, tenantId);
       final tenantAccountId = tenantRows.first['account_id'] as int;
       await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
-      final cashAccount = await _requireLeafAccountTx(
+      final cashAccount = await _requireOwnerSettlementCashAccountTx(
         txn,
         cashAccountId,
-        expectedType: 'Asset',
       );
-      if (!(cashAccount['code'] as String).startsWith('11')) {
-        throw ArgumentError('اختر حساب صندوق أو بنك صالحاً');
+      final parsedPaymentMethod = paymentMethod == null
+          ? null
+          : TenantReceiptPaymentMethod.fromDatabase(paymentMethod);
+      if (paymentMethod != null && parsedPaymentMethod == null) {
+        throw ArgumentError('طريقة القبض المحددة غير معروفة');
+      }
+      final normalizedReference = paymentReference?.trim();
+      final normalizedInputBankName = paymentBankName?.trim();
+      String? receiptBankName;
+      switch (parsedPaymentMethod) {
+        case null:
+          if (paymentBankId != null ||
+              (normalizedReference?.isNotEmpty ?? false) ||
+              (normalizedInputBankName?.isNotEmpty ?? false)) {
+            throw ArgumentError('بيانات الدفع لا تطابق طريقة القبض');
+          }
+          break;
+        case TenantReceiptPaymentMethod.cash:
+          final code = cashAccount['code']?.toString() ?? '';
+          final name = cashAccount['name']?.toString() ?? '';
+          if (code != '1101' &&
+              !name.contains('صندوق') &&
+              !name.contains('خزينة')) {
+            throw ArgumentError('اختر حساب الصندوق لطريقة القبض النقدية');
+          }
+          if (paymentBankId != null ||
+              (normalizedReference?.isNotEmpty ?? false) ||
+              (normalizedInputBankName?.isNotEmpty ?? false)) {
+            throw ArgumentError('لا تقبل طريقة النقد بيانات بنك أو مرجع شيك');
+          }
+          break;
+        case TenantReceiptPaymentMethod.bankTransfer:
+          if (paymentBankId == null) {
+            throw ArgumentError('اختر البنك الذي استقبل الحوالة');
+          }
+          if ((normalizedReference?.length ?? 0) > 100) {
+            throw ArgumentError('رقم مرجع الحوالة طويل أكثر من المسموح');
+          }
+          final bankRows = await txn.query(
+            'banks',
+            columns: ['name', 'account_id'],
+            where: 'id = ?',
+            whereArgs: [paymentBankId],
+            limit: 1,
+          );
+          if (bankRows.isEmpty ||
+              (bankRows.first['account_id'] as num?)?.toInt() != cashAccountId) {
+            throw ArgumentError('حساب القيد لا يطابق البنك المحدد للحوالة');
+          }
+          final bankAccountName = cashAccount['name']?.toString() ?? '';
+          if (cashAccount['code']?.toString() == '1101' ||
+              bankAccountName.contains('صندوق') ||
+              bankAccountName.contains('خزينة')) {
+            throw ArgumentError('اربط البنك بحساب بنكي مستقل لا بحساب الصندوق');
+          }
+          receiptBankName = bankRows.first['name']?.toString().trim();
+          if (receiptBankName == null || receiptBankName.isEmpty) {
+            throw ArgumentError('اسم البنك المحدد غير صالح');
+          }
+          if (normalizedInputBankName?.isNotEmpty ?? false) {
+            throw ArgumentError('اسم بنك الحوالة يُؤخذ من سجل البنوك');
+          }
+          break;
+        case TenantReceiptPaymentMethod.check:
+          if (paymentBankId != null) {
+            throw ArgumentError('الشيك لا يستخدم اختيار بنك التحويل');
+          }
+          if (normalizedReference == null || normalizedReference.isEmpty) {
+            throw ArgumentError('رقم الشيك مطلوب لإثبات طريقة القبض');
+          }
+          if (normalizedReference.length > 100 ||
+              (normalizedInputBankName?.length ?? 0) > 100) {
+            throw ArgumentError('رقم الشيك أو اسم البنك يتجاوز الحد المسموح');
+          }
+          receiptBankName = normalizedInputBankName?.isEmpty ?? true
+              ? null
+              : normalizedInputBankName;
+          break;
       }
 
       var allocatedCents = 0;
@@ -7908,6 +8042,13 @@ class DatabaseHelper {
         'party_name': tenantRows.first['name'],
         'journal_entry_id': journalId,
         'description': voucherDescription,
+        'payment_method': parsedPaymentMethod?.databaseValue,
+        'payment_reference': parsedPaymentMethod ==
+                    TenantReceiptPaymentMethod.check ||
+                parsedPaymentMethod == TenantReceiptPaymentMethod.bankTransfer
+            ? normalizedReference
+            : null,
+        'payment_bank_name': receiptBankName,
       });
       if (invoiceId != null) {
         await txn.insert('voucher_invoice_allocations', {
@@ -7974,6 +8115,10 @@ class DatabaseHelper {
           'voucher_date': voucherDate,
           'journal_entry_id': journalId,
           'invoice_id': invoiceId,
+          'payment_method': parsedPaymentMethod?.databaseValue,
+          'payment_bank_id': paymentBankId,
+          'payment_reference': normalizedReference,
+          'payment_bank_name': receiptBankName,
           'installment_ids': [
             for (final installment in verifiedUpdates)
               (installment['id'] as num).toInt(),
@@ -9097,7 +9242,8 @@ class DatabaseHelper {
       final sourceRows = await txn.rawQuery(
         '''
         SELECT v.id, v.voucher_date, v.amount, v.tenant_id, v.party_name,
-               v.description, v.journal_entry_id, je.entry_date,
+               v.description, v.payment_method, v.payment_reference,
+               v.payment_bank_name, v.journal_entry_id, je.entry_date,
                je.is_posted
         FROM vouchers v
         LEFT JOIN journal_entries je ON je.id = v.journal_entry_id
@@ -9505,6 +9651,9 @@ class DatabaseHelper {
         'party_name': source['party_name'] ?? tenantRows.first['name'],
         'journal_entry_id': replacementJournalId,
         'description': normalizedDescription,
+        'payment_method': source['payment_method'],
+        'payment_reference': source['payment_reference'],
+        'payment_bank_name': source['payment_bank_name'],
       });
       await txn.insert('voucher_installment_allocations', {
         'voucher_id': replacementVoucherId,
@@ -9623,6 +9772,9 @@ class DatabaseHelper {
         v.description,
         v.period_from_date,
         v.period_to_date,
+        v.payment_method,
+        v.payment_reference,
+        v.payment_bank_name,
         v.journal_entry_id
       FROM vouchers v
       LEFT JOIN tenants t ON t.id = v.tenant_id
