@@ -143,9 +143,9 @@ void main() {
 
       expect(loaderCalled, isTrue);
       expect(find.text('مستأجر تجريبي'), findsNWidgets(4));
-      expect(find.text('قبض'), findsNWidgets(2));
-      expect(find.text('استرداد مرتبط'), findsOneWidget);
-      expect(find.text('استرداد للمراجعة'), findsOneWidget);
+      expect(find.text('قبض نقدي'), findsNWidgets(2));
+      expect(find.text('استرداد نقدي مرتبط'), findsOneWidget);
+      expect(find.text('استرداد نقدي للمراجعة'), findsOneWidget);
       expect(find.text('لا يوجد تخصيص مثبت'), findsOneWidget);
       expect(find.text('مرتبط ومطابق'), findsOneWidget);
       expect(

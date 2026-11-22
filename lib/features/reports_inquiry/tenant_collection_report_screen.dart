@@ -29,6 +29,7 @@ class _TenantCollectionReportScreenState
     text: DateFormat('yyyy-MM-dd').format(DateTime.now()),
   );
   final List<Map<String, dynamic>> _tenantOptions = [];
+  final ScrollController _tableScrollController = ScrollController();
   int _selectedTenantFilter = -1;
 
   @override
@@ -78,6 +79,7 @@ class _TenantCollectionReportScreenState
     );
     _startDateController.dispose();
     _endDateController.dispose();
+    _tableScrollController.dispose();
     super.dispose();
   }
 
@@ -299,16 +301,37 @@ class _TenantCollectionReportScreenState
                 ),
               const SizedBox(height: 12),
               if (isCurrentReport) ...[
-                _summary(report),
-                const SizedBox(height: 10),
                 Expanded(
-                  child: report.rows.isEmpty
-                      ? const Center(
-                          child: Text(
-                            'لا توجد سندات قبض أو استردادات مرتبطة في الفترة المحددة.',
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final tableHeight = constraints.maxHeight > 500
+                          ? constraints.maxHeight - 220
+                          : 300.0;
+                      return SingleChildScrollView(
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            minHeight: constraints.maxHeight,
                           ),
-                        )
-                      : _table(report),
+                          child: Column(
+                            children: [
+                              _summary(report),
+                              const SizedBox(height: 10),
+                              SizedBox(
+                                height: tableHeight,
+                                child: report.rows.isEmpty
+                                    ? const Center(
+                                        child: Text(
+                                          'لا توجد سندات قبض أو استردادات مرتبطة في الفترة المحددة.',
+                                        ),
+                                      )
+                                    : _table(report),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               ] else if (reports.isTenantCollectionReportLoading) ...[
                 const Expanded(
@@ -354,40 +377,85 @@ class _TenantCollectionReportScreenState
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
     child: Padding(
       padding: const EdgeInsets.all(14),
-      child: Wrap(
-        spacing: 24,
-        runSpacing: 12,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _metric(
-            'إجمالي القبوضات المرحلة',
-            report.grossReceiptsMinor,
-            report.currency,
+          Text(
+            'الملخص النقدي',
+            style: Theme.of(
+              context,
+            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
           ),
-          _metric(
-            'الاستردادات المرتبطة المطابقة',
-            report.linkedRefundsMinor,
-            report.currency,
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 24,
+            runSpacing: 12,
+            children: [
+              _metric(
+                'إجمالي القبوضات النقدية المرحلة',
+                report.grossReceiptsMinor,
+                report.currency,
+              ),
+              _metric(
+                'الاستردادات النقدية المرتبطة المطابقة',
+                report.linkedRefundsMinor,
+                report.currency,
+              ),
+              _metric(
+                'صافي التحصيل النقدي المؤكد',
+                report.grossReceiptsMinor - report.linkedRefundsMinor,
+                report.currency,
+                color: Colors.green.shade700,
+              ),
+              _metric(
+                'قبوض بلا تخصيص مثبت',
+                report.unallocatedReceiptsMinor,
+                report.currency,
+              ),
+              _metric(
+                'استردادات نقدية تحتاج مراجعة',
+                report.unverifiedRefundsMinor,
+                report.currency,
+              ),
+              _countMetric(
+                'سندات تخصيصها يحتاج مراجعة',
+                report.sourceMismatchVoucherCount,
+              ),
+            ],
           ),
-          _metric(
-            'صافي التحصيل المؤكد',
-            report.netCollectedMinor,
-            report.currency,
-            color: Colors.green.shade700,
-          ),
-          _metric(
-            'قبوض بلا تخصيص مثبت',
-            report.unallocatedReceiptsMinor,
-            report.currency,
-          ),
-          _metric(
-            'استردادات تحتاج مراجعة',
-            report.unverifiedRefundsMinor,
-            report.currency,
-          ),
-          _countMetric(
-            'سندات تخصيصها يحتاج مراجعة',
-            report.sourceMismatchVoucherCount,
-          ),
+          if (report.rows.any((row) => row.isCorrectionReversal)) ...[
+            const Divider(height: 24),
+            Text(
+              'عكوس تصحيح القبض — حركات محاسبية غير نقدية',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: Colors.indigo.shade700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 24,
+              runSpacing: 12,
+              children: [
+                _metric(
+                  'عكوس تصحيح موثقة (غير نقدية)',
+                  report.linkedReceiptCorrectionsMinor,
+                  report.currency,
+                  color: Colors.indigo.shade700,
+                ),
+                _metric(
+                  'عكوس تصحيح تحتاج مراجعة (غير نقدية)',
+                  report.unverifiedCorrectionReversalsMinor,
+                  report.currency,
+                  color: Colors.orange.shade800,
+                ),
+                _countMetric(
+                  'عدد عكوس التصحيح غير النقدية',
+                  report.rows.where((row) => row.isCorrectionReversal).length,
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     ),
@@ -426,8 +494,10 @@ class _TenantCollectionReportScreenState
     elevation: 1,
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
     child: Scrollbar(
+      controller: _tableScrollController,
       thumbVisibility: true,
       child: SingleChildScrollView(
+        controller: _tableScrollController,
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: DataTable(
@@ -440,7 +510,7 @@ class _TenantCollectionReportScreenState
               DataColumn(label: Text('المستأجر')),
               DataColumn(label: Text('النوع')),
               DataColumn(label: Text('المبلغ الموقّع'), numeric: true),
-              DataColumn(label: Text('سند القبض المصدر')),
+              DataColumn(label: Text('الأصل / السند البديل')),
               DataColumn(label: Text('حالة التخصيص')),
               DataColumn(label: Text('اتساق مرجع التخصيص')),
             ],
@@ -453,13 +523,21 @@ class _TenantCollectionReportScreenState
                     DataCell(Text(row.tenantName)),
                     DataCell(
                       Text(
-                        row.isRefund
+                        row.isCorrectionReversal
+                            ? row.isVerifiedCorrectionReversal
+                                  ? 'عكس تصحيح قبض (غير نقدي)'
+                                  : 'عكس تصحيح قبض (غير نقدي — للمراجعة)'
+                            : row.isRefund
                             ? row.isVerifiedRefund
-                                  ? 'استرداد مرتبط'
-                                  : 'استرداد للمراجعة'
-                            : 'قبض',
+                                  ? 'استرداد نقدي مرتبط'
+                                  : 'استرداد نقدي للمراجعة'
+                            : 'قبض نقدي',
                         style: TextStyle(
-                          color: row.isRefund
+                          color: row.isCorrectionReversal
+                              ? row.isVerifiedCorrectionReversal
+                                    ? Colors.indigo.shade700
+                                    : Colors.orange.shade800
+                              : row.isRefund
                               ? row.isVerifiedRefund
                                     ? Colors.orange.shade800
                                     : Colors.red.shade700
@@ -483,6 +561,9 @@ class _TenantCollectionReportScreenState
                       Text(
                         row.sourceReceiptVoucherIds.isEmpty
                             ? '—'
+                            : row.isCorrectionReversal
+                            ? 'الأصل: ${row.sourceReceiptVoucherIds}\n'
+                                  'البديل: ${row.replacementReceiptVoucherId ?? '—'}'
                             : row.sourceReceiptVoucherIds,
                       ),
                     ),
@@ -500,7 +581,11 @@ class _TenantCollectionReportScreenState
                     ),
                     DataCell(
                       Text(
-                        row.sourceConsistencyStatus,
+                        row.isCorrectionReversal &&
+                                row.correctionReason?.trim().isNotEmpty == true
+                            ? '${row.sourceConsistencyStatus}\n'
+                                  'السبب: ${row.correctionReason}'
+                            : row.sourceConsistencyStatus,
                         style: TextStyle(
                           color: row.sourceMismatchCount > 0
                               ? Colors.red.shade700

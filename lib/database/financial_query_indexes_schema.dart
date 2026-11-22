@@ -4,6 +4,7 @@ abstract final class FinancialQueryIndexesSchema {
   static const indexNames = <String>{
     'idx_journal_lines_entry',
     'idx_journal_lines_account_entry',
+    'idx_vouchers_journal_entry',
     'idx_journal_entries_date',
     'idx_contract_installments_contract_due',
     'idx_contract_installments_due_date',
@@ -17,6 +18,10 @@ abstract final class FinancialQueryIndexesSchema {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_journal_lines_account_entry
       ON journal_lines (account_id, journal_entry_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_vouchers_journal_entry
+      ON vouchers (journal_entry_id)
     ''');
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_journal_entries_date

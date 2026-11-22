@@ -34,12 +34,13 @@ import 'accounting_period_schema.dart';
 import 'internal_subledger_reconciliation_service.dart';
 import 'owner_settlement_schema.dart';
 import 'property_sale_schema.dart';
+import 'tenant_receipt_correction_schema.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
   static Future<Database>? _databaseOpening;
-  static const int _schemaVersion = 34;
+  static const int _schemaVersion = 35;
   static const int _maxFailedLoginAttempts = 5;
   static const Duration _loginLockoutDuration = Duration(minutes: 15);
   @visibleForTesting
@@ -1768,6 +1769,10 @@ class DatabaseHelper {
     if (oldVersion < 34) {
       await FinancialQueryIndexesSchema.install(db);
     }
+    if (oldVersion < 35) {
+      await FinancialQueryIndexesSchema.install(db);
+      await TenantReceiptCorrectionSchema.install(db);
+    }
   }
 
   /// Rebuilds `audit_logs` without a foreign key on `user_id`.
@@ -3000,6 +3005,7 @@ class DatabaseHelper {
     ''');
 
     await _createRefundSchema(db);
+    await TenantReceiptCorrectionSchema.install(db);
     await CreditNoteSchema.installGuards(db);
     await _createTenantNoticeSchema(db);
     await _createPropertySaleReviewSchema(db);
@@ -8189,7 +8195,8 @@ class DatabaseHelper {
         v.voucher_date AS receipt_date,
         v.description AS receipt_description,
         cab.amount_minor / 100.0 AS collected_amount,
-        (cab.amount_minor - cab.remaining_minor) / 100.0 AS refunded_amount,
+        cab.refunded_minor / 100.0 AS refunded_amount,
+        cab.corrected_minor / 100.0 AS corrected_amount,
         cab.remaining_minor / 100.0 AS remaining_amount,
         ca.installment_id,
         ca.invoice_id,
@@ -8835,6 +8842,756 @@ class DatabaseHelper {
     return _loadVoucherDetails(voucherId);
   }
 
+  Future<void> correctTenantReceiptVoucherDescription({
+    required int voucherId,
+    required String newDescription,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.edit);
+    final description = newDescription.trim();
+    final correctionReason = reason.trim();
+    if (description.isEmpty ||
+        description.length > 500 ||
+        correctionReason.isEmpty ||
+        correctionReason.length > 500) {
+      throw ArgumentError('البيان المصحح وسبب التعديل مطلوبان (حتى 500 حرف)');
+    }
+
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      final rows = await txn.rawQuery(
+        '''
+        SELECT v.id, v.amount, v.description, v.voucher_type,
+               v.journal_entry_id, je.entry_date, je.is_posted
+        FROM vouchers v
+        JOIN journal_entries je ON je.id = v.journal_entry_id
+        WHERE v.id = ? AND v.voucher_type = 'قبض مستأجر'
+        LIMIT 1
+        ''',
+        [voucherId],
+      );
+      if (rows.isEmpty || (rows.first['is_posted'] as num?)?.toInt() != 1) {
+        throw StateError('يمكن تصحيح بيان سند قبض مستأجر مرحّل فقط');
+      }
+      final rawEntryDate = rows.first['entry_date']?.toString();
+      final entryDate = rawEntryDate != null && rawEntryDate.length >= 10
+          ? rawEntryDate.substring(0, 10)
+          : null;
+      if (entryDate == null || !_isIsoCalendarDate(entryDate)) {
+        throw StateError('تاريخ القيد غير صالح؛ لا يمكن تصحيح البيان');
+      }
+      final priorCorrection = await txn.query(
+        'tenant_receipt_corrections',
+        columns: ['id'],
+        where: 'source_receipt_voucher_id = ?',
+        whereArgs: [voucherId],
+        limit: 1,
+      );
+      if (priorCorrection.isNotEmpty) {
+        throw StateError('السند الأصلي سبق استبداله؛ حافظ على نسخته كما هي');
+      }
+      final lockedPeriods = await txn.query(
+        'accounting_periods',
+        columns: ['id'],
+        where:
+            "status IN ('locked', 'closed') AND ? BETWEEN start_date AND end_date",
+        whereArgs: [entryDate],
+        limit: 1,
+      );
+      if (lockedPeriods.isNotEmpty) {
+        throw StateError(
+          'لا يمكن تعديل البيان داخل فترة محاسبية مقفلة أو مغلقة؛ يلزم فتحها بإذن المستخدم المختص',
+        );
+      }
+
+      final journalId = (rows.first['journal_entry_id'] as num).toInt();
+      final oldDescription = rows.first['description']?.toString() ?? '';
+      if (oldDescription.trim() == description) {
+        throw StateError('البيان الجديد مطابق للبيان الحالي');
+      }
+      final journalLines = await txn.query(
+        'journal_lines',
+        columns: ['id'],
+        where: 'journal_entry_id = ?',
+        whereArgs: [journalId],
+      );
+      if (journalLines.isEmpty) {
+        throw StateError('سند القبض بلا أسطر قيد؛ يلزم فحصه يدويًا');
+      }
+
+      await txn.update(
+        'vouchers',
+        {'description': description},
+        where: "id = ? AND voucher_type = 'قبض مستأجر'",
+        whereArgs: [voucherId],
+      );
+      await txn.update(
+        'journal_entries',
+        {'description': description},
+        where: 'id = ? AND is_posted = 1',
+        whereArgs: [journalId],
+      );
+      await txn.update(
+        'journal_lines',
+        {'description': description},
+        where: 'journal_entry_id = ?',
+        whereArgs: [journalId],
+      );
+      await _recordAuditTx(
+        txn,
+        action: 'TENANT_RECEIPT_DESCRIPTION_CORRECTED',
+        entityType: 'voucher',
+        entityId: voucherId,
+        amountMinor: InternalTax.toMinorUnits(
+          (rows.first['amount'] as num).toDouble(),
+        ),
+        details: {
+          'voucher_id': voucherId,
+          'journal_entry_id': journalId,
+          'old_description': oldDescription,
+          'new_description': description,
+          'reason': correctionReason,
+        },
+      );
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getTenantReceiptCorrectionInstallments(
+    int sourceVoucherId,
+  ) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.view);
+    final db = await instance.database;
+    final sourceRows = await db.rawQuery(
+      '''
+      SELECT v.id, v.amount, v.tenant_id, je.is_posted
+      FROM vouchers v
+      JOIN journal_entries je ON je.id = v.journal_entry_id
+      WHERE v.id = ? AND v.voucher_type = 'قبض مستأجر'
+      LIMIT 1
+      ''',
+      [sourceVoucherId],
+    );
+    if (sourceRows.isEmpty ||
+        (sourceRows.first['is_posted'] as num?)?.toInt() != 1) {
+      throw StateError('يمكن تصحيح سند قبض مستأجر مرحّل فقط');
+    }
+    final previousCorrection = await db.query(
+      'tenant_receipt_corrections',
+      columns: ['id'],
+      where: 'source_receipt_voucher_id = ?',
+      whereArgs: [sourceVoucherId],
+      limit: 1,
+    );
+    if (previousCorrection.isNotEmpty) {
+      throw StateError('سبق تصحيح هذا السند واستبداله');
+    }
+    final sourceAmount = (sourceRows.first['amount'] as num).toDouble();
+    final sourceAllocations = await db.query(
+      'collection_allocations',
+      where: 'voucher_id = ?',
+      whereArgs: [sourceVoucherId],
+    );
+    if (sourceAllocations.isEmpty ||
+        sourceAllocations.any(
+          (row) =>
+              row['invoice_id'] != null ||
+              (row['amount_minor'] as num).toInt() <= 0 ||
+              (row['amount_minor'] as num).toInt() !=
+                  (row['rent_amount_minor'] as num).toInt() ||
+              (row['tax_amount_minor'] as num).toInt() != 0,
+        ) ||
+        sourceAllocations.fold<int>(
+              0,
+              (sum, row) => sum + (row['amount_minor'] as num).toInt(),
+            ) !=
+            InternalTax.toMinorUnits(sourceAmount)) {
+      throw StateError(
+        'الإصدار الأول يدعم سند القبض القياسي المخصص للأقساط فقط؛ لا يدعم الفواتير أو التخصيصات التاريخية الناقصة',
+      );
+    }
+    final refunded = await db.rawQuery(
+      '''
+      SELECT refund.id
+      FROM refund_allocations refund
+      JOIN collection_allocations allocation
+        ON allocation.id = refund.collection_allocation_id
+      WHERE allocation.voucher_id = ?
+      LIMIT 1
+      ''',
+      [sourceVoucherId],
+    );
+    if (refunded.isNotEmpty) {
+      throw StateError('السند له استرداد سابق؛ لا يدعمه مسار التصحيح الحالي');
+    }
+    return db.rawQuery(
+      '''
+      SELECT
+        ci.id AS installment_id,
+        ci.contract_id,
+        ci.due_date,
+        ci.amount AS installment_amount,
+        ci.paid_amount,
+        ROUND((ci.paid_amount * 100 - COALESCE(source_alloc.rent_minor, 0)) / 100.0, 2)
+          AS paid_after_reversal,
+        ROUND((ci.amount * 100 - ci.paid_amount * 100
+          + COALESCE(source_alloc.rent_minor, 0)) / 100.0, 2)
+          AS remaining_after_reversal,
+        p.name AS property_name,
+        u.unit_number
+      FROM contract_installments ci
+      JOIN contracts c ON c.id = ci.contract_id
+      JOIN units u ON u.id = c.unit_id
+      JOIN properties p ON p.id = u.property_id
+      JOIN vouchers source
+        ON source.id = ? AND source.voucher_type = 'قبض مستأجر'
+        AND source.tenant_id = c.tenant_id
+      LEFT JOIN (
+        SELECT installment_id, SUM(rent_amount_minor) AS rent_minor
+        FROM collection_allocations
+        WHERE voucher_id = ?
+        GROUP BY installment_id
+      ) source_alloc ON source_alloc.installment_id = ci.id
+      WHERE c.tenant_id = source.tenant_id
+        AND (c.status = 'Active'
+          OR (c.status = 'Terminated'
+            AND DATE(ci.due_date) <= DATE(c.early_termination_date)))
+        AND ci.status != 'Cancelled'
+        AND ci.amount * 100 - ci.paid_amount * 100
+          + COALESCE(source_alloc.rent_minor, 0) > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM tax_invoices invoice
+          WHERE invoice.installment_id = ci.id
+        )
+      ORDER BY p.name COLLATE NOCASE, u.unit_number COLLATE NOCASE,
+               ci.due_date, ci.id
+      ''',
+      [sourceVoucherId, sourceVoucherId],
+    );
+  }
+
+  Future<int> correctTenantReceiptVoucher({
+    required int sourceVoucherId,
+    required int replacementInstallmentId,
+    required double correctedAmount,
+    required String correctionDate,
+    required String description,
+    required String reason,
+  }) async {
+    PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+    final normalizedDescription = description.trim();
+    final normalizedReason = reason.trim();
+    if (replacementInstallmentId <= 0 ||
+        correctedAmount <= 0 ||
+        !_hasCentPrecision(correctedAmount) ||
+        !_isIsoCalendarDate(correctionDate) ||
+        normalizedDescription.isEmpty ||
+        normalizedDescription.length > 500 ||
+        normalizedReason.isEmpty ||
+        normalizedReason.length > 500) {
+      throw ArgumentError('بيانات تصحيح سند القبض غير مكتملة أو غير صحيحة');
+    }
+    final correctedMinor = InternalTax.toMinorUnits(correctedAmount);
+    final db = await instance.database;
+    return db.transaction((txn) async {
+      PermissionRuntime.require('tenant_financial', AppPermissionAction.post);
+      final sourceRows = await txn.rawQuery(
+        '''
+        SELECT v.id, v.voucher_date, v.amount, v.tenant_id, v.party_name,
+               v.description, v.journal_entry_id, je.entry_date,
+               je.is_posted
+        FROM vouchers v
+        LEFT JOIN journal_entries je ON je.id = v.journal_entry_id
+        WHERE v.id = ? AND v.voucher_type = 'قبض مستأجر'
+        LIMIT 1
+        ''',
+        [sourceVoucherId],
+      );
+      if (sourceRows.isEmpty ||
+          (sourceRows.first['is_posted'] as num?)?.toInt() != 1) {
+        throw StateError('يمكن تصحيح سند قبض مستأجر مرحّل فقط');
+      }
+      final source = sourceRows.first;
+      final tenantId = (source['tenant_id'] as num?)?.toInt();
+      final sourceAmount = (source['amount'] as num?)?.toDouble();
+      final sourceMinor = sourceAmount == null
+          ? 0
+          : InternalTax.toMinorUnits(sourceAmount);
+      final sourceVoucherDate = source['voucher_date']?.toString() ?? '';
+      final sourceJournalId = (source['journal_entry_id'] as num?)?.toInt();
+      if (tenantId == null ||
+          sourceAmount == null ||
+          !_hasCentPrecision(sourceAmount) ||
+          sourceMinor <= 0 ||
+          sourceJournalId == null ||
+          !_isIsoCalendarDate(sourceVoucherDate) ||
+          correctionDate.compareTo(sourceVoucherDate) < 0) {
+        throw StateError('بيانات سند القبض الأصلي أو تاريخ التصحيح غير صالح');
+      }
+      final existingCorrection = await txn.query(
+        'tenant_receipt_corrections',
+        columns: ['id'],
+        where: 'source_receipt_voucher_id = ?',
+        whereArgs: [sourceVoucherId],
+        limit: 1,
+      );
+      if (existingCorrection.isNotEmpty) {
+        throw StateError('سبق تصحيح هذا السند؛ لا يمكن تصحيحه مرة أخرى');
+      }
+      await _ensureNoPendingLegacyTenantPayments(txn, tenantId);
+      await _ensureNoPendingLegacyInvoicesForTenant(txn, tenantId);
+      final lockedPeriods = await txn.query(
+        'accounting_periods',
+        columns: ['id'],
+        where:
+            "status IN ('locked', 'closed') AND ? BETWEEN start_date AND end_date",
+        whereArgs: [correctionDate],
+        limit: 1,
+      );
+      if (lockedPeriods.isNotEmpty) {
+        throw StateError('تاريخ التصحيح يقع في فترة محاسبية مقفلة أو مغلقة');
+      }
+
+      final tenantRows = await txn.query(
+        'tenants',
+        where: 'id = ?',
+        whereArgs: [tenantId],
+        limit: 1,
+      );
+      if (tenantRows.isEmpty || tenantRows.first['account_id'] == null) {
+        throw StateError('حساب ذمم المستأجر غير موجود');
+      }
+      final tenantAccountId = (tenantRows.first['account_id'] as num).toInt();
+      await _requireLeafAccountTx(txn, tenantAccountId, expectedType: 'Asset');
+
+      final sourceAllocations = await txn.rawQuery(
+        '''
+        SELECT allocation.id, allocation.installment_id,
+               allocation.invoice_id, allocation.amount_minor,
+               allocation.rent_amount_minor, allocation.tax_amount_minor,
+               contract.tenant_id AS installment_tenant_id
+        FROM collection_allocations allocation
+        LEFT JOIN contract_installments installment
+          ON installment.id = allocation.installment_id
+        LEFT JOIN contracts contract
+          ON contract.id = installment.contract_id
+        WHERE allocation.voucher_id = ?
+        ORDER BY allocation.id
+        ''',
+        [sourceVoucherId],
+      );
+      if (sourceAllocations.isEmpty) {
+        throw StateError(
+          'السند بلا تخصيصات قبض تفصيلية؛ لا يمكن تصحيحه تلقائيًا',
+        );
+      }
+      final sourceByInstallment = <int, int>{};
+      var sourceAllocatedMinor = 0;
+      for (final allocation in sourceAllocations) {
+        final allocationId = (allocation['id'] as num).toInt();
+        final rawInstallmentId = allocation['installment_id'] as num?;
+        final sourceInstallmentTenantId =
+            (allocation['installment_tenant_id'] as num?)?.toInt();
+        if (rawInstallmentId == null || sourceInstallmentTenantId != tenantId) {
+          throw StateError('أحد تخصيصات السند لا يخص أقساط المستأجر المحدد');
+        }
+        final installmentId = rawInstallmentId.toInt();
+        final amount = (allocation['amount_minor'] as num).toInt();
+        final rent = (allocation['rent_amount_minor'] as num).toInt();
+        final tax = (allocation['tax_amount_minor'] as num).toInt();
+        if (allocation['invoice_id'] != null ||
+            amount <= 0 ||
+            amount != rent ||
+            tax != 0) {
+          throw StateError(
+            'الإصدار الأول يدعم قبض الأقساط القياسي فقط، وليس قبض فاتورة أو ضريبة',
+          );
+        }
+        final linkedInvoice = await txn.query(
+          'tax_invoices',
+          columns: ['id'],
+          where: 'installment_id = ?',
+          whereArgs: [installmentId],
+          limit: 1,
+        );
+        if (linkedInvoice.isNotEmpty) {
+          throw StateError('القسط مرتبط بفاتورة؛ يلزم مسار تصحيح ضريبي مستقل');
+        }
+        final refunds = await txn.query(
+          'refund_allocations',
+          columns: ['id'],
+          where: 'collection_allocation_id = ?',
+          whereArgs: [allocationId],
+          limit: 1,
+        );
+        if (refunds.isNotEmpty) {
+          throw StateError(
+            'السند مرتبط باسترداد سابق؛ لا يمكن تصحيحه بهذا المسار',
+          );
+        }
+        final priorCorrection = await txn.query(
+          'tenant_receipt_correction_allocations',
+          columns: ['id'],
+          where: 'collection_allocation_id = ?',
+          whereArgs: [allocationId],
+          limit: 1,
+        );
+        if (priorCorrection.isNotEmpty) {
+          throw StateError(
+            'تخصيص السند سبق تصحيحه؛ أُوقفت العملية لمنع التكرار',
+          );
+        }
+        sourceAllocatedMinor += amount;
+        sourceByInstallment.update(
+          installmentId,
+          (current) => current + amount,
+          ifAbsent: () => amount,
+        );
+      }
+      if (sourceAllocatedMinor != sourceMinor) {
+        throw StateError('مجموع تخصيصات السند لا يطابق مبلغه؛ يلزم فحص يدوي');
+      }
+      final legacyAllocationRows = await txn.rawQuery(
+        '''
+        SELECT installment_id,
+          CAST(ROUND(SUM(amount) * 100) AS INTEGER) AS amount_minor
+        FROM voucher_installment_allocations
+        WHERE voucher_id = ?
+        GROUP BY installment_id
+        ''',
+        [sourceVoucherId],
+      );
+      final legacySourceByInstallment = <int, int>{
+        for (final row in legacyAllocationRows)
+          (row['installment_id'] as num).toInt(): (row['amount_minor'] as num)
+              .toInt(),
+      };
+      if (legacySourceByInstallment.length != sourceByInstallment.length ||
+          sourceByInstallment.entries.any(
+            (entry) => legacySourceByInstallment[entry.key] != entry.value,
+          )) {
+        throw StateError('سجلا التخصيص التاريخي والتفصيلي غير متطابقين');
+      }
+
+      final journalLinkCount = await txn.rawQuery(
+        'SELECT COUNT(*) AS count FROM vouchers WHERE journal_entry_id = ?',
+        [sourceJournalId],
+      );
+      if ((journalLinkCount.first['count'] as num).toInt() != 1) {
+        throw StateError('قيد الأصل مرتبط بمستند آخر؛ يلزم فحص يدوي');
+      }
+      final originalLines = await txn.rawQuery(
+        '''
+        SELECT jl.id, jl.account_id, jl.debit, jl.credit,
+               jl.cost_center_id, account.code, account.account_type
+        FROM journal_lines jl
+        JOIN accounts account ON account.id = jl.account_id
+        WHERE jl.journal_entry_id = ?
+        ORDER BY jl.id
+        ''',
+        [sourceJournalId],
+      );
+      if (originalLines.length < 2) {
+        throw StateError('قيد الأصل غير مكتمل؛ يلزم فحص يدوي');
+      }
+      final cashLines = <Map<String, Object?>>[];
+      var originalDebitMinor = 0;
+      var originalCreditMinor = 0;
+      var tenantCreditMinor = 0;
+      for (final line in originalLines) {
+        final debit = (line['debit'] as num?)?.toDouble() ?? 0;
+        final credit = (line['credit'] as num?)?.toDouble() ?? 0;
+        if (!_hasCentPrecision(debit) ||
+            !_hasCentPrecision(credit) ||
+            debit < 0 ||
+            credit < 0 ||
+            (debit > 0 && credit > 0) ||
+            (debit == 0 && credit == 0)) {
+          throw StateError('قيد الأصل يحتوي على سطر غير صالح؛ أُوقفت العملية');
+        }
+        final accountId = (line['account_id'] as num).toInt();
+        final debitMinor = InternalTax.toMinorUnits(debit);
+        final creditMinor = InternalTax.toMinorUnits(credit);
+        originalDebitMinor += debitMinor;
+        originalCreditMinor += creditMinor;
+        if (accountId == tenantAccountId && debit == 0 && credit > 0) {
+          tenantCreditMinor += creditMinor;
+          continue;
+        }
+        if ((line['account_type'] == 'Asset') &&
+            (line['code'] as String).startsWith('11') &&
+            debit > 0 &&
+            credit == 0) {
+          cashLines.add(line);
+          continue;
+        }
+        throw StateError(
+          'قيد الأصل غير قياسي (حساب نقدية/ذمم فقط)؛ يلزم تصحيح يدوي من المحاسب',
+        );
+      }
+      if (cashLines.length != 1 ||
+          originalDebitMinor != sourceMinor ||
+          originalCreditMinor != sourceMinor ||
+          tenantCreditMinor != sourceMinor ||
+          InternalTax.toMinorUnits(
+                (cashLines.single['debit'] as num).toDouble(),
+              ) !=
+              sourceMinor) {
+        throw StateError('قيد الأصل لا يطابق قبضًا قياسيًا متوازنًا');
+      }
+      final cashAccountId = (cashLines.single['account_id'] as num).toInt();
+      await _requireLeafAccountTx(txn, cashAccountId, expectedType: 'Asset');
+
+      final targetRows = await txn.rawQuery(
+        '''
+        SELECT ci.id, ci.contract_id, ci.amount, ci.paid_amount,
+               ci.status, ci.due_date, c.tenant_id, c.status AS contract_status,
+               c.early_termination_date
+        FROM contract_installments ci
+        JOIN contracts c ON c.id = ci.contract_id
+        WHERE ci.id = ? AND c.tenant_id = ?
+          AND (c.status = 'Active'
+            OR (c.status = 'Terminated'
+              AND DATE(ci.due_date) <= DATE(c.early_termination_date)))
+          AND ci.status != 'Cancelled'
+        LIMIT 1
+        ''',
+        [replacementInstallmentId, tenantId],
+      );
+      if (targetRows.isEmpty) {
+        throw StateError('القسط البديل لا يخص المستأجر أو أن عقده غير نشط');
+      }
+      final targetInvoices = await txn.query(
+        'tax_invoices',
+        columns: ['id'],
+        where: 'installment_id = ?',
+        whereArgs: [replacementInstallmentId],
+        limit: 1,
+      );
+      if (targetInvoices.isNotEmpty) {
+        throw StateError(
+          'القسط البديل مرتبط بفاتورة؛ لا يدعمه مسار التصحيح الحالي',
+        );
+      }
+
+      final affectedInstallmentIds = <int>{
+        ...sourceByInstallment.keys,
+        replacementInstallmentId,
+      };
+      final oldInstallments = <int, Map<String, Object?>>{};
+      for (final installmentId in affectedInstallmentIds) {
+        final installmentRows = await txn.query(
+          'contract_installments',
+          columns: ['amount', 'paid_amount', 'status'],
+          where: 'id = ?',
+          whereArgs: [installmentId],
+          limit: 1,
+        );
+        if (installmentRows.isEmpty) {
+          throw StateError('أحد الأقساط المرتبطة بالتصحيح غير موجود');
+        }
+        final installment = installmentRows.first;
+        final total = (installment['amount'] as num).toDouble();
+        final paid = (installment['paid_amount'] as num?)?.toDouble() ?? 0;
+        if (!_hasCentPrecision(total) ||
+            !_hasCentPrecision(paid) ||
+            total <= 0 ||
+            paid < 0 ||
+            paid > total) {
+          throw StateError('رصيد القسط غير صالح؛ أُوقفت العملية');
+        }
+        final aggregate = await txn.rawQuery(
+          '''
+          SELECT COALESCE(SUM(balance.remaining_rent_minor), 0) AS paid_minor
+          FROM collection_allocation_balances balance
+          JOIN collection_allocations allocation ON allocation.id = balance.id
+          JOIN vouchers receipt ON receipt.id = allocation.voucher_id
+          JOIN journal_entries journal ON journal.id = receipt.journal_entry_id
+          WHERE allocation.installment_id = ?
+            AND receipt.voucher_type = 'قبض مستأجر'
+            AND journal.is_posted = 1
+          ''',
+          [installmentId],
+        );
+        final allocatedPaidMinor = (aggregate.first['paid_minor'] as num)
+            .toInt();
+        if (allocatedPaidMinor != InternalTax.toMinorUnits(paid)) {
+          throw StateError(
+            'رصيد القسط لا يطابق تخصيصات القبض التفصيلية؛ يلزم مطابقة يدوية قبل التصحيح',
+          );
+        }
+        oldInstallments[installmentId] = installment;
+      }
+      final target = oldInstallments[replacementInstallmentId]!;
+      final targetTotalMinor = InternalTax.toMinorUnits(
+        (target['amount'] as num).toDouble(),
+      );
+      final targetPaidMinor = InternalTax.toMinorUnits(
+        (target['paid_amount'] as num?)?.toDouble() ?? 0,
+      );
+      final targetAfterReverseMinor =
+          targetPaidMinor -
+          (sourceByInstallment[replacementInstallmentId] ?? 0);
+      if (targetAfterReverseMinor < 0 ||
+          correctedMinor > targetTotalMinor - targetAfterReverseMinor) {
+        throw StateError(
+          'المبلغ الصحيح يتجاوز المتبقي المتاح على القسط البديل',
+        );
+      }
+
+      final reverseDescription =
+          'عكس تصحيح سند قبض رقم $sourceVoucherId: $normalizedReason';
+      final reversalJournalId = await txn.insert('journal_entries', {
+        'entry_date': correctionDate,
+        'description': reverseDescription,
+        'is_posted': 1,
+      });
+      for (final line in originalLines) {
+        final accountId = (line['account_id'] as num).toInt();
+        final debit = (line['debit'] as num).toDouble();
+        final credit = (line['credit'] as num).toDouble();
+        await txn.insert('journal_lines', {
+          'journal_entry_id': reversalJournalId,
+          'account_id': accountId,
+          'debit': credit,
+          'credit': debit,
+          'cost_center_id': line['cost_center_id'],
+          'description': reverseDescription,
+        });
+        await _updateBalanceTx(txn, accountId, credit, debit);
+      }
+      final reversalVoucherId = await txn.insert('vouchers', {
+        'voucher_type': 'عكس قبض مستأجر',
+        'voucher_date': correctionDate,
+        'amount': sourceAmount,
+        'tenant_id': tenantId,
+        'party_name': source['party_name'] ?? tenantRows.first['name'],
+        'journal_entry_id': reversalJournalId,
+        'description': reverseDescription,
+      });
+
+      final replacementJournalDescription =
+          'سند قبض بديل للسند $sourceVoucherId — $normalizedDescription';
+      final replacementJournalId = await txn.insert('journal_entries', {
+        'entry_date': correctionDate,
+        'description': replacementJournalDescription,
+        'is_posted': 1,
+      });
+      final targetCostCenterId = await _installmentCostCenterTx(
+        txn,
+        replacementInstallmentId,
+      );
+      await txn.insert('journal_lines', {
+        'journal_entry_id': replacementJournalId,
+        'account_id': cashAccountId,
+        'debit': correctedAmount,
+        'credit': 0.0,
+        'description': replacementJournalDescription,
+      });
+      await txn.insert('journal_lines', {
+        'journal_entry_id': replacementJournalId,
+        'account_id': tenantAccountId,
+        'debit': 0.0,
+        'credit': correctedAmount,
+        'cost_center_id': targetCostCenterId,
+        'description': replacementJournalDescription,
+      });
+      await _updateBalanceTx(txn, cashAccountId, correctedAmount, 0.0);
+      await _updateBalanceTx(txn, tenantAccountId, 0.0, correctedAmount);
+      final replacementVoucherId = await txn.insert('vouchers', {
+        'voucher_type': 'قبض مستأجر',
+        'voucher_date': correctionDate,
+        'amount': correctedAmount,
+        'tenant_id': tenantId,
+        'party_name': source['party_name'] ?? tenantRows.first['name'],
+        'journal_entry_id': replacementJournalId,
+        'description': normalizedDescription,
+      });
+      await txn.insert('voucher_installment_allocations', {
+        'voucher_id': replacementVoucherId,
+        'installment_id': replacementInstallmentId,
+        'amount': correctedAmount,
+      });
+      final actorId = await _verifiedAuditUserId(txn);
+      await txn.insert('collection_allocations', {
+        'voucher_id': replacementVoucherId,
+        'installment_id': replacementInstallmentId,
+        'invoice_id': null,
+        'amount_minor': correctedMinor,
+        'rent_amount_minor': correctedMinor,
+        'tax_amount_minor': 0,
+        'created_by': actorId,
+      });
+
+      final correctionId = await txn.insert('tenant_receipt_corrections', {
+        'source_receipt_voucher_id': sourceVoucherId,
+        'reversal_voucher_id': reversalVoucherId,
+        'replacement_receipt_voucher_id': replacementVoucherId,
+        'reason': normalizedReason,
+        'created_at': DateTime.now().toIso8601String(),
+        'created_by': actorId,
+      });
+      for (final allocation in sourceAllocations) {
+        await txn.insert('tenant_receipt_correction_allocations', {
+          'correction_id': correctionId,
+          'collection_allocation_id': allocation['id'],
+          'amount_minor': allocation['amount_minor'],
+          'created_by': actorId,
+        });
+      }
+
+      for (final installmentId in affectedInstallmentIds) {
+        final old = oldInstallments[installmentId]!;
+        final oldPaid = (old['paid_amount'] as num?)?.toDouble() ?? 0;
+        final oldPaidMinor = InternalTax.toMinorUnits(oldPaid);
+        final totalMinor = InternalTax.toMinorUnits(
+          (old['amount'] as num).toDouble(),
+        );
+        final newPaidMinor =
+            oldPaidMinor -
+            (sourceByInstallment[installmentId] ?? 0) +
+            (installmentId == replacementInstallmentId ? correctedMinor : 0);
+        if (newPaidMinor < 0 || newPaidMinor > totalMinor) {
+          throw StateError('تغيير رصيد القسط الناتج غير صالح؛ أُلغيت المعاملة');
+        }
+        final status = newPaidMinor == 0
+            ? 'Unpaid'
+            : newPaidMinor >= totalMinor
+            ? 'Paid'
+            : 'Partially Paid';
+        final changed = await txn.update(
+          'contract_installments',
+          {'paid_amount': newPaidMinor / 100.0, 'status': status},
+          where: 'id = ? AND paid_amount = ?',
+          whereArgs: [installmentId, oldPaid],
+        );
+        if (changed != 1) {
+          throw StateError('تغير رصيد القسط أثناء التصحيح؛ أُلغيت المعاملة');
+        }
+      }
+      await _recordAuditTx(
+        txn,
+        action: 'TENANT_RECEIPT_CORRECTED',
+        entityType: 'voucher',
+        entityId: sourceVoucherId,
+        amountMinor: sourceMinor,
+        details: {
+          'source_receipt_voucher_id': sourceVoucherId,
+          'source_amount_minor': sourceMinor,
+          'reversal_voucher_id': reversalVoucherId,
+          'reversal_journal_entry_id': reversalJournalId,
+          'replacement_receipt_voucher_id': replacementVoucherId,
+          'replacement_journal_entry_id': replacementJournalId,
+          'replacement_amount_minor': correctedMinor,
+          'replacement_installment_id': replacementInstallmentId,
+          'correction_date': correctionDate,
+          'reason': normalizedReason,
+          'new_description': normalizedDescription,
+        },
+      );
+      return replacementVoucherId;
+    });
+  }
+
   Future<Map<String, dynamic>?> getTenantReceiptVoucherDetails(
     int voucherId,
   ) async {
@@ -8998,12 +9755,43 @@ class DatabaseHelper {
       ''',
       [voucherId],
     );
+    final receiptCorrections = await db.rawQuery(
+      '''
+      SELECT
+        correction.id AS correction_id,
+        correction.source_receipt_voucher_id AS source_voucher_id,
+        source.voucher_date AS source_date,
+        source.amount AS source_amount,
+        source.description AS source_description,
+        correction.reversal_voucher_id AS reversal_voucher_id,
+        reversal.voucher_date AS reversal_date,
+        reversal.amount AS reversal_amount,
+        correction.replacement_receipt_voucher_id AS replacement_voucher_id,
+        replacement.voucher_date AS replacement_date,
+        replacement.amount AS replacement_amount,
+        replacement.description AS replacement_description,
+        correction.reason,
+        correction.created_at
+      FROM tenant_receipt_corrections correction
+      JOIN vouchers source
+        ON source.id = correction.source_receipt_voucher_id
+      JOIN vouchers reversal ON reversal.id = correction.reversal_voucher_id
+      JOIN vouchers replacement
+        ON replacement.id = correction.replacement_receipt_voucher_id
+      WHERE correction.source_receipt_voucher_id = ?
+         OR correction.reversal_voucher_id = ?
+         OR correction.replacement_receipt_voucher_id = ?
+      ORDER BY correction.id
+      ''',
+      [voucherId, voucherId, voucherId],
+    );
     return {
       'voucher': headers.first,
       'journal_lines': lines,
       'installments': installments,
       'invoices': invoices,
       'refunds': refunds,
+      'receipt_corrections': receiptCorrections,
       'owner_settlement': ownerSettlementRows.isEmpty
           ? null
           : ownerSettlementRows.first,
@@ -11508,6 +12296,107 @@ class DatabaseHelper {
               THEN 'المصدر متسق وتحت السقف' ELSE allocation_status
               END AS source_consistency_status
           FROM refund_audit_base
+        ), correction_reversal_audit_base AS (
+          SELECT
+            reversal.id AS voucher_id,
+            reversal.voucher_date AS voucher_date,
+            reversal.tenant_id AS tenant_id,
+            COALESCE(tenant.name, reversal.party_name, 'غير محدد') AS tenant_name,
+            -ABS(CAST(ROUND(reversal.amount * 100) AS INTEGER)) AS amount_minor,
+            COALESCE((
+              SELECT SUM(allocation.amount_minor)
+              FROM tenant_receipt_correction_allocations allocation
+              WHERE allocation.correction_id = correction.id
+            ), 0) AS linked_allocation_minor,
+            CAST(source.id AS TEXT) AS source_receipt_voucher_ids,
+            correction.replacement_receipt_voucher_id
+              AS replacement_receipt_voucher_id,
+            correction.reason AS correction_reason,
+            CASE
+              WHEN reversal.voucher_type != 'عكس قبض مستأجر'
+                OR source.voucher_type != 'قبض مستأجر'
+                OR replacement.voucher_type != 'قبض مستأجر'
+                THEN 'نوع مستند التصحيح غير صحيح'
+              WHEN reversal.tenant_id IS NULL
+                OR reversal.tenant_id != source.tenant_id
+                OR replacement.tenant_id != source.tenant_id
+                THEN 'المستأجر في مجموعة التصحيح غير متطابق'
+              WHEN reversal_journal.is_posted != 1
+                OR source_journal.is_posted != 1
+                OR replacement_journal.is_posted != 1
+                THEN 'أحد قيود مجموعة التصحيح غير مرحّل'
+              WHEN COALESCE(correction_journal_integrity.journals_match, 0) != 1
+                THEN 'قيود مجموعة التصحيح لا تطابق الحسابات أو مرتبطة بأكثر من مستند'
+              WHEN CAST(ROUND(reversal.amount * 100) AS INTEGER) !=
+                CAST(ROUND(source.amount * 100) AS INTEGER)
+                THEN 'مبلغ قيد العكس لا يطابق الأصل'
+              WHEN COALESCE((
+                SELECT SUM(allocation.amount_minor)
+                FROM tenant_receipt_correction_allocations allocation
+                WHERE allocation.correction_id = correction.id
+              ), 0) != CAST(ROUND(source.amount * 100) AS INTEGER)
+                THEN 'تخصيصات عكس الأصل غير مكتملة'
+              WHEN (
+                SELECT COUNT(*)
+                FROM tenant_receipt_correction_allocations allocation
+                WHERE allocation.correction_id = correction.id
+              ) != (
+                SELECT COUNT(*) FROM collection_allocations allocation
+                WHERE allocation.voucher_id = source.id
+              ) THEN 'عدد تخصيصات العكس لا يطابق الأصل'
+              WHEN CAST(ROUND(COALESCE((
+                SELECT SUM(line.debit) FROM journal_lines line
+                WHERE line.journal_entry_id = reversal.journal_entry_id
+              ), 0) * 100) AS INTEGER) !=
+                CAST(ROUND(reversal.amount * 100) AS INTEGER)
+                OR CAST(ROUND(COALESCE((
+                  SELECT SUM(line.credit) FROM journal_lines line
+                  WHERE line.journal_entry_id = reversal.journal_entry_id
+                ), 0) * 100) AS INTEGER) !=
+                CAST(ROUND(reversal.amount * 100) AS INTEGER)
+                THEN 'قيد العكس غير متوازن أو لا يطابق الأصل'
+              ELSE 'عكس تصحيح مكتمل'
+            END AS allocation_status
+          FROM tenant_receipt_corrections correction
+          JOIN vouchers source
+            ON source.id = correction.source_receipt_voucher_id
+          JOIN vouchers reversal
+            ON reversal.id = correction.reversal_voucher_id
+          JOIN vouchers replacement
+            ON replacement.id = correction.replacement_receipt_voucher_id
+          LEFT JOIN tenants tenant ON tenant.id = reversal.tenant_id
+          LEFT JOIN journal_entries source_journal
+            ON source_journal.id = source.journal_entry_id
+          LEFT JOIN journal_entries reversal_journal
+            ON reversal_journal.id = reversal.journal_entry_id
+          LEFT JOIN journal_entries replacement_journal
+            ON replacement_journal.id = replacement.journal_entry_id
+          LEFT JOIN tenant_receipt_correction_journal_integrity
+            correction_journal_integrity
+            ON correction_journal_integrity.correction_id = correction.id
+          WHERE reversal.voucher_date >= ?
+            AND reversal.voucher_date < ?
+        ), correction_reversal_audit AS (
+          SELECT
+            voucher_id,
+            voucher_date,
+            tenant_id,
+            tenant_name,
+            amount_minor,
+            linked_allocation_minor,
+            source_receipt_voucher_ids,
+            replacement_receipt_voucher_id,
+            correction_reason,
+            allocation_status,
+            CASE WHEN allocation_status = 'عكس تصحيح مكتمل' THEN 1 ELSE 0
+              END AS is_verified_correction_reversal,
+            CASE WHEN allocation_status = 'عكس تصحيح مكتمل' THEN 0 ELSE 1
+              END AS source_mismatch_count,
+            CASE WHEN allocation_status = 'عكس تصحيح مكتمل'
+              THEN 'عكس محاسبي غير نقدي مرتبط بالأصل والبديل'
+              ELSE allocation_status
+              END AS source_consistency_status
+          FROM correction_reversal_audit_base
         ), report_rows AS (
           SELECT
             v.id AS voucher_id,
@@ -11518,6 +12407,8 @@ class DatabaseHelper {
             CAST(ROUND(v.amount * 100) AS INTEGER) AS amount_minor,
             COALESCE(ra.allocated_minor, 0) AS linked_allocation_minor,
             '' AS source_receipt_voucher_ids,
+            NULL AS replacement_receipt_voucher_id,
+            '' AS correction_reason,
             CASE
               WHEN v.amount <= 0 THEN 'مبلغ السند غير صالح'
               WHEN COALESCE(ra.allocated_minor, 0) =
@@ -11539,7 +12430,9 @@ class DatabaseHelper {
             END AS source_consistency_status,
             COALESCE(source_issues.source_mismatch_count, 0)
               AS source_mismatch_count,
-            0 AS is_verified_refund
+            0 AS is_verified_refund,
+            0 AS is_correction_reversal,
+            0 AS is_verified_correction_reversal
           FROM vouchers v
           JOIN tenants t ON t.id = v.tenant_id
           JOIN journal_entries je
@@ -11563,17 +12456,44 @@ class DatabaseHelper {
             audit.amount_minor,
             audit.linked_allocation_minor,
             audit.source_receipt_voucher_ids,
+            NULL AS replacement_receipt_voucher_id,
+            '' AS correction_reason,
             audit.allocation_status,
             audit.source_consistency_status,
             audit.source_mismatch_count,
-            audit.is_verified_refund
+            audit.is_verified_refund,
+            0 AS is_correction_reversal,
+            0 AS is_verified_correction_reversal
           FROM refund_audit audit
+
+          UNION ALL
+
+          SELECT
+            audit.voucher_id,
+            audit.voucher_date,
+            audit.tenant_id,
+            audit.tenant_name,
+            0 AS is_refund,
+            audit.amount_minor,
+            audit.linked_allocation_minor,
+            audit.source_receipt_voucher_ids,
+            audit.replacement_receipt_voucher_id,
+            audit.correction_reason,
+            audit.allocation_status,
+            audit.source_consistency_status,
+            audit.source_mismatch_count,
+            0 AS is_verified_refund,
+            1 AS is_correction_reversal,
+            audit.is_verified_correction_reversal
+          FROM correction_reversal_audit audit
         )
         SELECT * FROM report_rows
         WHERE (? IS NULL OR tenant_id = ?)
         ORDER BY voucher_date, voucher_id, is_refund
         ''',
         [
+          startDate,
+          exclusiveEndDate,
           startDate,
           exclusiveEndDate,
           startDate,
@@ -11622,6 +12542,14 @@ class DatabaseHelper {
                 isRefund: (row['is_refund'] as num).toInt() == 1,
                 isVerifiedRefund:
                     (row['is_verified_refund'] as num).toInt() == 1,
+                isCorrectionReversal:
+                    (row['is_correction_reversal'] as num).toInt() == 1,
+                isVerifiedCorrectionReversal:
+                    (row['is_verified_correction_reversal'] as num).toInt() ==
+                    1,
+                replacementReceiptVoucherId:
+                    (row['replacement_receipt_voucher_id'] as num?)?.toInt(),
+                correctionReason: row['correction_reason']?.toString(),
                 amountMinor: (row['amount_minor'] as num).toInt(),
                 allocationStatus:
                     row['allocation_status']?.toString() ?? 'غير محدد',
@@ -12228,13 +13156,143 @@ class DatabaseHelper {
         }
       }
 
+      final correctionDetails = await txn.rawQuery(
+        '''
+        SELECT correction.id AS correction_id,
+               correction.source_receipt_voucher_id,
+               correction.reversal_voucher_id,
+               correction.replacement_receipt_voucher_id,
+               reversal.voucher_date AS reversal_date,
+               reversal.amount AS reversal_amount,
+               reversal.tenant_id AS reversal_tenant_id,
+               reversal_journal.is_posted AS reversal_is_posted,
+               source.tenant_id AS source_tenant_id,
+               source_tenant.name AS source_tenant_name,
+               source.voucher_type AS source_voucher_type,
+               source.amount AS source_amount,
+               replacement.tenant_id AS replacement_tenant_id,
+               replacement.voucher_type AS replacement_voucher_type,
+               replacement_journal.is_posted AS replacement_is_posted,
+               correction_journal_integrity.journals_match
+                 AS correction_journals_match,
+               allocation.collection_allocation_id,
+               allocation.amount_minor AS corrected_minor,
+               source_allocation.amount_minor AS source_allocation_minor,
+               source_allocation.rent_amount_minor,
+               source_allocation.tax_amount_minor,
+               source_allocation.invoice_id,
+               source_allocation.installment_id
+        FROM tenant_receipt_corrections correction
+        JOIN vouchers reversal ON reversal.id = correction.reversal_voucher_id
+        JOIN journal_entries reversal_journal
+          ON reversal_journal.id = reversal.journal_entry_id
+        JOIN vouchers source ON source.id = correction.source_receipt_voucher_id
+        LEFT JOIN tenants source_tenant ON source_tenant.id = source.tenant_id
+        LEFT JOIN tenant_receipt_correction_journal_integrity
+          correction_journal_integrity
+          ON correction_journal_integrity.correction_id = correction.id
+        JOIN vouchers replacement
+          ON replacement.id = correction.replacement_receipt_voucher_id
+        JOIN journal_entries replacement_journal
+          ON replacement_journal.id = replacement.journal_entry_id
+        JOIN tenant_receipt_correction_allocations allocation
+          ON allocation.correction_id = correction.id
+        JOIN collection_allocations source_allocation
+          ON source_allocation.id = allocation.collection_allocation_id
+        WHERE reversal.voucher_type = 'عكس قبض مستأجر'
+          AND reversal.voucher_date < ?
+        ORDER BY reversal.voucher_date, reversal.id, allocation.id
+        ''',
+        [exclusiveEndDate],
+      );
+      final correctionDetailsById = <int, List<Map<String, Object?>>>{};
+      for (final row in correctionDetails) {
+        final id = (row['correction_id'] as num).toInt();
+        correctionDetailsById.putIfAbsent(id, () => []).add(row);
+      }
+      final correctedBySource = <int, int>{};
+      for (final entry in correctionDetailsById.entries) {
+        final rows = entry.value;
+        final first = rows.first;
+        final correctionDate = dateOnly(first['reversal_date']);
+        final sourceVoucherId = (first['source_receipt_voucher_id'] as num)
+            .toInt();
+        final tenantId = (first['reversal_tenant_id'] as num?)?.toInt();
+        final sourceAmount = minor(first['source_amount']);
+        final reversalAmount = minor(first['reversal_amount']);
+        var correctedMinor = 0;
+        var invalid =
+            !isCalendarDate(correctionDate) ||
+            (first['reversal_is_posted'] as num?)?.toInt() != 1 ||
+            (first['replacement_is_posted'] as num?)?.toInt() != 1 ||
+            (first['correction_journals_match'] as num?)?.toInt() != 1 ||
+            first['source_voucher_type'] != 'قبض مستأجر' ||
+            first['replacement_voucher_type'] != 'قبض مستأجر' ||
+            tenantId == null ||
+            tenantId != (first['source_tenant_id'] as num?)?.toInt() ||
+            tenantId != (first['replacement_tenant_id'] as num?)?.toInt() ||
+            sourceAmount <= 0 ||
+            reversalAmount != sourceAmount;
+        final sourceTotals = <int, int>{};
+        for (final row in rows) {
+          final allocationId = (row['collection_allocation_id'] as num).toInt();
+          final amount = (row['corrected_minor'] as num).toInt();
+          final sourceAllocationAmount = (row['source_allocation_minor'] as num)
+              .toInt();
+          final source = acceptedSourceAllocations[allocationId];
+          correctedMinor += amount;
+          sourceTotals[allocationId] =
+              (sourceTotals[allocationId] ?? 0) + amount;
+          if (amount <= 0 ||
+              amount != sourceAllocationAmount ||
+              row['invoice_id'] != null ||
+              (row['tax_amount_minor'] as num).toInt() != 0 ||
+              (row['rent_amount_minor'] as num).toInt() != amount ||
+              source == null ||
+              source['voucher_id'] != sourceVoucherId ||
+              source['tenant_id'] != tenantId ||
+              correctionDate.compareTo(
+                    source['voucher_date']?.toString() ?? '9999',
+                  ) <
+                  0) {
+            invalid = true;
+          }
+        }
+        if (correctedMinor != sourceAmount || rows.isEmpty) invalid = true;
+        for (final allocationEntry in sourceTotals.entries) {
+          final source = acceptedSourceAllocations[allocationEntry.key];
+          final cap = (source?['amount_minor'] as int?) ?? 0;
+          if (allocationEntry.value != cap ||
+              (refundedBySource[allocationEntry.key] ?? 0) > 0 ||
+              (correctedBySource[allocationEntry.key] ?? 0) > 0) {
+            invalid = true;
+          }
+        }
+        if (invalid) {
+          addException(
+            id: entry.key,
+            date: correctionDate,
+            type: 'عكس تصحيح قبض',
+            tenant: first['source_tenant_name']?.toString() ?? 'غير محدد',
+            amount: sourceAmount,
+            reason:
+                'مجموعة عكس/بديل القبض غير مكتملة أو غير متسقة؛ لم يُخصم عكس التصحيح من الذمم.',
+          );
+          continue;
+        }
+        for (final allocationEntry in sourceTotals.entries) {
+          correctedBySource[allocationEntry.key] = allocationEntry.value;
+        }
+      }
+
       final paidByInstallment = <int, int>{};
       for (final entry in acceptedSourceAllocations.entries) {
         final allocation = entry.value;
         final installmentId = allocation['installment_id'] as int;
         final netAmount =
             (allocation['amount_minor'] as int) -
-            (refundedBySource[entry.key] ?? 0);
+            (refundedBySource[entry.key] ?? 0) -
+            (correctedBySource[entry.key] ?? 0);
         paidByInstallment[installmentId] =
             (paidByInstallment[installmentId] ?? 0) + netAmount;
       }
