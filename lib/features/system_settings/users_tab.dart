@@ -309,6 +309,145 @@ class _UsersTabState extends State<UsersTab> {
     }
   }
 
+  Future<void> _showResetPasswordDialog(Map<String, dynamic> user) async {
+    final userId = (user['id'] as num).toInt();
+    final fullName = user['full_name']?.toString() ?? '';
+    final formKey = GlobalKey<FormState>();
+    final temporaryPasswordController = TextEditingController();
+    final confirmationController = TextEditingController();
+    var saving = false;
+
+    try {
+      final didReset = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: Text('إعادة تعيين رمز $fullName'),
+            content: SizedBox(
+              width: 440,
+              child: Form(
+                key: formKey,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'سيُستبدل الرمز الحالي برمز مؤقت. بعد تسجيل الدخول به، سيُطلب من المستخدم اختيار رمز جديد من 4 أو 5 أرقام.',
+                      ),
+                      const SizedBox(height: 16),
+                      TextFormField(
+                        controller: temporaryPasswordController,
+                        keyboardType: TextInputType.number,
+                        obscureText: true,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(
+                            RegExp(r'[0-9٠-٩۰-۹]'),
+                          ),
+                          LengthLimitingTextInputFormatter(5),
+                        ],
+                        decoration: const InputDecoration(
+                          labelText: 'الرمز المؤقت',
+                          helperText: '4 أو 5 أرقام',
+                          prefixIcon: Icon(Icons.lock_outline_rounded),
+                        ),
+                        validator: (value) =>
+                            CryptoUtils.isValidNumericPin(value ?? '')
+                            ? null
+                            : 'أدخل رمزًا من 4 أو 5 أرقام',
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: confirmationController,
+                        keyboardType: TextInputType.number,
+                        obscureText: true,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(
+                            RegExp(r'[0-9٠-٩۰-۹]'),
+                          ),
+                          LengthLimitingTextInputFormatter(5),
+                        ],
+                        decoration: const InputDecoration(
+                          labelText: 'تأكيد الرمز المؤقت',
+                          prefixIcon: Icon(Icons.lock_reset_rounded),
+                        ),
+                        validator: (value) =>
+                            value == temporaryPasswordController.text
+                            ? null
+                            : 'الرمزان غير متطابقين',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: saving
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(false),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton.icon(
+                onPressed: saving
+                    ? null
+                    : () async {
+                        if (!formKey.currentState!.validate()) return;
+                        setDialogState(() => saving = true);
+                        try {
+                          final updated = await DatabaseHelper.instance
+                              .resetUserPassword(
+                                userId: userId,
+                                temporaryPassword:
+                                    temporaryPasswordController.text,
+                              );
+                          if (updated == 0) {
+                            throw StateError('لم يتم العثور على المستخدم');
+                          }
+                          if (dialogContext.mounted) {
+                            Navigator.of(dialogContext).pop(true);
+                          }
+                        } catch (error) {
+                          if (!dialogContext.mounted) return;
+                          setDialogState(() => saving = false);
+                          ScaffoldMessenger.of(dialogContext).showSnackBar(
+                            SnackBar(
+                              content: Text('تعذر إعادة تعيين الرمز: $error'),
+                            ),
+                          );
+                        }
+                      },
+                icon: saving
+                    ? const SizedBox(
+                        width: 17,
+                        height: 17,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.lock_reset_rounded),
+                label: Text(saving ? 'جارٍ الحفظ...' : 'تعيين الرمز المؤقت'),
+              ),
+            ],
+          ),
+        ),
+      );
+
+      if (didReset == true && mounted) {
+        await _loadUsers();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'تم تعيين الرمز المؤقت لـ $fullName؛ سيُطلب تغييره عند الدخول التالي.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      temporaryPasswordController.dispose();
+      confirmationController.dispose();
+    }
+  }
+
   Future<void> _setUserActive(
     Map<String, dynamic> user, {
     required bool isActive,
@@ -683,6 +822,11 @@ class _UsersTabState extends State<UsersTab> {
                       userId != currentUserId &&
                       (role != 'SuperAdmin' ||
                           auth.currentUser?.role == 'SuperAdmin');
+                  final canResetPassword =
+                      canEdit &&
+                      userId != currentUserId &&
+                      (role != 'SuperAdmin' ||
+                          auth.currentUser?.role == 'SuperAdmin');
                   return DataRow(
                     cells: [
                       DataCell(Text(userId.toString())),
@@ -710,6 +854,15 @@ class _UsersTabState extends State<UsersTab> {
                                   ? () => _showEditUserDialog(user)
                                   : null,
                               icon: const Icon(Icons.edit_outlined),
+                            ),
+                            IconButton(
+                              tooltip: userId == currentUserId
+                                  ? 'لا يمكن إعادة تعيين رمز الحساب الحالي من هذه الشاشة'
+                                  : 'إعادة تعيين الرمز وإلزام المستخدم بتغييره',
+                              onPressed: canResetPassword
+                                  ? () => _showResetPasswordDialog(user)
+                                  : null,
+                              icon: const Icon(Icons.lock_reset_rounded),
                             ),
                             IconButton(
                               tooltip: userId == currentUserId

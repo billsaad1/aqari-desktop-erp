@@ -65,6 +65,8 @@ class AuthProvider with ChangeNotifier {
       } else {
         final passwordHash = userMap['password_hash']?.toString() ?? '';
         final user = User.fromMap(userMap);
+        final mustChangePassword =
+            user.mustChangePassword || !CryptoUtils.isValidNumericPin(password);
         if (!CryptoUtils.verifyPassword(password, passwordHash)) {
           if (user.id != null) {
             await DatabaseHelper.instance.recordFailedLoginAttempt(
@@ -111,7 +113,10 @@ class AuthProvider with ChangeNotifier {
               role: user.role,
               permissionRows: permissions,
             );
-            _currentUser = user;
+            _currentUser = User.fromMap({
+              ...userMap,
+              'must_change_password': mustChangePassword ? 1 : 0,
+            });
             _sessionPasswordHash = passwordHash;
             await DatabaseHelper.instance.recordAuthenticationAudit(
               expectedUserId: user.id!,
@@ -122,12 +127,16 @@ class AuthProvider with ChangeNotifier {
               return false;
             }
 
-            if (CryptoUtils.isLegacyHash(passwordHash)) {
-              final upgradedHash = CryptoUtils.hashPassword(password);
+            final isLegacyHash = CryptoUtils.isLegacyHash(passwordHash);
+            if (isLegacyHash ||
+                (mustChangePassword && !user.mustChangePassword)) {
+              final upgradedHash = isLegacyHash
+                  ? CryptoUtils.hashPassword(password)
+                  : passwordHash;
               await DatabaseHelper.instance.updateUserPassword(
                 user.id!,
                 upgradedHash,
-                mustChangePassword: user.mustChangePassword,
+                mustChangePassword: mustChangePassword,
               );
               if (!_isCurrentGeneration(generation) ||
                   _currentUser?.id != user.id) {
