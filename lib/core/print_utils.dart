@@ -828,7 +828,6 @@ class PrintUtils {
                     child: pw.Align(
                       alignment: pw.Alignment.centerRight,
                       child: pw.Row(
-                        textDirection: pw.TextDirection.rtl,
                         mainAxisSize: showPaymentMethod && isReceipt
                             ? pw.MainAxisSize.max
                             : pw.MainAxisSize.min,
@@ -838,7 +837,6 @@ class PrintUtils {
                         crossAxisAlignment: pw.CrossAxisAlignment.center,
                         children: [
                           pw.Row(
-                            textDirection: pw.TextDirection.rtl,
                             mainAxisSize: pw.MainAxisSize.min,
                             children: [
                               pw.Text(
