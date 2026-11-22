@@ -8,6 +8,7 @@ import '../../database/database_helper.dart';
 import '../../core/print_utils.dart';
 import '../../core/pdf_preview_dialog.dart';
 import '../../core/permission_policy.dart';
+import 'tenant_receivable_sorter.dart';
 
 class TenantReceiptScreen extends StatefulWidget {
   const TenantReceiptScreen({super.key});
@@ -119,13 +120,9 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
           tenantId,
         ),
       ]);
-      final receivables = results[0];
-      if (!invoiceMode) {
-        receivables.sort(
-          (a, b) =>
-              a['due_date'].toString().compareTo(b['due_date'].toString()),
-        );
-      }
+      final receivables = invoiceMode
+          ? results[0]
+          : sortInstallmentsByDueDate(results[0]);
       if (!mounted ||
           requestId != _receivablesRequestId ||
           tenantId != _selectedTenantId ||
