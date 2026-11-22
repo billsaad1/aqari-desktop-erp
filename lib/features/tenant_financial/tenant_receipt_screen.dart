@@ -319,6 +319,8 @@ class _TenantReceiptScreenState extends State<TenantReceiptScreen> {
       _openTaxInvoices = [];
       _amountController.clear();
       _descriptionController.clear();
+      _paymentReferenceController.clear();
+      _paymentBankNameController.clear();
       _legacyPayments = [];
       _legacyInvoices = [];
       _legacyPaymentsError = null;
