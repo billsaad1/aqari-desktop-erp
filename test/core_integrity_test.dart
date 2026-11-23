@@ -2323,10 +2323,6 @@ void main() {
         description: 'دفعة إيجار اختبارية',
         periodStartDate: '2026-11-01',
         periodEndDate: '2026-11-30',
-        journalLines: [
-          {'account_name': 'الصندوق الرئيسي', 'debit': 1250.5, 'credit': 0},
-          {'account_name': 'حساب المستأجر', 'debit': 0, 'credit': 1250.5},
-        ],
         installmentAllocations: [
           {
             'property_name': 'عقار الاختبار',
@@ -2339,12 +2335,11 @@ void main() {
         ],
       );
       expect(String.fromCharCodes(detailedVoucherPdf.take(5)), '%PDF-');
-      expect(detailedVoucherPdf.length, greaterThan(pdf.length));
       final detailedPdfText = latin1.decode(detailedVoucherPdf);
       final detailedPdfPageCount = RegExp(
         r'/Type\s*/Page\b',
       ).allMatches(detailedPdfText).length;
-      expect(detailedPdfPageCount, 2);
+      expect(detailedPdfPageCount, 1);
       expect(PrintUtils.suggestedPdfName('سند قبض/17'), 'سند_قبض_17.pdf');
       expect(PrintUtils.currencyInArabic('YER'), 'ريال يمني');
       expect(PrintUtils.currencyInArabic('ريال سعودي (SAR)'), 'ريال سعودي');
@@ -3560,11 +3555,13 @@ void main() {
         amount: 25.0,
         accountName: 'الصندوق الرئيسي',
         description: 'رد مرتبط بالمصدر',
-        refundAllocations: refundLinks
-            .map((row) => Map<String, dynamic>.from(row as Map))
-            .toList(),
       );
       expect(refundPdf, isNotEmpty);
+      final refundPdfText = latin1.decode(refundPdf);
+      expect(
+        RegExp(r'/Type\s*/Page\b').allMatches(refundPdfText).length,
+        1,
+      );
       final remainingAfterPartialRefund = await DatabaseHelper.instance
           .getRefundableCollectionAllocations(tenantId);
       expect(

@@ -325,11 +325,6 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
     setState(() => _isWorking = true);
     try {
       final voucher = Map<String, dynamic>.from(_data!['voucher'] as Map);
-      final lines = List<Map<String, dynamic>>.from(
-        (_data!['journal_lines'] as List).map(
-          (line) => Map<String, dynamic>.from(line as Map),
-        ),
-      );
       final installments = List<Map<String, dynamic>>.from(
         (_data!['installments'] as List).map(
           (line) => Map<String, dynamic>.from(line as Map),
@@ -338,11 +333,6 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
       final invoices = List<Map<String, dynamic>>.from(
         (_data!['invoices'] as List).map(
           (invoice) => Map<String, dynamic>.from(invoice as Map),
-        ),
-      );
-      final refunds = List<Map<String, dynamic>>.from(
-        (_data!['refunds'] as List).map(
-          (refund) => Map<String, dynamic>.from(refund as Map),
         ),
       );
       final voucherType = voucher['voucher_type']?.toString() ?? '';
@@ -376,10 +366,8 @@ class _VoucherDetailsDialogState extends State<_VoucherDetailsDialog> {
         description: voucher['description']?.toString(),
         periodStartDate: periodFrom,
         periodEndDate: periodTo,
-        journalLines: lines,
         installmentAllocations: installments,
         invoiceAllocations: invoices,
-        refundAllocations: refunds,
       );
       if (mounted) {
         await PdfDocumentPreviewDialog.show(
