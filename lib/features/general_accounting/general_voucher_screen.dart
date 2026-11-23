@@ -218,30 +218,10 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
     try {
       final accounts = accountingProvider.accounts;
       final cashAccount = accounts.firstWhere((a) => a['id'] == _cashAccountId);
-      final isReceipt = widget.voucherType == 'قبض عام';
-      final journalLines = <Map<String, dynamic>>[
-        {
-          'account_name': '${cashAccount['code']} ${cashAccount['name']}',
-          'description': _descController.text.trim(),
-          'debit': isReceipt ? amount : 0.0,
-          'credit': isReceipt ? 0.0 : amount,
-        },
-        for (var index = 0; index < _lines.length; index++)
-          () {
-            final line = _lines[index];
-            final account = accounts.firstWhere(
-              (a) => a['id'] == line.accountId,
-            );
-            return <String, dynamic>{
-              'account_name': '${account['code']} ${account['name']}',
-              'description': line.descriptionController.text.trim(),
-              'debit': isReceipt ? 0.0 : lineAmounts[index],
-              'credit': isReceipt ? lineAmounts[index] : 0.0,
-            };
-          }(),
-      ];
       final pdfBytes = await PrintUtils.buildVoucherPdf(
-        voucherType: isReceipt ? 'سند قبض عام' : 'سند صرف عام',
+        voucherType: widget.voucherType == 'قبض عام'
+            ? 'سند قبض عام'
+            : 'سند صرف عام',
         voucherNo: voucherId,
         date: _dateController.text,
         targetName: null,
@@ -255,7 +235,6 @@ class _GeneralVoucherScreenState extends State<GeneralVoucherScreen> {
         periodEndDate: _periodToController.text.trim().isEmpty
             ? null
             : _periodToController.text.trim(),
-        journalLines: journalLines,
       );
       if (mounted) {
         await PdfDocumentPreviewDialog.show(

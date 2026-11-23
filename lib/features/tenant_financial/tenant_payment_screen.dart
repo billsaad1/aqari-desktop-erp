@@ -294,7 +294,6 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
             (account) => account['id'] == _selectedCashAccountId,
           )['name']
           .toString();
-      final sourceReceiptId = (source['receipt_voucher_id'] as num).toInt();
       final pdfBytes = await PrintUtils.buildVoucherPdf(
         voucherType: 'سند رد مستأجر',
         voucherNo: voucherId,
@@ -304,16 +303,6 @@ class _TenantPaymentScreenState extends State<TenantPaymentScreen> {
         paymentMethod: null,
         accountName: cashAccountName,
         description: _descController.text.trim(),
-        refundAllocations: [
-          {
-            'source_receipt_voucher_id': sourceReceiptId,
-            'source_receipt_date': source['receipt_date'],
-            'invoice_id': source['invoice_id'],
-            'credit_note_id': _selectedCreditNoteId,
-            'installment_id': source['installment_id'],
-            'allocated_amount': amount,
-          },
-        ],
       );
       if (mounted) {
         await PdfDocumentPreviewDialog.show(
